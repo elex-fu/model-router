@@ -22,10 +22,11 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { runRedisSaasRecoveryProfile, validateRecoveryProfile } from './redis-saas-recovery-profile.mjs';
 import { runPostgresSaasRecoveryProfile, validatePostgresRecoveryProfile } from './postgres-saas-recovery-profile.mjs';
+import { runPostgresSaasStandbyRecoveryProfile, validateStandbyRecoveryProfile } from './postgres-saas-standby-recovery-profile.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const args = process.argv.slice(2);
-const options = { pgBin: process.env.MODEL_ROUTER_TEST_PG_BIN, redisBin: 'redis-server', outputDir: undefined, diagnostic: false, serialProfile: false, capProfile: false, recoveryProfile: false, postgresRecoveryProfile: false, noBuild: false, requestSamples: false };
+const options = { pgBin: process.env.MODEL_ROUTER_TEST_PG_BIN, redisBin: 'redis-server', outputDir: undefined, diagnostic: false, serialProfile: false, capProfile: false, recoveryProfile: false, postgresRecoveryProfile: false, standbyRecoveryProfile: false, noBuild: false, requestSamples: false };
 for (let index = 0; index < args.length; index += 1) {
   const argument = args[index];
   if (argument === '--diagnostic') options.diagnostic = true;
@@ -33,12 +34,13 @@ for (let index = 0; index < args.length; index += 1) {
   else if (argument === '--cap-profile') options.capProfile = true;
   else if (argument === '--recovery-profile') options.recoveryProfile = true;
   else if (argument === '--postgres-recovery-profile') options.postgresRecoveryProfile = true;
+  else if (argument === '--standby-recovery-profile') options.standbyRecoveryProfile = true;
   else if (argument === '--request-samples') options.requestSamples = true;
   else if (argument === '--no-build') options.noBuild = true;
   else if (['--pg-bin', '--redis-bin', '--output-dir'].includes(argument) && args[index + 1]) {
     const key = { '--pg-bin': 'pgBin', '--redis-bin': 'redisBin', '--output-dir': 'outputDir' }[argument];
     options[key] = args[++index];
-  } else throw new Error('Usage: --pg-bin /path/to/pg16+/bin [--redis-bin /path/to/redis-server] [--output-dir /new/dir] [--diagnostic [--serial-profile [--request-samples] | --cap-profile --no-build | --recovery-profile --no-build | --postgres-recovery-profile --no-build]] [--no-build]');
+  } else throw new Error('Usage: --pg-bin /path/to/pg16+/bin [--redis-bin /path/to/redis-server] [--output-dir /new/dir] [--diagnostic [--serial-profile [--request-samples] | --cap-profile --no-build | --recovery-profile --no-build | --postgres-recovery-profile --no-build | --standby-recovery-profile --no-build]] [--no-build]');
 }
 assert.ok(!options.serialProfile || options.diagnostic, '--serial-profile requires --diagnostic');
 assert.ok(!options.requestSamples || (options.diagnostic && options.serialProfile), '--request-samples requires --diagnostic --serial-profile');
@@ -68,6 +70,7 @@ function validateCapProfile(configuration, cap) {
 validateCapProfile(options, gatewayMaxHttpInFlight);
 validateRecoveryProfile(options, requestDiagnostics.enabled, gatewayMaxHttpInFlight);
 validatePostgresRecoveryProfile(options, requestDiagnostics.enabled, gatewayMaxHttpInFlight);
+validateStandbyRecoveryProfile(options);
 assert.ok(options.pgBin, 'Set --pg-bin to an installed PostgreSQL 16+ binary directory');
 const pgBin = resolve(options.pgBin);
 for (const executable of ['initdb', 'pg_ctl', 'psql', 'postgres']) assert.ok(existsSync(join(pgBin, executable)), `Missing PostgreSQL binary ${executable}`);
@@ -88,6 +91,7 @@ const manifest = { schema: 1, startedAt: new Date().toISOString(), assembly: 'cu
   productionKmsVerified: false, builtinAcceptance: false, realProviderCalls: 0, diagnostic: options.diagnostic,
   ...(options.recoveryProfile ? { recoveryProfile: true, performanceAcceptance: false } : {}),
   ...(options.postgresRecoveryProfile ? { postgresRecoveryProfile: true, performanceAcceptance: false } : {}),
+  ...(options.standbyRecoveryProfile ? { standbyRecoveryProfile: true, performanceAcceptance: false } : {}),
   serialProfile: options.serialProfile, warmupInflight: options.serialProfile ? 1 : 4,
   capProfile: options.capProfile ? { diagnosticOnly: true, performanceAcceptance: false, cap: gatewayMaxHttpInFlight,
     inflight: 200, requestedSeconds: 60, minimumSuccessfulSamples: 100, pairedComparisonRequired: true } : null,
@@ -891,7 +895,21 @@ try {
     return { reportFile, ok };
   }
   if (options.diagnostic) {
-    if (options.postgresRecoveryProfile) {
+    if (options.standbyRecoveryProfile) {
+      const { createSaasDatabase } = await import(pathToFileURL(join(root, 'dist/saas/db/index.js')).href);
+      manifest.standbyRecovery = await runPostgresSaasStandbyRecoveryProfile({
+        pgBin, primaryDataDir: dataDir, primaryPort: pgPort, databaseName,
+        createDatabaseAt: (connectionString) => createSaasDatabase({ connectionString, max: 2 }),
+        requireRun: (stage, command, commandArgs, timeoutMs) => requireRun(stage, command, commandArgs, baseEnvironment, timeoutMs),
+        freePort, getDatabase: () => database, seed, gatewayUrls,
+        controlUrl: `http://127.0.0.1:${controlPort}`, outputDir, signal: recoveryAbort.signal,
+        beforeStopPrimary: async () => {
+          recoveryAbort.signal.throwIfAborted();
+          await database.close();
+          pgStarted = false;
+        },
+      });
+    } else if (options.postgresRecoveryProfile) {
       manifest.postgresRecovery = await runPostgresSaasRecoveryProfile({ getDatabase: () => database, seed, gatewayUrls,
         controlUrl: `http://127.0.0.1:${controlPort}`, outputDir, signal: recoveryAbort.signal,
         assertOtherProcessesAlive: () => {

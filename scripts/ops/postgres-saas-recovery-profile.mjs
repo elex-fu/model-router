@@ -7,7 +7,7 @@ import { readSaasRecoveryAuthority, assertRecoverySettlementDelta } from './redi
 
 export function validatePostgresRecoveryProfile(options, tracingEnabled, cap) {
   if (!options.postgresRecoveryProfile) return;
-  assert.ok(options.diagnostic && options.noBuild && !options.serialProfile && !options.capProfile && !options.recoveryProfile && !options.requestSamples,
+  assert.ok(options.diagnostic && options.noBuild && !options.serialProfile && !options.capProfile && !options.recoveryProfile && !options.requestSamples && !options.standbyRecoveryProfile,
     '--postgres-recovery-profile requires --diagnostic --no-build and excludes serial/cap/Redis recovery/request samples');
   assert.ok(!tracingEnabled && cap === null, 'PostgreSQL recovery requires request tracing and ingress cap unset');
 }
