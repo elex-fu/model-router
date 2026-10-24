@@ -1,6 +1,6 @@
 # 开发进度报告 — 2026-10-18（T05 + 真实模型验证）
 
-> **最新更新：2026-10-24。** Redis 与自托管实现边界见 **§28**；旧章节计数仅代表当时截点。可运营多租户模型 API 平台的最新实施见 **§29.52**：fixture同步与关键回归已推送`d45b221`，138/138及scoped strict通过；A0 CP就绪与安全子阶段诊断窄修已审查，分任务交付后进入新冻结候选验证。此前A0供应商调用为零，PG run05仍严格失败。用户已允许按需全部验证，下一批安排fresh build、A0、完整offline及原600秒PG恢复；M1/M2/M3与运营GO均开放。
+> **最新更新：2026-10-24。** Redis 与自托管实现边界见 **§28**；旧章节计数仅代表当时截点。可运营多租户模型 API 平台的最新验证见 **§29.53**：冻结工程候选`9d1eb3c`已fresh build、真实Kimi A0 3/3、完整offline零失败及自动CI 68/68通过；PG run06保留原600秒窗口，完整恢复、canonical全快照不变及新请求精确结算均通过。各临时资源已清理、输入/产物冻结证据齐全。后续真实CLI A1a在独立临时工作树实施，尚未验收；生产PSP/KMS/独立金融灾备、Codex可信计量及R9仍开放，M1/M2/M3与运营GO未关闭。
 
 > 基线：`93e7ffa`（core-capability-alignment-technical-plan 文档合并后）。本轮实施技术方案
 > `docs/core-capability-alignment-technical-plan-2026-10-18.md` 中 **T05（9.1 前半 + Grok 门禁接线）**，
@@ -1228,3 +1228,19 @@ Sol仅改原A0脚本，移除CP-only平台端口不支持的`/readyz=200`等待�
 原Redis/CP大阶段拆成固定spawn、Redis TCP及CP双监听子阶段。spawn显式等待spawn/error事件，只有安全errno白名单及固定错误；诊断仅有限signal、数值exit、connected布尔值及正式HTTP状态，不输出原error/stderr、URL、headers、body、环境或凭据。自有进程cleanup保留。没有推断首轮实际404/503，也不能恢复其已删除的runtime日志。
 
 Astra实际单文件差分复核通过，Luna上述scoped strict已覆盖此脚本。MFA→注册/资金→worker onboarding→verified→P01→显式Key→真实短生成顺序、一次max_tokens=8探针和一次max_tokens=32生成参数均保持，未新增重试或供应商调用。首轮正式A0在probe前失败，预算仍0；新完整执行、usage/settlement和cleanup结果另记。本项独立于已推送`d45b221`的fixture/回归任务提交，后续fresh build绑定全部交付后的确切SHA。
+
+### 29.53 冻结9d候选：真实Kimi A0、完整offline、PG原600秒恢复与CI通过
+
+fixture任务`d45b221`及A0就绪任务`9d1eb3c6350e0a97197160fdd0cb888690b02f71`已分别提交推送。Luna在后者tracked clean状态执行一次必要fresh `build:server`，exit0；完整src/scripts/tests及所选root/CI输入1721项、完整dist3164项的before/after精确一致。关键新增编译模块单独列证，未用入口文件旧hash推断更新、也不声称本次构建产生了内容变化。证据`/private/tmp/model-router-build-server.rSJ8NT`，原`.claude/worktrees/`保留。
+
+**正式Kimi新客首请求通过。** 第二正式A0使用上述确切candidate，`platform-access` suite **3/3**，9个runner stage均exit0。正常HTTP/MFA开户、资金、worker真实onboarding probe、verified账户入池、P01开通、显式创建客户Key、builtin Kimi首次生成及结算完整完成；request/attempt/usage/settlement各1，held leases=0、hold归零。`providerInferenceCallsExpected=2`仍只是源码路径预算字段，不冒充独立wire counter。运行的755项import closure及3164项完整dist前后精确一致，sourceChanges=[]、distChanged=false；PG停止删除、runtime清理成功。证据`/private/tmp/model-router-a0-platform-access-run02.Vct8Ge/runner-output/`。这证明本次配置材料可用于该受控正常闭环，不外推其它产品、真实第三方CLI或生产KMS。
+
+**完整offline通过。** 第一普通sandbox运行在TCP fixture遭`listen EPERM`，未到integration；保留该历史日志，不把环境拒绝标成源码缺陷。按用户完整验证授权，用必要权限运行同一CI入口`npm test`：unit 7100项（7077 pass/23 skip）、integration 363项（255 pass/108 skip），共7463 test events、**7332 pass/0 fail/131 skip**，两个阶段均确实执行。offline/live/PG opt-in跳过保留，不将其计为真实覆盖。完整1721项输入和3164项dist仍匹配build清单，证据`/private/tmp/model-router-luna-offline-escalated-20261024/`，目录700/日志600。
+
+**PG run06完整通过，未放宽原门槛。** `--no-build`复用同一build及16项critical-artifact核对，实际自有PG immediate stop/同目录同端口restart；慢流自然断开、clientTimeout=false，停机期三请求均503、mock新增0、inFlight=0。PG18.6数据库/地址/角色/端口和fsync/synchronous_commit=on保持，postmaster启动时间改变。原600000ms及5000ms cadence后恰1 `operator_required`、lastError=null；原unknown/reconciliation hold及8192 token/20480 charge预算保留，原过期lease仍无live held。
+
+随后canonical replay严格202/原canonical ID/完整JSON通过；afterReplay与afterScanner的全authority（包括11条lease）deep-equal，mock calls前后均1，零新增派发或金融效果。fresh C仅新增一request/attempt/evidence/usage/settlement/hold/ledger transaction及两ledger entries，input/output=8/4、lease released，精确结算一次；原unknown请求与保留资金不被释放。profile约607794ms、exit0/ok=true，11个子阶段均exit0，cleanup三项全true，source/dist/harnessChanged全false。证据`/private/tmp/model-router-p10-postgres-recovery-20261024-run-06/`，保留run05失败与缺失来源证据，不追溯认定其四条lease来源。此轮realProviderCalls=0、productionKmsVerified/builtinAcceptance/performanceAcceptance=false，不能外推独立副本、PITR、零丢失或生产HA。
+
+**同一候选自动CI通过。** [CI #169](https://github.com/elex-fu/model-router/actions/runs/40058135682)确切绑定9d完整SHA，API返回全部68/68 completed/success，含offline、PG15/18、PG16 deploy smoke及64 isolated。只读收集既有自动run，没有dispatch/rerun；历史#167的离线fixture失败及当时未收齐矩阵记录保留，不互换revision。
+
+此工程候选的本轮功能缺口已收敛。下一项A1仍需真实第三方客户端：现有Kimi tools/cancel用例是脚本HTTP流程，本项目built CLI证明服务器入口，不能充当第三方工具执行证据。本机Claude Code实际`--version/--help`已在独立配置/dummy key/loopback base环境核对为2.1.216；没有运行模型prompt。Astra设计最小capture-only→真实两轮Read场景，A1a只覆盖thinking disabled及相应usage/账务；在`/private/tmp/model-router-p0-cli-workflow-20261024`隔离工作树实施，主9d验证期间未改源码。thinking enabled、cancel/resume、未暴露backend revision及其它运营门槛仍独立开放。
