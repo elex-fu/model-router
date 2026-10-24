@@ -79,12 +79,13 @@ class FakeIncomingMessage extends EventEmitter {
     authorization: 'Bearer fake-proxy-key',
   };
   readonly method = 'POST';
-  readonly url = ENDPOINT_PATH;
+  readonly url: string;
   readonly body: Uint8Array;
   resumed = false;
 
-  constructor(body: unknown = CLIENT_REQUEST) {
+  constructor(body: unknown = CLIENT_REQUEST, url: string = ENDPOINT_PATH) {
     super();
+    this.url = url;
     this.body = new TextEncoder().encode(JSON.stringify(body));
   }
 
@@ -465,7 +466,13 @@ function preparationDependencies(
     payload: payloadCompiler(state),
     transaction: {
       async transaction(work) {
-        return work({} as never);
+        return work({
+          async query<Row>(sql: string, values: readonly unknown[] = []) {
+            assert.equal(sql, 'SET TRANSACTION ISOLATION LEVEL READ COMMITTED', 'unexpected fixture SQL');
+            assert.deepEqual(values, []);
+            return { rows: [] as Row[], rowCount: 0 };
+          },
+        });
       },
     },
     admission: {
@@ -1021,8 +1028,7 @@ test('4.3: /v1/tts rejects GET (405) and /v1/stt stays a precise 501 (multipart-
   // STT: the reserved multipart-only surface answers 501 with the precise
   // code, never a generic 404.
   const sttResponse = new FakeServerResponse();
-  const sttRequest = new FakeIncomingMessage();
-  sttRequest.url = '/v1/stt';
+  const sttRequest = new FakeIncomingMessage(CLIENT_REQUEST, '/v1/stt');
   assert.equal(await handler(asRequest(sttRequest), asResponse(sttResponse)), true);
   assert.equal(sttResponse.writeHeadCalls[0]?.status, 501);
   assert.equal(JSON.parse(sttResponse.bodyText()).error.code, 'MULTIPART_NOT_SUPPORTED');

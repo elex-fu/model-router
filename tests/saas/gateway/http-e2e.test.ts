@@ -18,6 +18,7 @@ import {
 } from '../../../src/saas/gateway/http-handler.js';
 import { PostgresProviderAccountScheduler } from '../../../src/saas/gateway/postgres-provider-account-scheduler.js';
 import {
+  type PreparedEvidenceDispatchResult,
   type PreparedEvidenceLeaseProvider,
   type PreparedEvidenceMeteringPort,
   SaasPreparedEvidenceDispatchService,
@@ -90,12 +91,13 @@ class FakeIncomingMessage extends EventEmitter {
     authorization: 'Bearer fake-proxy-key',
   };
   readonly method = 'POST';
-  readonly url = '/v1/chat/completions';
+  readonly url: string;
   readonly body: Uint8Array;
   resumed = false;
 
-  constructor(body: unknown = CLIENT_REQUEST) {
+  constructor(body: unknown = CLIENT_REQUEST, url: string = '/v1/chat/completions') {
     super();
+    this.url = url;
     this.body = new TextEncoder().encode(JSON.stringify(body));
   }
 
@@ -483,7 +485,13 @@ function preparationDependencies(
     payload,
     transaction: {
       async transaction(work) {
-        return work({} as never);
+        return work({
+          async query<Row>(sql: string, values: readonly unknown[] = []) {
+            assert.equal(sql, 'SET TRANSACTION ISOLATION LEVEL READ COMMITTED', 'unexpected fixture SQL');
+            assert.deepEqual(values, []);
+            return { rows: [] as Row[], rowCount: 0 };
+          },
+        });
       },
     },
     admission: {
@@ -1195,8 +1203,7 @@ function claudeOnlyGateway(
     system: [{ type: 'text', text: "You are Claude Code, Anthropic's official CLI for Claude." }],
     metadata: { user_id: 'user_e2b8a1c4d5f6a7b8c9d0e1f2a3b4c5d6' },
     messages: [{ role: 'user', content: 'hello from client' }],
-  });
-  request.url = '/v1/messages';
+  }, '/v1/messages');
   Object.assign(request.headers, { 'user-agent': userAgent, ...extraHeaders });
   return { handler, request, response: new FakeServerResponse(), statements, preparationState };
 }

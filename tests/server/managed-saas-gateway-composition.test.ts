@@ -2405,6 +2405,9 @@ test('production builder binds the real database transaction and does not alloca
   } as unknown as SaasDatabase;
   const endpointPolicy = { allowedHosts: ['provider.example'], allowedPorts: [443] } as const;
   const downstreamAdmissionInputs: unknown[] = [];
+  const admissionEvents: string[] = [];
+  let denyAfterExistingRead = false;
+  let authorizationDenied = false;
   const schedulerAffinity = {
     resolve: async () => ({ decision: 'allow' as const, accountId: null }),
   };
@@ -2413,7 +2416,20 @@ test('production builder binds the real database transaction and does not alloca
     entitlement: { resolve: async () => allowRequestPreparation(entitlement()) },
     schedulerAffinity,
     admission: {
+      revalidateAuthorization: async (input, options) => {
+        admissionEvents.push('revalidate');
+        assert.equal(options.executor, claimExecutor);
+        assert.deepEqual(input.caller, caller());
+        assert.deepEqual(input.entitlement, entitlement());
+        assert.equal(input.publicModel, authority().route.publicModel);
+        assert.equal(input.protocol, authority().route.protocol);
+        assert.equal(input.clientKey, 'client-retry-key');
+        assert.ok([REQUEST_A_ID, REQUEST_B_ID].includes(input.requestId));
+        if (authorizationDenied) return rejectRequestPreparation('entitlement_denied', 'Fixture authority is no longer active.');
+        return allowRequestPreparation(input.entitlement);
+      },
       authorizeAndReserve: async (input) => {
+        admissionEvents.push('admit');
         downstreamAdmissionInputs.push(input);
         return allowRequestPreparation(admission(input));
       },
@@ -2784,6 +2800,7 @@ test('production builder binds the real database transaction and does not alloca
   const claimExecutor: SqlExecutor = {
     async query<Row>(sql: string, values: readonly unknown[] = []) {
       if (sql.startsWith('INSERT INTO saas_gateway_request_idempotency_keys')) {
+        admissionEvents.push('claim');
         const [tenantId, projectId, proxyKeyId, keyDigest, fingerprint, version, requestId] = values;
         const identity = [tenantId, projectId, proxyKeyId, keyDigest].join('|');
         if (persisted.has(identity)) return { rows: [], rowCount: 0 };
@@ -2799,6 +2816,7 @@ test('production builder binds the real database transaction and does not alloca
         return { rows: [{ request_id: requestId } as Row], rowCount: 1 };
       }
       if (sql.startsWith('SELECT saas_gateway_request_idempotency_keys.request_fingerprint AS request_fingerprint,')) {
+        admissionEvents.push('lookup');
         const [tenantId, projectId, proxyKeyId, keyDigest] = values;
         const row = persisted.get([tenantId, projectId, proxyKeyId, keyDigest].join('|'));
         const canonicalRow = row
@@ -2810,6 +2828,7 @@ test('production builder binds the real database transaction and does not alloca
               canonical_request_fingerprint_version: row.request_fingerprint_version,
             }
           : null;
+        if (canonicalRow && denyAfterExistingRead) authorizationDenied = true;
         return { rows: canonicalRow ? [canonicalRow as Row] : [], rowCount: canonicalRow ? 1 : 0 };
       }
       return { rows: [], rowCount: 0 };
@@ -2848,6 +2867,7 @@ test('production builder binds the real database transaction and does not alloca
     { executor: claimExecutor },
   );
   assert.equal(firstClaim.decision, 'allow');
+  assert.deepEqual(admissionEvents, ['revalidate', 'claim', 'admit']);
   assert.equal(downstreamAdmissionInputs.length, 1);
   const forwarded = downstreamAdmissionInputs[0] as {
     idempotencyClaim?: { canonicalRequestId: string; keyDigest: string };
@@ -2866,7 +2886,22 @@ test('production builder binds the real database transaction and does not alloca
     assert.deepEqual(retry.canonicalRequest, { requestId: REQUEST_A_ID, status: 'completed' });
   }
   assert.equal(downstreamAdmissionInputs.length, 1);
+  assert.deepEqual(admissionEvents, ['revalidate', 'claim', 'admit', 'revalidate', 'claim', 'lookup', 'revalidate']);
   assert.equal([...persisted.values()][0].request_id, REQUEST_A_ID);
+  const beforeLateDenial = structuredClone([...persisted.entries()]);
+  const eventsBeforeLateDenial = admissionEvents.length;
+  denyAfterExistingRead = true;
+  const lateDenied = await dependencies.admission.authorizeAndReserve(wrappedAdmissionInput(REQUEST_B_ID, 'attempt-after-existing-read'), {
+    executor: claimExecutor,
+  });
+  assert.equal(lateDenied.decision, 'reject');
+  if (lateDenied.decision === 'reject') {
+    assert.equal(lateDenied.code, 'entitlement_denied');
+    assert.equal(lateDenied.canonicalRequest, undefined, 'a post-wait authorization refusal cannot expose a canonical request');
+  }
+  assert.deepEqual(admissionEvents.slice(eventsBeforeLateDenial), ['revalidate', 'claim', 'lookup', 'revalidate']);
+  assert.equal(downstreamAdmissionInputs.length, 1, 'a late authorization refusal never reaches financial admission');
+  assert.deepEqual([...persisted.entries()], beforeLateDenial, 'the existing canonical mapping remains unchanged');
   await composition.close();
 });
 

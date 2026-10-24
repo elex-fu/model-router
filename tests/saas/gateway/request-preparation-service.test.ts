@@ -7,6 +7,8 @@ import type {
   ModelResolutionProvenance,
 } from '../../../src/saas/gateway/contracts.js';
 import type { PostgresPreparationObservation } from '../../../src/saas/gateway/postgres-preparation-observer.js';
+import { createProviderPayloadCompiler } from '../../../src/saas/gateway/provider-payload-compiler.js';
+import type { GatewayRequestCanonicalCompilation } from '../../../src/saas/gateway/request-idempotency.js';
 import type {
   PreparedRequestEvidenceInput,
   PreparedRequestEvidenceRecord,
@@ -493,6 +495,12 @@ function dependencies(state: FakeState): RequestPreparationDependencies {
       },
     },
     admission: {
+      async readCanonicalCompilation() {
+        return allowRequestPreparation(null);
+      },
+      async lookupExisting() {
+        throw new Error('A canonical miss must not perform the final replay lookup');
+      },
       async authorizeAndReserve(inputValue, options) {
         state.calls.push('admission');
         state.admissionInputs?.push(inputValue);
@@ -562,6 +570,148 @@ function assertFailure(
   assert.equal(result.stage, expected.stage);
   assert.equal(result.code, expected.code);
   assert.equal(result.evidence, null);
+}
+
+function realReplayCompiler(boundDigest = 'a'.repeat(64)) {
+  return createProviderPayloadCompiler({
+    providerProtocol: 'openai', operation: 'chat.completions', modelResolution: MODEL_RESOLUTION,
+    modelCompatibility: () => true,
+    // Synthetic estimator evidence exercises real cb1/version canonicalization;
+    // it does not register a reviewed Codex profile or prove provider enforcement.
+    estimator: { version: 'replay-estimator-v1', estimate: () => ({
+      trustedBoundEvidenceDigest: boundDigest,
+      usage: { inputTotalUpperBound: 12, inputUncachedUpperBound: 12, cacheReadUpperBound: 0,
+        cacheWriteUpperBound: 0, cacheWrite5mUpperBound: 0, cacheWrite1hUpperBound: 0,
+        outputTotalUpperBound: 4, reasoningOutputUpperBound: 0, feasibleInputBuckets: ['input'] },
+    }) },
+  });
+}
+
+async function earlyReplayFixture(currentCompiler = realReplayCompiler()) {
+  const state: FakeState = { calls: [], compensated: [], signed: [], registered: [], transactionEvents: [] };
+  const trace: string[] = [];
+  const forbidden: string[] = [];
+  const baseline = await realReplayCompiler().compile({ caller: caller(), entitlement: entitlement(), authority: authority(),
+    clientRequest: input().clientRequest, clientProtocol: 'openai', providerProtocol: 'openai',
+    clientOperation: 'chat.completions', providerOperation: 'chat.completions', modelResolution: MODEL_RESOLUTION });
+  assert.equal(baseline.decision, 'allow');
+  if (baseline.decision !== 'allow') throw new Error('Real baseline compilation failed');
+  assert.match(baseline.value.requestFingerprint, /^[0-9a-f]{64}$/);
+  assert.match(baseline.value.requestFingerprintVersion, /^cb1:/);
+  const canonical: GatewayRequestCanonicalCompilation = {
+    canonicalRequestId: 'canonical-request-a', providerId: 'provider-a', productId: 'product-a',
+    resolvedModel: 'provider-model-a', publicModel: 'model-a', endpoint: authority().route.endpoint,
+    clientProtocol: 'openai', providerProtocol: 'openai', clientOperation: 'chat.completions', providerOperation: 'chat.completions',
+    modelResolution: MODEL_RESOLUTION, compilerVersion: baseline.value.compilerVersion,
+    usageEstimatorVersion: baseline.value.estimatorVersion,
+    routeConfigId: 'route-a', routeConfigVersion: '4', publicModelId: 'public-model-a', publicModelVersion: '1',
+  };
+  const canonicalRequest = { requestId: canonical.canonicalRequestId, status: 'unknown' as const };
+  const fail = (name: string): never => { forbidden.push(name); throw new Error(`Early replay must not call ${name}`); };
+  let executor: SqlExecutor | undefined;
+  let lookupCount = 0;
+  let compiledFingerprint: string | undefined;
+  let compiledVersion: string | undefined;
+  const overrides: Partial<RequestPreparationDependencies> = {
+    scheduler: {
+      select: async () => fail('scheduler.select'), selectAndBind: async () => fail('scheduler.selectAndBind'),
+      bindAffinity: async () => fail('scheduler.bindAffinity'),
+    },
+    payload: { async compile(value) {
+      trace.push('compile');
+      const result = await currentCompiler.compile(value);
+      if (result.decision === 'allow') {
+        compiledFingerprint = result.value.requestFingerprint;
+        compiledVersion = result.value.requestFingerprintVersion;
+      }
+      return result;
+    } },
+    admission: {
+      async readCanonicalCompilation(value, options) {
+        trace.push('read'); executor = options.executor;
+        assert.equal(value.clientKey, 'early-replay-key');
+        return allowRequestPreparation(canonical);
+      },
+      async lookupExisting(value, options) {
+        trace.push('lookup'); lookupCount += 1;
+        assert.equal(options.executor, executor, 'lookup must share the original read transaction');
+        assert.equal(value.requestFingerprint, compiledFingerprint);
+        assert.equal(value.requestFingerprintVersion, compiledVersion);
+        return value.requestFingerprint === baseline.value.requestFingerprint &&
+          value.requestFingerprintVersion === baseline.value.requestFingerprintVersion
+          ? rejectRequestPreparation('idempotency_replay', 'Canonical request already exists', canonicalRequest)
+          : rejectRequestPreparation('idempotency_conflict', 'Canonical fingerprint or version differs');
+      },
+      authorizeAndReserve: async () => fail('admission/hold'),
+    },
+    attempt: { persist: async () => fail('attempt') },
+    compensation: { releasePreDispatch: async () => fail('compensation') },
+    signer: { sign: async () => fail('signer') },
+    registrar: { register: async () => fail('registrar') },
+  };
+  return { state, trace, forbidden, overrides, canonicalRequest, canonical, lookupCount: () => lookupCount };
+}
+
+test('early canonical hit really compiles the current compatible candidate without scheduler or financial writes', async () => {
+  const graph = await earlyReplayFixture();
+  const unrelated = { ...candidate(), providerId: 'other-provider', productId: 'other-product' };
+  const current = { ...authority(), candidate: unrelated, candidates: [unrelated, alternateCandidate()],
+    route: { ...authority().route, routeConfigVersion: 5, publicModelVersion: 2 } };
+  const result = await service(graph.state, { ...graph.overrides,
+    authority: { resolve: async () => allowRequestPreparation(current) },
+  }).prepare(input({ idempotencyKey: 'early-replay-key' }));
+  assertFailure(result, { outcome: 'rejected', stage: 'admission', code: 'idempotency_replay' });
+  assert.deepEqual(result.canonicalRequest, graph.canonicalRequest);
+  assert.deepEqual(graph.trace, ['read', 'compile', 'lookup']);
+  assert.equal(graph.lookupCount(), 1);
+  assert.deepEqual(graph.state.transactionEvents, ['begin', 'commit']);
+  assert.deepEqual(graph.forbidden, []);
+  assert.deepEqual(graph.state.compensated, []);
+  assert.deepEqual(graph.state.signed, []);
+  assert.deepEqual(graph.state.registered, []);
+});
+
+for (const changed of ['content', 'bound-version'] as const) {
+  test(`early replay compares real ${changed} fingerprint/version and returns conflict without writes`, async () => {
+    const graph = await earlyReplayFixture(realReplayCompiler(changed === 'bound-version' ? 'b'.repeat(64) : 'a'.repeat(64)));
+    const result = await service(graph.state, graph.overrides).prepare(input({ idempotencyKey: 'early-replay-key',
+      ...(changed === 'content' ? { clientRequest: { model: 'model-a', messages: [{ role: 'user', content: 'different content' }] } } : {}),
+    }));
+    assertFailure(result, { outcome: 'rejected', stage: 'admission', code: 'idempotency_conflict' });
+    assert.equal(result.canonicalRequest, undefined);
+    assert.deepEqual(graph.trace, ['read', 'compile', 'lookup']);
+    assert.equal(graph.lookupCount(), 1);
+    assert.deepEqual(graph.state.transactionEvents, ['begin', 'commit']);
+    assert.deepEqual(graph.forbidden, []);
+  });
+}
+
+for (const problem of ['bad-context', 'no-current-candidate', 'mapping-incompatible', 'authorization-denied'] as const) {
+  test(`early replay ${problem} fails closed without compilation fallback or side effects`, async () => {
+    const graph = await earlyReplayFixture();
+    const overrides = { ...graph.overrides };
+    if (problem === 'bad-context' || problem === 'authorization-denied') {
+      overrides.admission = { ...graph.overrides.admission!, readCanonicalCompilation: async () => {
+        graph.trace.push('read');
+        return problem === 'bad-context' ? blockRequestPreparation('storage_failure', 'Canonical context is unavailable')
+          : rejectRequestPreparation('caller_denied', 'Current authorization denies the request');
+      } };
+    } else {
+      const current = problem === 'no-current-candidate'
+        ? { ...authority(), candidate: { ...candidate(), providerId: 'other-provider', productId: 'other-product' } }
+        : { ...authority(), modelResolution: { ...MODEL_RESOLUTION, mappedModel: 'changed-current-mapping' } };
+      overrides.authority = { resolve: async () => allowRequestPreparation(current) };
+    }
+    const result = await service(graph.state, overrides).prepare(input({ idempotencyKey: 'early-replay-key' }));
+    assertFailure(result, { outcome: problem === 'authorization-denied' ? 'rejected' : 'blocked',
+      stage: problem === 'no-current-candidate' || problem === 'mapping-incompatible' ? 'authority' : 'admission',
+      code: problem === 'authorization-denied' ? 'caller_denied' : problem === 'bad-context' ? 'storage_failure' : 'capability_unavailable' });
+    assert.equal(result.canonicalRequest, undefined);
+    assert.deepEqual(graph.trace, ['read']);
+    assert.equal(graph.lookupCount(), 0);
+    assert.deepEqual(graph.state.transactionEvents, ['begin', 'commit']);
+    assert.deepEqual(graph.forbidden, []);
+  });
 }
 
 test('preparation timings retain port order, affinity receiver, and total through transaction commit', async () => {
@@ -966,6 +1116,7 @@ test('fails closed and compensates when admission omits the durable idempotency 
   };
   const result = await service(state, {
     admission: {
+      ...dependencies(state).admission,
       async authorizeAndReserve(inputValue) {
         const admitted = admission(inputValue);
         return allowRequestPreparation({ ...admitted, idempotencyBinding: undefined as never });
@@ -978,7 +1129,7 @@ test('fails closed and compensates when admission omits the durable idempotency 
   assert.equal(state.compensated.length, 1);
   assert.equal(state.calls.includes('attempt'), false);
   assert.equal(state.calls.includes('registrar'), false);
-  assert.deepEqual(state.transactionEvents, ['begin', 'rollback']);
+  assert.deepEqual(state.transactionEvents, ['begin', 'commit', 'begin', 'rollback']);
 });
 
 test('returns the existing canonical request reference and rolls back a duplicate admission transaction', async () => {
@@ -992,6 +1143,7 @@ test('returns the existing canonical request reference and rolls back a duplicat
   const canonicalRequest = { requestId: 'canonical-request-a', status: 'unknown' as const };
   const result = await service(state, {
     admission: {
+      ...dependencies(state).admission,
       async authorizeAndReserve() {
         return rejectRequestPreparation(
           'idempotency_replay',
@@ -1006,7 +1158,7 @@ test('returns the existing canonical request reference and rolls back a duplicat
   assert.deepEqual(result.canonicalRequest, canonicalRequest);
   assert.equal(state.calls.includes('attempt'), false);
   assert.equal(state.calls.includes('registrar'), false);
-  assert.deepEqual(state.transactionEvents, ['begin', 'rollback']);
+  assert.deepEqual(state.transactionEvents, ['begin', 'commit', 'begin', 'rollback']);
 });
 
 test('uses each generated request id as a one-shot admission idempotency key when the header is absent', async () => {

@@ -523,7 +523,13 @@ function preparationService(state: PreparationState, compact = false): SaasReque
     payload: payloadCompiler(state, compact),
     transaction: {
       async transaction(work) {
-        return work({} as never);
+        return work({
+          async query<Row>(sql: string, values: readonly unknown[] = []) {
+            assert.equal(sql, 'SET TRANSACTION ISOLATION LEVEL READ COMMITTED', 'unexpected fixture SQL');
+            assert.deepEqual(values, []);
+            return { rows: [] as Row[], rowCount: 0 };
+          },
+        });
       },
     },
     admission: {

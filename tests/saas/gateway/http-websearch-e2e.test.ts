@@ -109,12 +109,13 @@ class FakeIncomingMessage extends EventEmitter {
     authorization: 'Bearer fake-proxy-key',
   };
   readonly method = 'POST';
-  readonly url = ENDPOINT_PATH;
+  readonly url: string;
   readonly body: Uint8Array;
   resumed = false;
 
-  constructor(body: unknown = CLIENT_REQUEST) {
+  constructor(body: unknown = CLIENT_REQUEST, url: string = ENDPOINT_PATH) {
     super();
+    this.url = url;
     this.body = new TextEncoder().encode(JSON.stringify(body));
   }
 
@@ -491,7 +492,13 @@ function preparationDependencies(
     payload: payloadCompiler(state),
     transaction: {
       async transaction(work) {
-        return work({} as never);
+        return work({
+          async query<Row>(sql: string, values: readonly unknown[] = []) {
+            assert.equal(sql, 'SET TRANSACTION ISOLATION LEVEL READ COMMITTED', 'unexpected fixture SQL');
+            assert.deepEqual(values, []);
+            return { rows: [] as Row[], rowCount: 0 };
+          },
+        });
       },
     },
     admission: {
@@ -1040,9 +1047,8 @@ test('4.3: /v1/web_search rejects GET (405) and /v1/x_search is a registered POS
 
   // x_search POST reaches preparation (fails at the fake port → 503).
   const postResponse = new FakeServerResponse();
-  const postRequest = new FakeIncomingMessage({ model: 'public-model', query: 'q' });
+  const postRequest = new FakeIncomingMessage({ model: 'public-model', query: 'q' }, '/v1/x_search');
   Object.assign(postRequest.headers, {});
-  postRequest.url = '/v1/x_search';
   assert.equal(await handler(asRequest(postRequest), asResponse(postResponse)), true);
   assert.equal(postResponse.writeHeadCalls[0]?.status, 503);
   assert.equal(JSON.parse(postResponse.bodyText()).error.code, 'PREPARATION_UNAVAILABLE');

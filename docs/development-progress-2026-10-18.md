@@ -1,6 +1,6 @@
 # 开发进度报告 — 2026-10-18（T05 + 真实模型验证）
 
-> **最新更新：2026-10-24。** Redis 与自托管实现边界见 **§28**；旧章节计数仅代表当时截点。可运营多租户模型 API 平台的最新实施见 **§29.49**：scheduler 前的只读 canonical 重放、当前授权重验及 late-existing 等待边界已完成源码修复，Astra 两路实际差分复核通过，尚未构建或运行验证。A0 DTO `e1adeb6`、PG失败证据捕获 `4858757` 与临时凭据隔离 `5743b9c` 已分任务推送。用户提供的 Kimi 材料尚未用于真实 A0；PG run05 的严格恢复失败仍未关闭，没有重跑。历史 `87cc8b4` CI 不覆盖新补丁，M1/M2/M3 与运营发布 GO 均开放。
+> **最新更新：2026-10-24。** Redis 与自托管实现边界见 **§28**；旧章节计数仅代表当时截点。可运营多租户模型 API 平台的最新实施见 **§29.51**：核心`1c963b9`旧fixture的36个离线失败已同步，新增早期重放/过期拒绝/store回归与原10文件共138/138通过，scoped strict通过。A0 CP就绪修复已源码审查，尚待真实重跑，供应商预算仍未消耗。用户已允许按需全部验证；分任务提交后构建冻结版本，再并行A0与原600秒PG恢复。旧run05仍失败、旧CI不代替新候选，M1/M2/M3与运营GO均开放。
 
 > 基线：`93e7ffa`（core-capability-alignment-technical-plan 文档合并后）。本轮实施技术方案
 > `docs/core-capability-alignment-technical-plan-2026-10-18.md` 中 **T05（9.1 前半 + Grok 门禁接线）**，
@@ -1198,3 +1198,25 @@ HMAC store新增两只读API，复用原domain、四段带长度作用域及key�
 Astra分别审查store/异构编译及授权/late race实际差分，发现两处阻断并由Sol窄修：删除把历史compiler/estimator版本变化提前映成503的检查，交原FP/version合同返回409；补两处late-existing等待后的重授权。两路最终源码复读均无未解决阻断。未新增迁移、权限、retry、租约分类或恢复例外，PG profile的全authority/lease严格比较不变；run05四条租约的来源缺证也没有因此被追溯证明。
 
 本项未新增或运行测试、类型检查、构建、DB或服务，不能记为PG恢复/撤销专项已通过；旧CI及run05 build不覆盖本补丁。显式key miss新增只读事务及重授权读成本，延迟影响尚未测量。下一步仅按有界A0范围构建当前源码并执行真实正式首请求；新的PG故障周期及其它专项回归仍需对应授权。runner隔离任务 `5743b9c` 已独立推送，本项与脚本任务分commit交付。
+
+### 29.50 验证授权更新、A0本地启动首错与CI fixture同步
+
+用户随后直接回复“可以根据需要授权所有验证”，解除早先“不要测试验证了”及单次PG演练的限制。后续按任务需要安排构建、测试和自有临时故障演练，不再为同类验证重复请求确认；真实商户/KMS/独立故障域等仍须有相应环境，授权本身不构成验收证据。
+
+核心修复已独立提交推送 `1c963b916d09c543583c0c5eef04373f4fd419db`。Luna一次 `build:server` 退出0；没有捕获本次build前的完整source/dist manifest，不能补记为前后完整构建provenance。build后dist为3164文件，关键新编译模块已记录。临时wrapper第一次在正式runner启动前，仍错误地把用户填在secret.name的材料当环境变量名，固定错误退出，尚无PG或供应商调用。经Astra/Sol窄修后，首条enabled凭据只按受控材料格式或合法env标识符分类读取，不更改原配置、不回退其它凭据、不输出任何材料。
+
+第一轮正式A0位于`/private/tmp/model-router-a0-platform-access.AhW3Gn/runner-output/`，确切运行上述1c候选。PG18.6自有cluster、建库、完整迁移、三角色及worker grants均exit0；suite共3项、2 pass/1 fail，真实主路径在`owned-redis-and-standard-control-plane`大阶段失败、errorCode=null。此阶段早于automatic-worker-onboarding，max_tokens=8探针及max_tokens=32生成均未到达，供应商预算消耗0。运行前后755项import closure与3164项完整dist精确一致，sourceChanges=[]、distChanged=false；PG停止及cluster删除均成功，runtime已清理。该结果不是凭据有效性、真实正式请求或结算通过。
+
+Astra定位确定的就绪脚本错误：A0在CP-only平台端口等待GET /readyz=200，而该handler未挂此路由，无法满足条件。源码预期404不等于当次已观察HTTP码；原日志只记录约30秒大阶段超时，子进程stdio忽略且runtime已删除，不能恢复Redis或CP内部具体首错。后续窄修拆分固定Redis/CP子阶段，并采用正式CP双自有TCP监听与child存活合同，保留30秒期限及后续真实MFA/业务链，不靠放宽生产校验或猜端点。
+
+只读自动CI #167绑定同一1c候选，offline job首错为HTTP e2e在payload后停止；初始73个失败标记包含live输出/末尾清单重复及标题，实际为36个独立失败。Astra按源码归因：6个HTTP fixture共12项使用空executor而缺新增精确隔离SQL；service 3项缺显式key的只读lookup合同；composition 1项缺当前授权mock；ports 20项缺数据库clock/IP及新授权优先顺序。同步旧fixture保持完整FP/HMAC/canonical/财务/回滚断言，并补早期重放和late-existing当前授权专项，不以降低生产门槛过测试。该run尚未在本节截点收齐终态，已成功的PG主job不代替整轮CI通过。源码修复、定向执行及新候选证据随后分别记录。
+
+### 29.51 CI合同同步与canonical重放的关键回归
+
+Sol按明确文件ownership并行同步上述10个测试文件，Astra实际差分复核通过。六个HTTP fixture只允许精确READ COMMITTED隔离SQL与空参数，其余SQL仍拒绝；service明确early lookup miss和意外final lookup禁用，并精确记录只读事务commit后再进入原durable rollback；composition校验当前授权、同executor及pre/post claim调用顺序。ports补精确数据库clock/IP查询，授权失败严格要求HMAC及金融写入为0，unsupported policy保留明确capability_unavailable；未弱化生产准入或原指纹/财务/补偿断言。
+
+新增focused coverage：service七项使用真实compiler/estimator digest与FP/version，覆盖当前异构候选、不同account/route版本、内容及版本冲突、损坏上下文、无兼容候选/映射及授权拒绝，early hit禁止scheduler、affinity、hold、attempt或evidence调用；store五项独立计算HMAC，覆盖作用域隔离、SELECT-only、first attempt、missing与坏hit、状态及FP/version冲突，不能伪造claim proof。ports另以可控数据库now模拟claim等待跨entitlement到期，第二授权拒绝后无canonical且金融/HMAC Map不变；wrapper同类拒绝窗口补入既有composition用例。这些是确定性fixture证明，不是实际PG并发过期或供应商证据。
+
+首轮Luna10文件138/138通过；另一Luna的scoped strict发现三个触及测试文件四个问题。Astra用git show确认它们在1c基线已存在：一个缺type import、三处给readonly URL赋值。Sol仅补正确类型导入并改为构造时传入相同URL，保留readonly、请求体/路径及所有断言，无any cast或关闭strict。
+
+修正后原精确10文件再次 **138/138、0 fail/skip**，证据`/private/tmp/model-router-targeted10-rerun.WbDOQa`。src/scripts/tests及所选root配置共1720项、完整dist3164项在测试前后精确一致，HEAD保持1c；不称为全仓快照。scoped strict同一精确12输入（A0 script、10 test文件及busboy声明）退出0、前后hash一致，日志`/private/tmp/model-router-luna-strict-20261024/recheck.log`。本轮未build或启动PG/真实供给；下一次fresh build绑定分任务提交后的确切候选，实际A0与PG恢复另记。CI #167的已知offline失败保留为历史，不把这138项记作该旧run已转绿。
