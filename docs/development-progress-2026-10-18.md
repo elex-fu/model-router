@@ -1404,3 +1404,11 @@ run01（通用拒绝）/run02（JSON_INVALID）/run03（METHOD_NOT_POST首错）
 ### 29.64 恢复开发首个工作块收尾
 
 `0f7f454`（窄修⑤+诊断文档）CI #40092054423 completed/success 68/68。本工作块交付：A1o完整闭环（capture→live→三根因修复→干净候选`e988644` CI 68/68→run08复验）；C0首瓶颈完整定位（trace+静态枚举+路线图+零风险窄修落地）；A1a omitted边界证据固定。下个工作块入口：C0窄修①（去重重复重验证，需保持fence-先于-幂等claim不变量与"fence后至少一次读取"语义）、10ms TTFB门槛的架构级方案决策、B0/B1真实Alipay（外部材料仍缺）、C2/A2按原计划。
+
+### 29.65 C0窄修①落地与受控serial复测对照
+
+窄修①（去重wrapper→ports重复重验证）实施：`authorizeAndReserve`输入新增受信wrapper传入的`prevalidatedAuthorization`（类比既有`idempotencyClaim`传递模式）——生产幂等admission wrapper先`revalidateAuthorization`（fence批+clock+fresh entitlement+IP，~8条）再claim幂等键，随后委托admission port的`authorizeAndReserve`曾在**同事务同executor、fence已持有、同快照**上完整重复该验证。现传入#1结果跳过#2；fence-先于-claim次序由wrapper更早调用保持，其guard读取仍提供claim后的新快照授权事实。**另核实**：dispatch侧两处`getAttempt`复读为CAS版本围栏必需（"Claim is itself a versioned attempt update. Never fence dispatch using the preflight snapshot"），非冗余，agent报告该项高估；调度器选择审计为R7 best-effort设计、结构上在admission事务外，合并不符风险收益比，不做。
+
+受控serial trace复测（独占窗口、同四腿各100、SAMPLE_EVERY=1、observationOk=true 200/200、`c8e4e4e`源码+fresh build）：latency腿query独占p50 173.1→164.0ms（-9ms，与~10条×1.15ms预测吻合）、elapsed 199.8→188.5ms；ttfb腿p50持平（156.8→159.8）、p99 382.9→570.5为轮间机器方差（同一尾部机制：O(增长)聚合扫描）。窄修①+⑤合计约-10ms p50（~5%）；诊断对照再次确认30/10ms门槛需架构级改造。admission测试85/85、全套件0失败；`c8e4e4e` CI运行中。
+
+**架构级候选设计（下个工作块实施入口）**：admission authority解析（B3，~16条/请求，REPEATABLE READ只读事务）与调度器重复解析改**版本键缓存**——缓存键含全部版本元组（authzVersion/entitlementVersion/supplyProfileVersion/modelScopeVersion/projectPolicyVersion/route合同版本），命中即复用解析结果；版本契约保证版本不变则事实不变，版本并发变更→新键未命中→重新解析；admission事务内guard的fresh读取仍为最终fail-closed防线（版本不匹配即拒绝）。预期省~16-24条/请求（~20-30ms）。cap A/B与完整R9维持"受控serial有效后"前置，不提前执行。
