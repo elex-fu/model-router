@@ -54,6 +54,39 @@ export function anthropicUsageMetadataKeys(profile: ProviderUsageProfile): reado
   return profile === null ? [] : KIMI_METADATA_KEYS;
 }
 
+const KIMI_USAGE_DETAIL_KEYS = Object.freeze(['output_tokens_details']);
+
+/**
+ * Observed Coding output decomposition (live evidence 2026-10-24: A1o run06
+ * plus direct CN-endpoint probes): when the response carries thinking, usage
+ * reports `output_tokens_details.thinking_tokens` as an informational
+ * sub-counter of the already-authoritative `output_tokens` (probes: 33 of 49
+ * and 31 of 47; thinking-disabled responses omit the field). It is not an
+ * additive billing dimension, so settlement keeps counting output_tokens; a
+ * malformed, unknown, or inconsistent decomposition still fails closed.
+ */
+export function anthropicUsageDetailKeys(profile: ProviderUsageProfile): readonly string[] {
+  return profile === null ? [] : KIMI_USAGE_DETAIL_KEYS;
+}
+
+export function validAnthropicUsageDetails(
+  profile: ProviderUsageProfile,
+  usage: Record<string, unknown>,
+): boolean {
+  if (profile === null) return true;
+  if (!Object.hasOwn(usage, 'output_tokens_details')) return true;
+  const details = usage.output_tokens_details;
+  if (details === null || typeof details !== 'object' || Array.isArray(details)) return false;
+  const fields = details as Record<string, unknown>;
+  const keys = Object.keys(fields);
+  if (keys.length !== 1 || keys[0] !== 'thinking_tokens') return false;
+  const thinking = fields.thinking_tokens;
+  if (typeof thinking !== 'number' || !Number.isSafeInteger(thinking) || thinking < 0) return false;
+  const output = usage.output_tokens;
+  if (typeof output !== 'number' || !Number.isSafeInteger(output) || thinking > output) return false;
+  return true;
+}
+
 /** Preserve the exact compatibility contract in the existing observation provenance. */
 export function providerUsageObserverVersion(version: string, profile: ProviderUsageProfile): string {
   return profile === null ? version : `${version}+${profile}`;

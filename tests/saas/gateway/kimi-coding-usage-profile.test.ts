@@ -132,6 +132,19 @@ test('Coding usage profile requires the signed provider/product/endpoint and exa
 });
 
 for (const kind of ['json', 'sse'] as const) {
+  test(`${kind}: Coding output decomposition reports thinking_tokens as a non-additive sub-counter`, async () => {
+    // Live evidence 2026-10-24 (A1o run06 + direct CN probes): thinking-bearing
+    // responses report thinking_tokens inside the terminal usage alongside the
+    // final output_tokens; output_tokens remains the authoritative billed
+    // counter. SSE carries the decomposition on the message_delta usage.
+    const result =
+      kind === 'json'
+        ? await observe(kind, { ...usage, output_tokens_details: { thinking_tokens: 11 } })
+        : await observe(kind, usage, coding, {}, { output_tokens: 11, output_tokens_details: { thinking_tokens: 11 } });
+    assert.equal(result.state, 'reported');
+    assert.equal(result.usage?.outputTotal, 11);
+  });
+
   test(`${kind}: Coding baseline metadata retains all 25 cached input tokens and the observed standard tier`, async () => {
     const result = await observe(kind, usage);
     assert.equal(result.state, 'reported');
@@ -167,7 +180,11 @@ for (const kind of ['json', 'sse'] as const) {
       ['fast speed', { ...usage, speed: 'fast' }],
       ['new counter', { ...usage, future_billable_tokens: 7 }],
       ['counter alias', { ...usage, prompt_tokens: 25 }],
-      ['output details', { ...usage, output_tokens_details: { thinking_tokens: 1 } }],
+      ['output details exceeding output_tokens', { ...usage, output_tokens_details: { thinking_tokens: 12 } }],
+      ['output details unknown sub-key', { ...usage, output_tokens_details: { reasoning_tokens: 1 } }],
+      ['output details non-object', { ...usage, output_tokens_details: 7 }],
+      ['output details non-integer', { ...usage, output_tokens_details: { thinking_tokens: 1.5 } }],
+      ['output details negative', { ...usage, output_tokens_details: { thinking_tokens: -1 } }],
       ['negative counter', { ...usage, cache_read_input_tokens: -1 }],
       ['fractional counter', { ...usage, input_tokens: 0.5 }],
       ['unsafe counter', { ...usage, cache_read_input_tokens: Number.MAX_SAFE_INTEGER + 1 }],

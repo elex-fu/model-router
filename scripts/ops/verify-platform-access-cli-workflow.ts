@@ -108,7 +108,31 @@ export class CliWorkflowRootHeadObserver {
   }
 }
 type CliWorkflowDiagnosticStage='auxiliary-contract'|'transport-contract'|'body-read'|'json-decode'|'request-contract'|'auth'|'capture-stop'|'forward';
-export interface CliWorkflowDiagnosticInput {mode:'capture'|'real';stage:CliWorkflowDiagnosticStage;attemptCount:number;method:string;path:string;body:unknown;publicModel:string;contentType?:unknown;contentEncoding?:unknown;bodyBytes?:number;cliPhase?:'version'|'workflow'}
+export interface CliWorkflowDiagnosticInput {mode:'capture'|'real';stage:CliWorkflowDiagnosticStage;attemptCount:number;method:string;path:string;body:unknown;publicModel:string;contentType?:unknown;contentEncoding?:unknown;bodyBytes?:number;cliPhase?:'version'|'workflow';historyCompare?:CliWorkflowHistoryCompare}
+/** Structure-only assistant-history comparison: block types and bounded lengths, never content bytes. */
+export interface CliWorkflowHistoryCompare {expected:unknown[];actual:unknown[]}
+type CliWorkflowBlockStructure={type:string;textLength?:number;thinkingLength?:number;hasSignature?:true};
+function describeCliWorkflowBlocks(content:unknown):CliWorkflowBlockStructure[]{
+  if(!Array.isArray(content))return [{type:'not-array'}];
+  const blocks=content.slice(0,8).map((block):CliWorkflowBlockStructure=>{
+    if(!record(block))return {type:'non-record'};
+    const type=typeof block.type==='string'&&block.type.length<=32?block.type:'other';
+    const out:CliWorkflowBlockStructure={type};
+    if(typeof block.text==='string')out.textLength=Math.min(block.text.length,1_000_000);
+    if(typeof block.thinking==='string')out.thinkingLength=Math.min(block.thinking.length,1_000_000);
+    if(typeof block.signature==='string')out.hasSignature=true;
+    return out;
+  });
+  if(content.length>8)blocks.push({type:'truncated',textLength:content.length});
+  return blocks;
+}
+function describeCliWorkflowMessages(body:unknown):Array<{role:string;blocks:CliWorkflowBlockStructure[]}>{
+  const messages=record(body)&&Array.isArray((body as Record<string,any>).messages)?(body as Record<string,any>).messages:[];
+  return messages.slice(0,8).map((message:unknown)=>({
+    role:record(message)&&(message.role==='user'||message.role==='assistant')?message.role:'other',
+    blocks:describeCliWorkflowBlocks(record(message)?message.content:undefined),
+  }));
+}
 /** First failure is authoritative; later abort/cleanup failures never replace it. */
 export function retainCliWorkflowFailure(previous:Error|undefined,error:unknown,input:CliWorkflowDiagnosticInput):Error {
   if(previous)return previous;
@@ -121,6 +145,7 @@ export function retainCliWorkflowFailure(previous:Error|undefined,error:unknown,
       ['/v1/messages/count_tokens','/v1/messages/count_tokens?beta=true'].includes(input.path)?'count-tokens':'other',
     metadata:describeCliWorkflowTransport(input),
     ...(input.cliPhase==='version'||input.cliPhase==='workflow'?{cliPhase:input.cliPhase}:{}),
+    ...(input.historyCompare===undefined?{}:{historyCompare:input.historyCompare}),
     ...(describeCliWorkflowRequest(input.body,input.publicModel)===undefined?{}:{requestShape:describeCliWorkflowRequest(input.body,input.publicModel)})};
   const safe=new Error(`CLI workflow rejected ${JSON.stringify(projection)}`);safe.stack=safe.message;return safe;
 }
@@ -202,12 +227,35 @@ export class CliWorkflowObserverState {
     return facts;
   }
   private verifyHistory(actual:unknown,expected:Array<Record<string,any>>):void {
-    if(!Array.isArray(actual)||actual.length!==expected.length)fail();
-    for(let i=0;i<expected.length;i++){
-      const a=actual[i],e=expected[i];if(!record(a)||a.type!==e.type)fail();
-      if(e.type==='thinking'){
-        if(a.thinking!==e.thinking||a.signature!==e.signature||Object.keys(a).some(k=>!['type','thinking','signature'].includes(k)))fail();
-      }else if(e.type==='text'){if(a.text!==e.text)fail();}
+    if(!Array.isArray(actual))fail();
+    /*
+     * Observed CLI contract (Claude Code 2.1.216 with MAX_THINKING_TOKENS=0,
+     * A1o live run04): the client does not replay provider thinking blocks
+     * in subsequent assistant history. Omission is accepted as that observed
+     * fact; any replayed thinking must still byte-match the observed upstream
+     * values in order, and thinking blocks may only precede the replayable
+     * text/tool_use sequence. Thinking bytes are never retained as evidence.
+     */
+    const expectedThinking=expected.filter(block=>block.type==='thinking');
+    const replayable=expected.filter(block=>block.type!=='thinking');
+    const actualThinking:unknown[]=[];const actualReplayable:unknown[]=[];let replayableStarted=false;
+    for(const block of actual){
+      if(record(block)&&block.type==='thinking'){
+        if(replayableStarted)fail();
+        actualThinking.push(block);
+      }else{replayableStarted=true;actualReplayable.push(block);}
+    }
+    if(actualThinking.length>0){
+      if(actualThinking.length!==expectedThinking.length)fail();
+      for(let i=0;i<actualThinking.length;i++){
+        const a=actualThinking[i],e=expectedThinking[i];
+        if(!record(a)||a.thinking!==e.thinking||a.signature!==e.signature||Object.keys(a).some(k=>!['type','thinking','signature'].includes(k)))fail();
+      }
+    }
+    if(actualReplayable.length!==replayable.length)fail();
+    for(let i=0;i<replayable.length;i++){
+      const a=actualReplayable[i],e=replayable[i];if(!record(a)||a.type!==e.type)fail();
+      if(e.type==='text'){if(a.text!==e.text)fail();}
       else if(e.type==='tool_use'){if(a.id!==e.id||a.name!==e.name||JSON.stringify(a.input)!==JSON.stringify(e.input))fail();}
       else fail();
     }
@@ -271,6 +319,10 @@ export class CliWorkflowObserverState {
     if(this.attempts!==3)fail();
     const requests=this.rounds.map(r=>{if(!r.stopped||!r.requestId||USAGE_FIELDS.some(field=>!count(r.usage[field]))||r.usage.output_tokens! >512)fail();return {requestId:r.requestId,usage:{...r.usage} as NativeUsage};});
     return {requests:requests as unknown as PlatformFirstRequestCliResult['requests']};
+  }
+  /** Structure-only projection of the retained upstream history; no content bytes. */
+  historyStructure():CliWorkflowBlockStructure[][]{
+    return this.rounds.map(r=>describeCliWorkflowBlocks(r.history));
   }
 }
 
@@ -373,7 +425,7 @@ async function executeCli(mode:{kind:'capture';options:CaptureOptions}|{kind:'re
     // Fixed fixture destination and original request bytes. No fallback provider,
     // endpoint rewrite, generation retry, payload normalization or fake count_tokens.
     stage='forward';await forward(req,res,bytes,gateway!,controller.signal,index,state);
-  })().catch(error=>{failure=retainCliWorkflowFailure(failure,error,{mode:mode.kind,stage,attemptCount:state.attemptCount,method:req.method ?? '',path:req.url ?? '',body,publicModel,contentType:req.headers['content-type'],contentEncoding:req.headers['content-encoding'],bodyBytes,cliPhase:requestCliPhase});if(!res.destroyed&&!res.headersSent){res.writeHead(403,{'content-type':'application/json'});res.end('{"error":{"type":"permission_error","message":"workflow rejected"}}');}abort();});pending.add(operation);void operation.then(()=>pending.delete(operation),()=>pending.delete(operation));});
+  })().catch(error=>{failure=retainCliWorkflowFailure(failure,error,{mode:mode.kind,stage,attemptCount:state.attemptCount,method:req.method ?? '',path:req.url ?? '',body,publicModel,contentType:req.headers['content-type'],contentEncoding:req.headers['content-encoding'],bodyBytes,cliPhase:requestCliPhase,...(mode.kind==='real'&&body!==undefined?{historyCompare:{expected:state.historyStructure(),actual:describeCliWorkflowMessages(body)}}:{})});if(!res.destroyed&&!res.headersSent){res.writeHead(403,{'content-type':'application/json'});res.end('{"error":{"type":"permission_error","message":"workflow rejected"}}');}abort();});pending.add(operation);void operation.then(()=>pending.delete(operation),()=>pending.delete(operation));});
   server.on('connection',socket=>{sockets.add(socket);socket.once('close',()=>sockets.delete(socket));});
   try{
     if(options.signal?.aborted||controller.signal.aborted)fail();

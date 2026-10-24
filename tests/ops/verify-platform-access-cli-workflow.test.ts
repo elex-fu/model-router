@@ -508,8 +508,8 @@ test('omitted observation requires omitted thinking and round-trips native think
   }
 });
 
-test('observation history rejects changed, missing, reordered or opaque thinking without leaking it', () => {
-  for (const mutation of ['thought', 'signature', 'missing-signature', 'missing', 'reordered', 'opaque'] as const) {
+test('observation history rejects changed, reordered or opaque thinking without leaking it', () => {
+  for (const mutation of ['thought', 'signature', 'missing-signature', 'reordered', 'opaque'] as const) {
     const state = observation();
     state.observeRequest(request(observationBody())); response(state, 0, undefined, ids[0], undefined, true);
     const next = observationBody(1);
@@ -518,7 +518,6 @@ test('observation history rejects changed, missing, reordered or opaque thinking
     if (mutation === 'thought') blocks[0]!.thinking = 'PRIVATE_CHANGED_THOUGHT';
     if (mutation === 'signature') blocks[0]!.signature = 'PRIVATE_CHANGED_SIGNATURE';
     if (mutation === 'missing-signature') delete blocks[0]!.signature;
-    if (mutation === 'missing') blocks.shift();
     if (mutation === 'reordered') blocks.reverse();
     if (mutation === 'opaque') blocks[0] = { type: 'redacted_thinking', data: 'PRIVATE_OPAQUE' };
     let rejected: unknown;
@@ -533,6 +532,19 @@ test('observation history rejects changed, missing, reordered or opaque thinking
     }
     assert.throws(() => state.finish());
   }
+});
+
+test('observation accepts the observed CLI omission of replayed thinking blocks', () => {
+  // Claude Code 2.1.216 with MAX_THINKING_TOKENS=0 does not replay provider
+  // thinking blocks in assistant history (A1o live run04). The replayable
+  // text/tool_use sequence must still round-trip exactly.
+  const state = observation();
+  state.observeRequest(request(observationBody())); response(state, 0, undefined, ids[0], undefined, true);
+  const next = observationBody(1);
+  const messages = next.messages as { role: string; content: unknown }[];
+  messages[1]!.content = (messages[1]!.content as Record<string, unknown>[]).filter(block => block.type !== 'thinking');
+  state.observeRequest(request(next));
+  assert.throws(() => state.finish());
 });
 
 test('disabled scene keeps rejecting native thinking and observation refuses opaque blocks or late thought deltas', () => {

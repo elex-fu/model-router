@@ -1,10 +1,12 @@
 import { type NormalizedUsage, normalizeUsage } from '../../telemetry/usage.js';
 import type { NormalSuccessObservedUsage } from './dispatch-usage-settlement.js';
 import {
+  anthropicUsageDetailKeys,
   anthropicUsageMetadataKeys,
   type ProviderUsageProfile,
   type ProviderUsageProfileEvidence,
   providerUsageProfile,
+  validAnthropicUsageDetails,
   validAnthropicUsageMetadata,
 } from './provider-usage-profile.js';
 
@@ -329,6 +331,8 @@ function trustedUsage(
   } = counterShapes[protocol];
   const metadataNames = protocol === 'anthropic' ? anthropicUsageMetadataKeys(profile) : [];
   if (protocol === 'anthropic' && !validAnthropicUsageMetadata(profile, raw)) return null;
+  const detailNames = protocol === 'anthropic' ? anthropicUsageDetailKeys(profile) : [];
+  if (protocol === 'anthropic' && !validAnthropicUsageDetails(profile, raw)) return null;
   const scalarNames = [...shape.required, ...shape.optional];
   if (shape.required.some((name) => !Object.hasOwn(raw, name) || !token(raw[name]))) return null;
   for (const [name, counter] of Object.entries(raw)) {
@@ -336,6 +340,9 @@ function trustedUsage(
       if (!token(counter)) return null;
     } else if (metadataNames.includes(name)) {
       // Validated against the exact, provider-bound metadata contract above.
+    } else if (detailNames.includes(name)) {
+      // Coding output decomposition: validated above as a provider-bound,
+      // non-additive sub-counter of output_tokens.
     } else if (shape.strings.includes(name)) {
       // §8.3: the anthropic served-tier declaration rides inside usage; a
       // non-string or oversized value invalidates the report.
@@ -432,6 +439,8 @@ function parseBody(
     return unknown('no_usage', observedServiceTier, observedServiceTierConflict);
   try {
     if (protocol === 'anthropic' && !validAnthropicUsageMetadata(profile, record(body.usage) ?? {}, body))
+      return unknown('invalid_usage', observedServiceTier, observedServiceTierConflict);
+    if (protocol === 'anthropic' && !validAnthropicUsageDetails(profile, record(body.usage) ?? {}))
       return unknown('invalid_usage', observedServiceTier, observedServiceTierConflict);
     const usage = trustedUsage(protocol, body.usage, profile);
     return usage

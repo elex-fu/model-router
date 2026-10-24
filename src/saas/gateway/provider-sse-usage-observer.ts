@@ -6,10 +6,12 @@ import type {
   PreparedEvidenceTransportResponse,
 } from './prepared-evidence-dispatch-service.js';
 import {
+  anthropicUsageDetailKeys,
   anthropicUsageMetadataKeys,
   type ProviderUsageProfile,
   type ProviderUsageProfileEvidence,
   providerUsageProfile,
+  validAnthropicUsageDetails,
   validAnthropicUsageMetadata,
 } from './provider-usage-profile.js';
 
@@ -198,8 +200,11 @@ function parseAnthropicInputUsage(
     // §8.3: the served-tier declaration rides inside usage as `speed`.
     'speed',
     ...anthropicUsageMetadataKeys(profile),
+    // Coding output decomposition: validated below, never an extra counter.
+    ...anthropicUsageDetailKeys(profile),
   ]);
   if (!validAnthropicUsageMetadata(profile, value, envelope)) rejectUsage('invalid_usage');
+  if (!validAnthropicUsageDetails(profile, value)) rejectUsage('invalid_usage');
   // A declared `speed` must be a short string; anything else invalidates the
   // usage report (the tier value itself was already merged by the caller).
   if (Object.hasOwn(value, 'speed') && tierText(value.speed) === null) rejectUsage('invalid_usage');

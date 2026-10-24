@@ -423,7 +423,12 @@ export async function verifyPlatformAccessFirstRequest(diagnostic:(value:unknown
     const projectCapacity=await ops.request(`/admin/api/v1/capacity/tenants/${tenantId}/projects/${projectId}`);
     const providerPolicyId=`platform-first-provider-${label}`;
     const contract={contractDigest:'d'.repeat(64),suiteVersion:SUITE,testVectorDigest:'c'.repeat(64),providerPolicyId,providerPolicyVersion:'2',publicModelId,publicModelVersion:'1',protocol,endpoint,supplyMode:'platform' as const,targetMode:'platform_pool' as const,usageDimensions:customerDefinition.usageDimensions,tokenSource:customerDefinition.tokenSource,roundingVersion:customerDefinition.roundingVersion,roundingMode:customerDefinition.roundingMode,roundingBoundary:'total' as const};
-    const limits={requestsPerMinute:120,tokensPerMinute:KIMI_COMMERCIAL_WINDOW_CAPACITY.tokensPerMinute,maxConcurrentRequests:2};
+    // A1o run05 observation: usage settlement is asynchronous, so back-to-back
+    // CLI generations briefly overlap in the concurrency window. Capacity
+    // covers the designed worst case (credential probe + up to three
+    // generations outstanding) instead of the single-request A0 shape; the
+    // observer harness itself permits no 429 retry (MAX_MESSAGES is hard).
+    const limits={requestsPerMinute:120,tokensPerMinute:KIMI_COMMERCIAL_WINDOW_CAPACITY.tokensPerMinute,maxConcurrentRequests:4};
     const input:ProvisionPlatformInferenceAccessInput={operationKey:`platform-first-${label}`,tenantId,projectId,
       pool:{id:poolId,expectedAuthzVersion:String(pool.authzVersion),evidenceReference:`disposable-first-request-${label}`,evidenceSha256:'e'.repeat(64)},
       capacity:{tenantExpectedRevision:tenantCapacity.revision,projectExpectedRevision:projectCapacity.revision,tenantLimits:limits,projectLimits:limits},
