@@ -387,6 +387,40 @@ function validObservedLoadCounters(report, requestedScenario) {
   return true;
 }
 
+// Sample evidence is independent of exit status and driver violation bookkeeping.
+function observedSampleSufficiency(report, requestedScenario, profile = {}) {
+  const applicable = !profile.diagnostic || Boolean(profile.capProfile);
+  const legs = [];
+  const requested = requestedScenario === 'all' ? ['latency', 'ttfb', 'concurrency', 'scaling'] : String(requestedScenario).split(',');
+  const scenarios = report?.scenarios ?? {};
+  const add = (scenario, leg, required, observed, complete = true) => {
+    legs.push({ scenario, leg, required: Number.isSafeInteger(required) && required >= 0 ? required : null,
+      observed: Number.isSafeInteger(observed) && observed >= 0 ? observed : null,
+      sufficient: Number.isSafeInteger(required) && required >= 100 && Number.isSafeInteger(observed) &&
+        observed >= required && complete });
+  };
+  if (applicable) {
+    for (const name of ['latency', 'ttfb', 'concurrency', 'scaling']) {
+      if (!requested.includes(name) && !Object.hasOwn(scenarios, name)) continue;
+      const measured = scenarios[name];
+      if (name === 'latency' || name === 'ttfb') {
+        const required = name === 'latency' ? report?.config?.requests : report?.config?.streamSamples;
+        for (const leg of ['direct', 'gateway']) {
+          const observed = measured?.[leg]?.n;
+          add(name, leg, required, observed, observed === required &&
+            (name !== 'ttfb' || (measured?.gatewayErrors === 0 && Number.isFinite(measured?.ttfbOverheadMs))));
+        }
+      } else {
+        const observed = measured?.statuses?.['200'];
+        add(name, 'gateway', 100, observed, measured?.latency?.n === observed &&
+          (name !== 'concurrency' || (measured?.acceptedLatency?.n === observed &&
+            measured?.acceptedLatency?.measurement === 'request-start-through-response-body')));
+      }
+    }
+  }
+  return { applicable, legs, sufficient: legs.every((leg) => leg.sufficient) };
+}
+
 function capProfileEvidence(report) {
   const measured = report?.scenarios?.concurrency;
   const statuses = measured?.statuses ?? {};
@@ -829,6 +863,7 @@ try {
     const validScalingComparison = !report?.config.baselineReport || (Number.isFinite(report.scenarios.scaling?.ratio) &&
       !Object.hasOwn(report.scenarios.scaling, 'invalidComparisonReason'));
     const validLoadCounters = validObservedLoadCounters(report, commandArgs[commandArgs.indexOf('--scenario') + 1]);
+    const sampleSufficiency = observedSampleSufficiency(report, commandArgs[commandArgs.indexOf('--scenario') + 1], options);
     const serialProfileChecks = options.serialProfile ? {
       onlySerialScenarios: Object.keys(report?.scenarios ?? {}).sort().join(',') === 'latency,ttfb',
       expectedConfiguration: report?.config.requests === 100 && report?.config.streamSamples === 100 && report?.config.warmupInflight === 1 && report?.config.instanceCount === 3,
@@ -841,12 +876,13 @@ try {
     const validCapProfile = !options.capProfile || (manifest.capProfile.result.configurationUnchanged &&
       manifest.capProfile.result.successfulSampleSufficiency.sufficient &&
       manifest.capProfile.result.acceptedLatency?.n === manifest.capProfile.result.successfulRequests);
-    const ok = result.code === 0 && Boolean(report) && report.violations.length === 0 && validLatencySamples && observedTraffic && validScalingComparison && validSerialProfile && validLoadCounters && validCapProfile;
-    manifest.scenes.push({ scene: name, ...result, report: reportFile, ok, validLatencySamples, observedTraffic, validScalingComparison,
+    const ok = result.code === 0 && Boolean(report) && report.violations.length === 0 && validLatencySamples && observedTraffic && validScalingComparison && validSerialProfile && validLoadCounters && validCapProfile && sampleSufficiency.sufficient;
+    manifest.scenes.push({ scene: name, ...result, report: reportFile, ok, validLatencySamples, observedTraffic, validScalingComparison, sampleSufficiency,
       ...(options.capProfile ? { validCapProfile } : {}),
       ...(report?.scenarios.scaling || report?.scenarios.concurrency ? { validObservedLoadCounters: validLoadCounters } : {}),
       ...(serialProfileChecks === undefined ? {} : { serialProfileChecks }), violations: report?.violations });
     if (!ok) firstFault(name, !validLatencySamples ? 'Legacy driver discarded unsuccessful latency samples; required sample count missing' :
+      !sampleSufficiency.sufficient ? 'Required HTTP 200 sample counts or complete TTFB evidence are insufficient' :
       !validCapProfile ? 'Cap diagnostic requires unchanged c200/60s, body-complete accepted latency and at least 100 successful samples' :
       !validSerialProfile ? 'Serial profile requires only latency/TTFB, 100 complete samples per leg, zero stream errors and unchanged thresholds' :
       !validLoadCounters ? 'Scaling/concurrency observed counters are invalid or exceed the chosen zero transport/5xx budgets' :

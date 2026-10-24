@@ -1244,3 +1244,13 @@ fixture任务`d45b221`及A0就绪任务`9d1eb3c6350e0a97197160fdd0cb888690b02f71
 **同一候选自动CI通过。** [CI #169](https://github.com/elex-fu/model-router/actions/runs/40058135682)确切绑定9d完整SHA，API返回全部68/68 completed/success，含offline、PG15/18、PG16 deploy smoke及64 isolated。只读收集既有自动run，没有dispatch/rerun；历史#167的离线fixture失败及当时未收齐矩阵记录保留，不互换revision。
 
 此工程候选的本轮功能缺口已收敛。下一项A1仍需真实第三方客户端：现有Kimi tools/cancel用例是脚本HTTP流程，本项目built CLI证明服务器入口，不能充当第三方工具执行证据。本机Claude Code实际`--version/--help`已在独立配置/dummy key/loopback base环境核对为2.1.216；没有运行模型prompt。Astra设计最小capture-only→真实两轮Read场景，A1a只覆盖thinking disabled及相应usage/账务；在`/private/tmp/model-router-p0-cli-workflow-20261024`隔离工作树实施，主9d验证期间未改源码。thinking enabled、cancel/resume、未暴露backend revision及其它运营门槛仍独立开放。
+
+### 29.54 C0样本充分性与完整TTFB证据门禁
+
+Astra独立盘点发现两个supervisor缺口：完整R9的scaling/concurrency原计数合同只要求成功数大于0；完整all场景没有检查direct TTFB样本齐全，而driver会捕获该腿测量失败。因此少量成功或缺失direct样本仍可能进入后续性能判定，不能仅依靠ratio、gatewayErrors或cap已有样本门槛。
+
+Sol仅修改`run-current-r9.mjs`及其`r9-scaling-gates.test.ts`。纯`observedSampleSufficiency()`对full/cap输出applicable、各腿required/observed/sufficient和合计判定，接入场景证据、ok及首失败说明。full latency保持direct/gateway精确配置样本数且≥100；full TTFB同样精确齐全且≥100，并保持gatewayErrors=0及有限overhead；concurrency和scaling的1实例baseline/3实例current各要求至少100个body-complete HTTP200成功，原计数一致性继续检查。baseline不足沿原流程停止后续负载，不执行无效的ratio比较。cap保留原样本及acceptedLatency一致性合同。
+
+short diagnostic与serial保留原有规则，SSE/precision不机械追加100门槛；未修改benchmark driver、公共参数、ratio≥2.7、429计数/分母、percentile或负载时长。Astra实际两文件差分审查通过。Luna在主树`15f1daa`加上述两文件补丁状态运行定向测试 **21/21、0 fail/skip**及`node --check`，均exit0；src/tests/scripts/dist/.github及所选root配置共4888项before/after精确一致，HEAD与工作树状态不变，原`.claude/worktrees/`保留。证据`/private/tmp/model-router-c0-regression-20261024/`，目录700、日志/manifest 600。
+
+本项只证明门禁实现与纯fixture合同，未启动真实CLI、PG、供应商或任何负载，没有新的延迟/吞吐/容量结论。9d的CI与A0/PG结果不外推到本补丁；C0仍须按serial→cap A/B→完整R9顺序实际执行并定位首失败，M2不关闭。

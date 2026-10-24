@@ -3,7 +3,7 @@
 > 日期：2026-10-24。状态：实施中；冻结工程候选`9d1eb3c6350e0a97197160fdd0cb888690b02f71`已fresh build、真实Kimi A0 3/3、完整offline 7332 pass/0 fail/131 skip、自动CI #169完整68/68通过。PG run06保留原600秒窗口并通过全部严格恢复门槛、cleanup和冻结核对。真实CLI A1a在独立临时工作树实施，尚未真实验收；生产PSP/KMS/独立金融灾备、Codex可信计量和R9仍开放，M1/M2/M3未关闭。
 > 初始设计基线：model-router `44b0eb7`；Codex C1–C4 基础 checkpoint `f61afec`，后续改动按独立任务继续交付；只读对标基线：CLIProxyAPI `911f49c`、Sub2API `a3eb7ef`、New API `6549a17`。
 > “拟新增”保留初始设计语境；当前实现与证据以各节明确状态及开发进度 §29 为准，源码交付不等同运营可用。
-> 状态区分源码、定向检查、真实供给、本地受控故障和生产验收；最新证据见开发进度§29.53。历史失败与旧CI保留，不能替代当前revision。
+> 状态区分源码、定向检查、真实供给、本地受控故障和生产验收；9d完整验收见开发进度§29.53，后续C0样本门禁及定向检查见§29.54。历史失败与旧CI保留，不能替代当前revision。
 
 ## 1. 目标、范围与交付边界
 
@@ -270,7 +270,7 @@ self-hosted 真实 Kimi 交替请求与直连接近，只说明该次路径；�
 2. 原受控 serial 四腿各 100 样本对照先执行；保留原 p99 overhead ≤30ms、TTFB overhead ≤10ms，不更换 percentile 算法消除尾部。
 3. 同 binary、同资源比较 cap 关闭与 cap=8 的 c=200、60 秒 A/B；关闭用环境变量 unset/empty，禁止设为字面量 off；8 仅候选，不能预设为最终容量。
 4. 前项有有效结论后执行原完整 R9：SSE 10 分钟、零意外 5xx/transport、1→3 实例 ratio ≥2.7、账户精度。
-5. 每个主要负载至少保留 100 个成功样本，作为拟新增样本充分性门槛；不足记不充分，不能宣告通过。
+5. 每个主要负载至少保留 100 个成功样本；不足记不充分，不能宣告通过。supervisor现已为完整R9的latency、TTFB、concurrency及scaling两腿补齐样本证据和失败判定，cap保留原100门槛；serial保留四腿exact100，短diagnostic保留10样本诊断语义。完整TTFB必须direct/gateway均等于配置样本数且不少于100，不接受被driver捕获后缺失的direct样本。样本充分性只是一项门禁，不能单独授予性能验收。
 
 分开报告 HTTP 200 请求的 accepted latency、HTTP 200 successful rps 与 HTTP 429 数量/比例；这里的200是状态码，不是最低200rps吞吐门槛。保留失败原样本，R9 ratio>=2.7与c=200等既有门槛不变。
 cap=8 不能仅通过拒绝大部分请求改善表面延迟；必须解释成功吞吐和拒绝率的业务容量影响。
@@ -363,7 +363,7 @@ operation 完成与 entitlement 激活约束必须防止 completed 但无有效�
 | P06 | payments parser/专用凭据/CLI/doctor/组合根 | P02b/P07合同 | 最终deployment/doctor/startup132/132；worker正式MAX_ATTEMPTS范围1..20、默认5，`a755301`已推送；真实支付凭据/merchant及运营验收待齐备 | 已实现并定向验证；真实PSP/生产证据开放 |
 | P07 | binding resolver/CAS/http/workers/refunds/plans | P02b/P06 | 商户binding历史PG15/18均过，POST/promo重入7/7；producer列值窄修`687a3c9`已推，worker24/24+combined strict+最新PG27/27通过；#151/`69125a1`68/68成功，#153/`62b98a5`68/68成功；真实商户切换/回调/退款未验 | 已实现并定向/真PG验证；工程候选87 CI通过，真实PSP开放 |
 | P08 | 本地 QR、钱包/套餐收银与原单恢复 | P06/P07 | web定向30/30、typecheck/build；新访问/收银browser4/4真实Chrome+local API及既有审计2/2通过；真实PSP待验 | 已实现；本地前端/浏览器通过；真实PSP开放 |
-| P09 | 请求诊断、PG checkout/query/transaction、首字节/EOF/settled | P03/正式供给 | trace UUID与cap profile c=200/60s工程`e87c7fa`已推送，ops32/32及JScheck通过；未执行负载，serial→cap A/B→完整R9未关闭 | 工程已实现并定向验证；负载/性能验收未执行 |
+| P09 | 请求诊断、PG checkout/query/transaction、首字节/EOF/settled | P03/正式供给 | trace UUID与cap profile c=200/60s工程`e87c7fa`已推送；后续full/cap样本充分性及full TTFB完整性补齐，定向21/21和JScheck通过（§29.54）；未执行新负载，serial→cap A/B→完整R9未关闭 | 工程已实现并定向验证；负载/性能验收未执行 |
 | P10 | 故障/恢复与金融hold/lease不变量 | P07/P09 | 既有refund SIGKILL/SSE SIGTERM、operator、Redis、暖cache typed403、wire ACK保留；9d完整PG run06自然600s/全canonical快照/零重放派发/新C精确结算通过，cleanup及hash稳定；历史run05失败保留 | 受控本地恢复已过；生产独立同步故障域/PITR及完整矩阵开放 |
 | P11 | Redis/Compose/systemd/KMS/backup/正式CI | P06/P10 | 9d fresh build、完整offline 7332pass/0fail/131skip及CI#169全68/68；Kimi A0及PG run06分别通过；Redis generalZeroLossClaim=false、unflushedMutationLossTested=false保持 | 基础工程及本地受控恢复已验；生产KMS/独立金融恢复/异地备份外证开放 |
 | P12 | 本方案与进度 §29 gate | P01–P11 | 分层记录源码、fixture、真PG18、本地TLS和外证；M1/M2/M3不关闭 | 持续记录；待最终验收 |

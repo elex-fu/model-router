@@ -520,3 +520,135 @@ test('actual supervisor keeps final collection after the controlled sequence and
   assert.match(controlledSequence, /if \(!full\.ok\) break;/);
   assert.doesNotMatch(controlledSequence, /\bthrow\b/);
 });
+
+interface SampleEvidence {
+  applicable: boolean;
+  sufficient: boolean;
+  legs: { scenario: string; leg: string; required: number | null; observed: number | null; sufficient: boolean }[];
+}
+interface SampleApi {
+  observedSampleSufficiency(report: unknown, requestedScenario: string,
+    profile?: { diagnostic?: boolean; serialProfile?: boolean; capProfile?: boolean }): SampleEvidence;
+}
+function sampleApi(): SampleApi {
+  return helpers<SampleApi>(supervisorFile, ['observedSampleSufficiency']);
+}
+function completeSampleReport() {
+  return {
+    config: { requests: 100, streamSamples: 100 },
+    scenarios: {
+      latency: { direct: { n: 100 }, gateway: { n: 100 } },
+      ttfb: { direct: { n: 100 }, gateway: { n: 100 }, gatewayErrors: 0, ttfbOverheadMs: 1 },
+      concurrency: { statuses: { '200': 100 }, latency: { n: 100 },
+        acceptedLatency: { n: 100, measurement: 'request-start-through-response-body' } },
+      scaling: { statuses: { '200': 100 }, latency: { n: 100 } },
+    },
+  };
+}
+
+test('full R9 requires complete configured latency and TTFB legs and at least 100 load successes', () => {
+  const api = sampleApi();
+  const evidence = api.observedSampleSufficiency(completeSampleReport(), 'all');
+  assert.equal(evidence.applicable, true);
+  assert.equal(evidence.sufficient, true);
+  assert.equal(evidence.legs.length, 6);
+  for (const count of [0, 99]) {
+    for (const name of ['concurrency', 'scaling'] as const) {
+      const report = completeSampleReport();
+      report.scenarios[name].statuses['200'] = count;
+      report.scenarios[name].latency.n = count;
+      if (name === 'concurrency') report.scenarios.concurrency.acceptedLatency.n = count;
+      assert.equal(api.observedSampleSufficiency(report, 'all').sufficient, false, `${name}: ${count}`);
+    }
+  }
+  for (const name of ['latency', 'ttfb'] as const) {
+    for (const leg of ['direct', 'gateway'] as const) {
+      const report = completeSampleReport();
+      report.scenarios[name][leg].n = 99;
+      assert.equal(api.observedSampleSufficiency(report, 'all').sufficient, false, `${name}: ${leg}`);
+    }
+  }
+  const configured = completeSampleReport();
+  configured.config.requests = 101;
+  assert.equal(api.observedSampleSufficiency(configured, 'all').sufficient, false);
+  configured.config.requests = 100;
+  configured.config.streamSamples = 101;
+  assert.equal(api.observedSampleSufficiency(configured, 'all').sufficient, false);
+  for (const count of [0, 99]) {
+    const report = completeSampleReport();
+    report.config.requests = count;
+    report.scenarios.latency.direct.n = report.scenarios.latency.gateway.n = count;
+    assert.equal(api.observedSampleSufficiency(report, 'all').sufficient, false);
+    report.config.requests = 100;
+    report.scenarios.latency.direct.n = report.scenarios.latency.gateway.n = 100;
+    report.config.streamSamples = count;
+    report.scenarios.ttfb.direct.n = report.scenarios.ttfb.gateway.n = count;
+    assert.equal(api.observedSampleSufficiency(report, 'all').sufficient, false);
+  }
+});
+
+test('sample evidence rejects missing, malformed, inconsistent and incomplete streaming observations', () => {
+  const api = sampleApi();
+  for (const report of [null, {}, { config: { requests: 100, streamSamples: 100 }, scenarios: {} }]) {
+    assert.equal(api.observedSampleSufficiency(report, 'all').sufficient, false);
+  }
+  for (const count of [undefined, null, '100', -1, 1.5, NaN, Infinity]) {
+    const report = completeSampleReport();
+    const malformed = { ...report, scenarios: { ...report.scenarios,
+      scaling: { statuses: { '200': count }, latency: { n: count } } } };
+    const evidence = api.observedSampleSufficiency(malformed, 'scaling');
+    assert.equal(evidence.sufficient, false);
+    assert.equal(evidence.legs.find((leg) => leg.scenario === 'scaling')?.observed, null);
+  }
+  for (const patch of [
+    { gatewayErrors: 1 }, { ttfbOverheadMs: NaN }, { ttfbOverheadMs: Infinity },
+  ]) {
+    const report = completeSampleReport();
+    Object.assign(report.scenarios.ttfb, patch);
+    assert.equal(api.observedSampleSufficiency(report, 'all').sufficient, false);
+  }
+  const report = completeSampleReport();
+  report.scenarios.concurrency.acceptedLatency.n = 99;
+  assert.equal(api.observedSampleSufficiency(report, 'all').sufficient, false);
+  report.scenarios.concurrency.acceptedLatency.n = 100;
+  report.scenarios.scaling.latency.n = 99;
+  assert.equal(api.observedSampleSufficiency(report, 'all').sufficient, false);
+});
+
+test('cap samples remain enforced while short diagnostic and serial retain their existing gates', () => {
+  const api = sampleApi();
+  for (const profile of [{ diagnostic: true }, { diagnostic: true, serialProfile: true }]) {
+    const evidence = api.observedSampleSufficiency({}, 'latency,ttfb,concurrency', profile);
+    assert.equal(evidence.applicable, false);
+    assert.equal(evidence.sufficient, true);
+    assert.equal(evidence.legs.length, 0);
+  }
+  const cap = { diagnostic: true, capProfile: true };
+  for (const count of [0, 99, 100]) {
+    const report = completeSampleReport().scenarios.concurrency;
+    report.statuses['200'] = report.latency.n = report.acceptedLatency.n = count;
+    assert.equal(api.observedSampleSufficiency({ scenarios: { concurrency: report } }, 'concurrency', cap).sufficient, count === 100);
+  }
+  const source = readFileSync(supervisorFile, 'utf8');
+  assert.match(source, /validCapProfile && sampleSufficiency\.sufficient/);
+  assert.match(source, /validScalingComparison, sampleSufficiency/);
+  assert.match(source, /'--requests','10','--stream-samples','10'/);
+  assert.match(source, /completeTtfb:.*direct\.n === 100.*gateway\.n === 100.*gatewayErrors === 0/);
+});
+
+test('insufficient baseline samples stop before the current leg and preserve the cleanup path', async () => {
+  const api = supervisor();
+  const samples = sampleApi();
+  const events: string[] = [];
+  try {
+    await api.runFullR9Benchmarks([{ protocol: 'openai' }], ['g1', 'g2', 'g3'], async (name) => {
+      events.push(name);
+      const scaling = { statuses: { '200': 99 }, latency: { n: 99 } };
+      return { reportFile: '/baseline', ok: samples.observedSampleSufficiency({ scenarios: { scaling } }, 'scaling').sufficient };
+    });
+    events.push('final-stats', 'metrics');
+  } finally {
+    events.push('cleanup');
+  }
+  assert.deepEqual(events, ['openai-scaling-1cli', 'final-stats', 'metrics', 'cleanup']);
+});
