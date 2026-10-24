@@ -1,6 +1,6 @@
 # 开发进度报告 — 2026-10-18（T05 + 真实模型验证）
 
-> **最新更新：2026-10-24。** Redis 与自托管实现边界见 **§28**；旧章节计数仅代表当时截点。可运营多租户模型 API 平台的最新验证见 **§29.53**：冻结工程候选`9d1eb3c`已fresh build、真实Kimi A0 3/3、完整offline零失败及自动CI 68/68通过；PG run06保留原600秒窗口，完整恢复、canonical全快照不变及新请求精确结算均通过。各临时资源已清理、输入/产物冻结证据齐全。后续真实CLI A1a在独立临时工作树实施，尚未验收；生产PSP/KMS/独立金融灾备、Codex可信计量及R9仍开放，M1/M2/M3与运营GO未关闭。
+> **最新更新：2026-10-24，按用户要求暂停开发。** 暂停交接与剩余任务见 **§29.55–57**：主任务工程`ae91134`的C0门禁21/21、fresh build及CI #171全68/68通过，实际serial四腿各100却以722.38/481.10ms额外开销未达30/10ms门槛；CLI六文件WIP `cf5008b`独立远程保存，最终27组测试源码仅静态审阅，尚未执行检查/capture/live。各自有临时资源已有收尾记录，trace草稿未审未执行。此前9d真实Kimi A0、完整offline及PG600秒run06通过证据见 **§29.53**；Redis/自托管边界见 **§28**。生产PSP/KMS/独立金融灾备、Codex可信计量和完整R9仍开放，M1/M2/M3与运营GO未关闭，旧章节计数仅代表当时截点。
 
 > 基线：`93e7ffa`（core-capability-alignment-technical-plan 文档合并后）。本轮实施技术方案
 > `docs/core-capability-alignment-technical-plan-2026-10-18.md` 中 **T05（9.1 前半 + Grok 门禁接线）**，
@@ -1254,3 +1254,61 @@ Sol仅修改`run-current-r9.mjs`及其`r9-scaling-gates.test.ts`。纯`observedS
 short diagnostic与serial保留原有规则，SSE/precision不机械追加100门槛；未修改benchmark driver、公共参数、ratio≥2.7、429计数/分母、percentile或负载时长。Astra实际两文件差分审查通过。Luna在主树`15f1daa`加上述两文件补丁状态运行定向测试 **21/21、0 fail/skip**及`node --check`，均exit0；src/tests/scripts/dist/.github及所选root配置共4888项before/after精确一致，HEAD与工作树状态不变，原`.claude/worktrees/`保留。证据`/private/tmp/model-router-c0-regression-20261024/`，目录700、日志/manifest 600。
 
 本项只证明门禁实现与纯fixture合同，未启动真实CLI、PG、供应商或任何负载，没有新的延迟/吞吐/容量结论。9d的CI与A0/PG结果不外推到本补丁；C0仍须按serial→cap A/B→完整R9顺序实际执行并定位首失败，M2不关闭。
+
+### 29.55 C0门禁交付、确切候选CI通过，实际serial未达标
+
+C0样本门禁及对应文档已独立推送`ae911346280c3ea00e3b43c2a248cfe1026aefaa`。Luna在该确切候选tracked clean状态执行一次fresh `build:server`，exit0；src/scripts/tests/.github及所选root配置1724项、完整dist3164项、14项critical ops/core清单before/after均完全一致，本次构建没有内容变化。证据`/private/tmp/model-router-build-c0-20261024/`。该候选自动[CI #171](https://github.com/elex-fu/model-router/actions/runs/40061894166)已completed/success，68/68 job均success；它不替代后续实际性能门槛。
+
+随后独占本机验证窗口，只运行一次原serial profile：OpenAI mock的latency direct/gateway、TTFB direct/gateway各100，保留`--diagnostic --serial-profile --request-samples --no-build`、prepared statements=off、cap/请求trace采样覆盖均unset，PG18.6保持fsync/synchronous_commit=on，Redis8.10.2。没有并行CLI capture/build/test，也没有使用真实供应商。两个场景均完成，400原始样本完整，correlationComplete=true，missing/invalid/duplicate request ID均0，gateway stream errors=0。
+
+| 四腿各100 | Direct p99 | Gateway p99 | 报告计算的overhead | 原门槛 | 结果 |
+|---|---:|---:|---:|---:|---|
+| Latency | 8.96ms | 731.34ms | 722.38ms | ≤30ms | 失败 |
+| Streaming TTFB | 12.48ms | 493.58ms | 481.10ms | ≤10ms | 失败 |
+
+run约52.36秒，wrapper UTC 04:36:57.293–04:37:49.821、exit1、interrupted=false；恰两项严格阈值violation。该轮仅一个OpenAI mock的四腿serial，另有原smoke，不能写成两个协议都通过serial。未启动cap A/B或完整R9，没有修改分位数、门槛、pool、timeout或durability，也没有删除失败样本。
+
+主机10核M1 Pro/16GiB，约5秒间隔记录11个host样本：1m load 6.775–8.248；`os.freemem`约68.8–240.8MiB。iostat除首累计行后disk0约108.93–399.98MB/s、CPU idle27–58%、sys22–50%。这些是主机聚合值，缺逐进程IO、fsync时延及运行队列证据；free memory数值也不能独立证明内存压力。direct/GW分腿采样，不据此归因外部竞争或推断生产容量。结束后的`ps`只读查询被sandbox以Operation not permitted拒绝，未获得额外进程快照。
+
+runner记录cleanup `processesStopped/postgresStopped/runtimeRemoved`全true，PG停止日志有server stopped；自有iostat已SIGTERM收尾。source/dist/harnessChanged全false；独立before/after清单1724/3164/14项各精确一致，原`.claude/worktrees/`保留。工件：`/private/tmp/model-router-c0-serial-20261024-run-01/`，清单`/private/tmp/model-router-c0-serial-20261024-run-01-verification/`，资源与wrapper`/private/tmp/model-router-c0-serial-wrapper-jy3s1lq8/`；目录700、日志/manifest 600。
+
+下一定位已设计但因暂停未执行：保留同四腿100及request-samples，在独立诊断中显式设置`MODEL_ROUTER_REQUEST_DIAGNOSTICS_SAMPLE_EVERY=1`，核200个GW UUID/trace关联与missing/pending/dropped，再按upstream-send/first-byte/EOF/settled markers及pool/query/transaction等exclusive阶段定位，不能相加inclusive或把结算query全归TTFB。新私有wrapper `/private/tmp/model-router-c0-serial-trace-wrapper-3bz7npj6/run-once.mjs`仅草稿，尚未完成静态审阅、从未执行；trace结果将来也只作诊断，不授予性能验收。
+
+### 29.56 CLI在途收敛：capture首错、HEAD修复与A1o独立WIP
+
+本机真实Claude Code2.1.216的三次capture均只使用dummy key和自有loopback，没有启动A0/probe/GW/PG或调用供应商，首错后均停止：
+
+| 运行 | 实际首错 | 已知范围 / 私有工件 |
+|---|---|---|
+| run01 | 通用`CLI observer rejected the workflow; details redacted` | 未有细分安全事实；`/private/tmp/model-router-a1a-capture.rHKg9g/` |
+| run02 | `stage=json-decode, code=JSON_INVALID, shape=null` | 未到原模型合同/forward；`/private/tmp/model-router-a1a-capture-run02-20261024/` |
+| run03 | `transport-contract / METHOD_NOT_POST`；`HEAD /`、MIME/encoding missing、body unread | 读body前拒绝，未观察到模型POST；`/private/tmp/model-router-a1a-seq-run03-20261024/` |
+
+因此最初JSON错误不能归因压缩、未知供应商字段或凭据。Sol逐步补固定stage/code、始终存在的transport分类/实读字节桶及首错保留，未打印body/prompt/header/URL/环境/CLI输出，也未通过解压或改写请求绕过。run03之前的精确scoped strict与runner语法已pass；三roots共23项、21pass/2skip，19组纯契约通过，source1722项及9个显式输入前后精确一致。这个结果仅覆盖当时版本，不覆盖随后HEAD/A1o修复。
+
+HEAD修复只支持已观察到的exact `HEAD /`：version/workflow每阶段1、总2，验证空body，返回observer自身无root路由的404空响应，不forward、不占3次generation。返回capture前重新读取最终辅助计数；未知端点/非空body/预算超限仍失败关闭。用途没有被独立证明，不称供应商或GW健康探针。此修复暂停前只有静态审阅，未再capture。
+
+另修正一项事实边界：thinking缺字段只能报告omitted，不能报告disabled。官方Claude第三方provider配置在MAX_THINKING_TOKENS=0时会省略字段，Kimi当前转换链也未注入disabled。原A1a disabled gate继续要求实际显式disabled；新增独立A1o `claude-two-read-thinking-omitted-observation`只做有限互通观察，具名suite `platform-cli-observation`及独立LIVE/CAPTURE opt-in，不声称开启/关闭thinking、供应商硬计费保证、backend revision或生产GO。
+
+A1o保留max_tokens≤512、最多3次generation/两次真实Read回传/第三轮答案、正常P01/显式Key及严格三笔native usage/钱包/账本/hold对账。仅新scene允许非opaque thinking/signature原字节经过及有界内存历史完整性比较；unknown/redacted/opaque、错序/缺失/篡改拒绝，不记录思考或signature。terminal输出超512使观察失败并停止后续，但已发生金融状态必须如实读回，不伪造unknown。parent新增fixture tenant/project/显式Key范围的有限只读durable/资金快照，诊断consumer异常受guard，不覆盖首错、不释放/退款/重派或补0。默认A0及原disabled scene合同保持。
+
+暂停时六文件最终源码及**27组纯测试源码**已冻结，Astra双路实际静态审阅通过；HEAD/A1o最终版本尚未执行typecheck、纯测试、capture或真实CLI模型请求，不能计27/27通过。源码已作为WIP `cf5008bfc79aa344fca479b104dc973601fa0487`独立推送`codex/p0-cli-workflow-2026-10-24`，基于9d，未合并主任务分支ae。工作树`/private/tmp/model-router-p0-cli-workflow-20261024`保留；自有node_modules symlink未入提交，原`.claude/worktrees/`未动。WIP备份自动排队的[CI #172](https://github.com/elex-fu/model-router/actions/runs/40063713942)已取消，API终态completed/cancelled，不能作为验证通过证据；暂停文档提交采用skip ci，避免继续排队验证。
+
+私有A1a wrapper `/private/tmp/model-router-a1-platform-cli-wrapper-dslc9dds/launch-once.mjs`、A1o wrapper `/private/tmp/model-router-a1o-cli-observation-wrapper-zbe6j6ka/launch-once.mjs`均只有静态审阅、从未执行；main目标路径、第一enabled Kimi材料严格分类/临时env作用域保持，不保存或输出密钥。原A0成功证据不外推这两条CLI路径。
+
+### 29.57 用户暂停、交接与剩余任务
+
+用户明确要求“暂停开发，收敛在途开发，更新技术方案实施进度和剩余任务内容”。已中断并收齐所有owner交接：源码冻结，无继续修复/测试/构建/CLI/PG/负载；各实现owner未持有自有活进程，最近serial runner三项cleanup全true、A1run03 driver已await所有child退出。未获新的OS进程快照，不扩写为所有用户进程的审计。此前全验证授权保留为历史，本次暂停优先，恢复前不执行剩余动作。
+
+| 剩余任务 | 暂停状态 | 恢复后的首个动作 |
+|---|---|---|
+| A1o真实两轮Read及三笔账务 | 独立WIP静态审过，最终源码未运行 | scoped strict/runner语法/27组纯测试→capture，事实合格后确切候选fresh build→正常P01/probe/至多3generation，实际逐笔对账 |
+| C0瓶颈定位 | 原serial未达标，trace草稿未审未执行 | 审trace wrapper，独占资源执行同四腿100及每请求trace；先核完整性再定位exclusive阶段 |
+| C0性能与过载 | cap A/B、完整R9未执行 | 证据驱动窄修→有效serial→cap A/B→完整R9，30/10ms及原ratio/错误/时长门槛不变 |
+| A1完整指定范围 | A1a disabled、thinking enabled、cancel/resume及实际版本证据未关闭 | 分场景原生capture/实跑；A1o成功也只关闭自身有限观察 |
+| B0/B1真实支付及历史商户 | 工程与PG/浏览器已有分层证据，真实PSP缺证 | 落实Alipay/CNY/回调及退款额度，验证原单重入、到账、退款与旧binding历史 |
+| C2收费生产运维 | KMS/IAM、独立同步金融恢复及异地PITR未齐 | 补独立WAL/fencing与最后已确认commit恢复、异地备份、告警及运营签收 |
+| A2真实Codex与可信计量 | registry仍空，backend enforcement/compact/remote history合同未齐 | 精确合同与可信profile审查后实跑；缺证继续unavailable |
+| 最终候选与里程碑 | M1/M2/M3开放 | 绑定整合后确切SHA收齐CI及相应真实验收，不互借历史绿色 |
+
+技术方案§10–11已同步暂停点、WIP位置、问题/处理方式与上述恢复顺序。性能采样与CLI/check/build共用本机资源时保持互斥；当前只完成交接与文档，不启动下一轮。

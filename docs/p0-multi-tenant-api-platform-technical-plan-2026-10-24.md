@@ -1,9 +1,9 @@
 # 可运营多租户模型 API 平台：P0 技术方案
 
-> 日期：2026-10-24。状态：实施中；冻结工程候选`9d1eb3c6350e0a97197160fdd0cb888690b02f71`已fresh build、真实Kimi A0 3/3、完整offline 7332 pass/0 fail/131 skip、自动CI #169完整68/68通过。PG run06保留原600秒窗口并通过全部严格恢复门槛、cleanup和冻结核对。真实CLI A1a在独立临时工作树实施，尚未真实验收；生产PSP/KMS/独立金融灾备、Codex可信计量和R9仍开放，M1/M2/M3未关闭。
+> 日期：2026-10-24。状态：按用户要求暂停开发，全部在途任务已冻结。主任务分支最新工程`ae911346280c3ea00e3b43c2a248cfe1026aefaa`已fresh build、C0定向21/21、CI #171全68/68通过；其OpenAI mock串行四腿各100已执行，但P99/TTFB额外开销722.38/481.10ms未达30/10ms原门槛。真实Kimi A0及PG原600秒恢复的通过证据仍绑定9d。CLI在途源码以WIP `cf5008b`保存于独立远程分支，尚未真实工具验收；M1/M2/M3均未关闭。
 > 初始设计基线：model-router `44b0eb7`；Codex C1–C4 基础 checkpoint `f61afec`，后续改动按独立任务继续交付；只读对标基线：CLIProxyAPI `911f49c`、Sub2API `a3eb7ef`、New API `6549a17`。
 > “拟新增”保留初始设计语境；当前实现与证据以各节明确状态及开发进度 §29 为准，源码交付不等同运营可用。
-> 状态区分源码、定向检查、真实供给、本地受控故障和生产验收；9d完整验收见开发进度§29.53，后续C0样本门禁及定向检查见§29.54。历史失败与旧CI保留，不能替代当前revision。
+> 状态区分源码、定向检查、真实供给、本地受控故障和生产验收；9d完整验收见开发进度§29.53，C0门禁/实际失败及CLI暂停交接见§29.54–57。历史失败与旧CI保留，不能替代当前revision。恢复开发前不执行下列剩余动作。
 
 ## 1. 目标、范围与交付边界
 
@@ -262,7 +262,7 @@ QR 内容必须来自服务端订单结果，浏览器不接触 PSP secret；二
 先用 A 正式 provision 的全新租户，通过非 seed 正式 admin/customer 入口及实际 builtin 完成首笔请求，禁止 direct SQL 代替开户。
 canonical R9 使用标准 CLI 与 bench runtime/mock 固定夹具，功能及财务约束使用真 PG；它不是 builtin 真实 provider 验收。
 标准开户/实际客户端工作流与 canonical R9 是两个独立 gate，分别保存证据。
-最新短诊断 797.59ms p99 overhead、207.23ms TTFB overhead 仍未满足 30/10ms 原门槛。
+旧短诊断797.59ms p99 overhead、207.23ms TTFB overhead保留。最新ae候选已执行OpenAI mock serial四腿各100：latency direct/gateway p99=8.96/731.34ms、overhead=722.38ms；TTFB direct/gateway p99=12.48/493.58ms、overhead=481.10ms、gatewayErrors=0，仍未满足30/10ms原门槛。400原始样本及关联齐全，资源记录仅有host聚合，不能据此归因外部竞争或生产容量。后续trace仅有未审草稿，暂停时未执行；cap A/B及完整R9亦未执行。
 self-hosted 真实 Kimi 交替请求与直连接近，只说明该次路径；不能代替 SaaS 托管验收。
 已实现的 Redis 共享配额、异步日志和 auth cache 作为基线，不重复立项。
 
@@ -329,7 +329,7 @@ PSP 无法重建模型扣费、hold、dispatch 和 unknown；同 PG 内的账本
 RPO ≤15 分钟只作为非金融或非收费 pilot 的初始设计目标；RTO ≤60 分钟、保留 30 天亦待实际演练确认。
 非金融 quota 的短暂计数丢失窗口独立记录，不冒充金融 RPO 或归档恢复保证。
 收费 GO 还必须取得生产 KMS/IAM、异地 backup/PITR 回执、告警及运营签收。
-发布候选绑定确切revision/build。[当前工程候选#169](https://github.com/elex-fu/model-router/actions/runs/40058135682)确切`9d1eb3c6350e0a97197160fdd0cb888690b02f71`，68/68 completed/success。该候选含canonical授权修复、fixture回归、A0就绪修复；fresh build及实际A0/完整offline/PG run06证据见进度§29.53。后续文档子commit不冒称已有新CI，独立A1工作树的未完成源码也不借用该绿色。
+发布候选绑定确切revision/build。[CI #169](https://github.com/elex-fu/model-router/actions/runs/40058135682)确切`9d1eb3c6350e0a97197160fdd0cb888690b02f71`，68/68 completed/success，实际A0/完整offline/PG run06见进度§29.53。后续C0门禁工程`ae911346280c3ea00e3b43c2a248cfe1026aefaa`另有fresh build及[CI #171](https://github.com/elex-fu/model-router/actions/runs/40061894166)全68/68通过，实际serial仍失败（§29.55）。文档子commit与独立CLI WIP不借用其它SHA的CI或live结论。
 
 [历史#161](https://github.com/elex-fu/model-router/actions/runs/40041486469)、#162/87、#159/701和#158/736等确切SHA及失败见进度§29，保留历史不互借。最新9d本地PG与Kimi证据分别限定为受控恢复和正常新客闭环；不关闭真实Codex/PSP/KMS/PITR或R9门槛。
 
@@ -363,10 +363,10 @@ operation 完成与 entitlement 激活约束必须防止 completed 但无有效�
 | P06 | payments parser/专用凭据/CLI/doctor/组合根 | P02b/P07合同 | 最终deployment/doctor/startup132/132；worker正式MAX_ATTEMPTS范围1..20、默认5，`a755301`已推送；真实支付凭据/merchant及运营验收待齐备 | 已实现并定向验证；真实PSP/生产证据开放 |
 | P07 | binding resolver/CAS/http/workers/refunds/plans | P02b/P06 | 商户binding历史PG15/18均过，POST/promo重入7/7；producer列值窄修`687a3c9`已推，worker24/24+combined strict+最新PG27/27通过；#151/`69125a1`68/68成功，#153/`62b98a5`68/68成功；真实商户切换/回调/退款未验 | 已实现并定向/真PG验证；工程候选87 CI通过，真实PSP开放 |
 | P08 | 本地 QR、钱包/套餐收银与原单恢复 | P06/P07 | web定向30/30、typecheck/build；新访问/收银browser4/4真实Chrome+local API及既有审计2/2通过；真实PSP待验 | 已实现；本地前端/浏览器通过；真实PSP开放 |
-| P09 | 请求诊断、PG checkout/query/transaction、首字节/EOF/settled | P03/正式供给 | trace UUID与cap profile c=200/60s工程`e87c7fa`已推送；后续full/cap样本充分性及full TTFB完整性补齐，定向21/21和JScheck通过（§29.54）；未执行新负载，serial→cap A/B→完整R9未关闭 | 工程已实现并定向验证；负载/性能验收未执行 |
+| P09 | 请求诊断、PG checkout/query/transaction、首字节/EOF/settled | P03/正式供给 | C0样本充分性工程ae已fresh build、21/21及CI171全68通过；实际serial四腿各100、完整400样本，但722.38/481.10ms开销超原门槛；trace草稿未审未执行，cap A/B和完整R9未执行（§29.55） | 门禁已交付；性能未达标，暂停定位 |
 | P10 | 故障/恢复与金融hold/lease不变量 | P07/P09 | 既有refund SIGKILL/SSE SIGTERM、operator、Redis、暖cache typed403、wire ACK保留；9d完整PG run06自然600s/全canonical快照/零重放派发/新C精确结算通过，cleanup及hash稳定；历史run05失败保留 | 受控本地恢复已过；生产独立同步故障域/PITR及完整矩阵开放 |
-| P11 | Redis/Compose/systemd/KMS/backup/正式CI | P06/P10 | 9d fresh build、完整offline 7332pass/0fail/131skip及CI#169全68/68；Kimi A0及PG run06分别通过；Redis generalZeroLossClaim=false、unflushedMutationLossTested=false保持 | 基础工程及本地受控恢复已验；生产KMS/独立金融恢复/异地备份外证开放 |
-| P12 | 本方案与进度 §29 gate | P01–P11 | 分层记录源码、fixture、真PG18、本地TLS和外证；M1/M2/M3不关闭 | 持续记录；待最终验收 |
+| P11 | Redis/Compose/systemd/KMS/backup/正式CI | P06/P10 | ae另有fresh build及CI171全68通过；9d完整offline 7332pass/0fail/131skip、Kimi A0及PG run06各保留原范围；Redis generalZeroLossClaim=false、unflushedMutationLossTested=false保持 | 基础工程及本地受控恢复已验；生产外证开放，暂停 |
+| P12 | 本方案与进度 §29 gate | P01–P11 | 暂停点、CLI独立WIP、实际性能失败和恢复顺序已记§29.55–57；M1/M2/M3不关闭 | 暂停交接已记录 |
 
 可并行四 lane：A 供给 P01/P03；B 协议 P04/P05；C 支付 P06/P07/P08；D 性能/运维 P09/P10/P11。
 迁移注册链、`managed-saas.ts`、CLI、runtime 主文件、共享 DTO 和进度文档必须单 writer。
@@ -381,11 +381,11 @@ P02a 依赖 P01 契约先行，P03 只等待开户批；P02b 在 P06/P07 接口�
 | Gate | 验收范围 | 通过证据 | 阻塞时处理 |
 |---|---|---|---|
 | A0 | 新租户正式平台供给 | 9d正式Kimi新客3/3：正常operation/权益/显式Key/生成/usage/settlement与hold0；P01禁用/版本冲突沿各自受限PG证据，本次真实供应商仅正常首请求 | 正常真实供给闭环已过；不能替代A1真实CLI |
-| A1 | 指定 CLI 协议工作流 | 两轮工具、thinking 限制、取消/重连、usage 与模型 revision | pair 继续拒绝 |
+| A1 | 指定 CLI 协议工作流 | WIP cf5008b含A1a/A1o及27组测试源码，仅静态审阅；最后实际capture在HEAD /首错，修复后尚未再验；两轮工具、thinking、取消/重连与真实usage未关闭 | 暂停；独立WIP不作为真实工作流通过 |
 | A2 | Codex 完整能力 | 后端 enforcement、opaque/remote input、reasoning 上界与真实 compact/WS | unavailable；M3 阻塞 |
 | B0 | 单 Alipay/CNY | 实际 precreate、丢响应原 POST 重入、回调、到账、查询、全/部分退款及乱序 | M2 阻塞 |
 | B1 | 商户/密钥历史 | 切 merchant/轮换、历史单回调退款、歧义回填隔离 | 保留 draining，禁止新启用 |
-| C0 | SaaS 性能与过载 | 有效 serial、cap A/B、完整 R9、成功样本/HTTP200 successful rps/HTTP429 分列 | 不改门槛，定位首失败 |
+| C0 | SaaS 性能与过载 | ae实际serial四腿各100，722.38/481.10ms开销超30/10；有效cap A/B、完整R9及容量仍待验 | 暂停；恢复后先phase诊断，不改原门槛 |
 | C1 | 故障恢复 | 每项故障最终金融/hold/lease 快照与人工 unknown 记录 | M2 阻塞 |
 | C2 | 收费生产运维 | 生产 KMS/IAM、最后已确认金融 commit 的独立同步持久恢复演练、异地 backup/PITR、候选 commit 必需 CI、告警与运营签收 | 缺任一证据仅 pilot，丢金融证据禁止自动重开 |
 
@@ -394,39 +394,54 @@ P02a 依赖 P01 契约先行，P03 只等待开户批；P02b 在 P06/P07 接口�
 M1 至少 A0+A1 指定范围；M2 还需要 B0/B1/C0/C1/C2；M3 额外需要 A2 和完整 P0 协议矩阵。
 旧报告只能作为历史基线，不能作为本轮实现通过证明。
 
-## 10. 工程余项与外部前置
+## 10. 暂停点、工程余项与外部前置
 
-当前工程候选9d完整验证已过：fresh build、138定向/strict、真实Kimi A0 3/3、完整offline零失败、PG原600秒run06及CI#169全68/68。精确artifact/范围见进度§29.53；旧87/CI#162及run05失败作为历史保留。主工作区验证时全冻结，后续A1代码在独立临时工作树实施，不继承9d的CI或live结论。
+用户于2026-10-24明确要求暂停开发、收敛在途并更新文档。本轮所有owner已停止源码修改和验证，无新的trace/capture/build/load继续运行。主任务分支`codex/p0-managed-platform-2026-10-24`工程为ae；CLI六文件WIP以`cf5008bfc79aa344fca479b104dc973601fa0487`保存于独立远程分支`codex/p0-cli-workflow-2026-10-24`，工作树`/private/tmp/model-router-p0-cli-workflow-20261024`保留。该WIP未合并主任务分支，不能借用ae/9d的CI与真实验收。
 
-共享准备链修复见进度§29.49–53：显式key在scheduler前以同READ COMMITTED事务进行当前授权、fresh entitlement/IP及HMAC只读编译上下文查询，用当前候选真实compiler核验FP/version，late-existing等待后重新授权，原financial guard保留。新关键回归及run06已证明当前受控范围；新增读取成本尚未性能测量，不外推R9或生产故障域。
+9d的正式Kimi A0、完整offline和PG600秒恢复证据继续有效于原范围；ae只新增C0样本门禁及其构建/CI和实际serial诊断。Redis旧RDB、operator、warm cached-auth typed403、wire ACK等保持各自证据边界。用户指定Kimi材料已有成功A0，不再作为待提供凭据项；文档不保存密钥。
 
-Redis旧RDB、operator、warm cached-auth typed403、wire ACK等按原分层证据保留。用户已允许所有必要验证，原600秒PG run06已实际通过；该本地结果不能推断独立同步副本/零RPO/PITR。
+恢复开发后按下表处理，当前均保持暂停：
 
-A0 DTO`e1adeb6`、凭据隔离`5743b9c`、CP就绪`9d1eb3c`已交付。用户指定配置材料已通过真实Kimi新客首请求，材料仅临时进程注入、文档不存密钥。A1真实客户端尚无结果；UUID trace/cap工具不替代受控R9性能验收。
+| 优先级/任务 | 暂停状态 | 恢复后的处理方式与出口 |
+|---|---|---|
+| P0 / A1o真实CLI有限互通 | 独立WIP已保存并完成静态审阅；HEAD/A1o最终源码未执行检查，真实工具调用为0 | 先scoped strict、runner语法和27组纯测试，再仅capture；实际omitted/model/stream/Read/max_tokens≤512齐全后，绑定确切整合候选fresh build，再正常P01/probe及最多3次generation，逐笔usage/钱包/账本/hold核对 |
+| P0 / C0首瓶颈定位 | serial完整样本已失败；trace wrapper仅未审草稿，从未执行 | 先审草稿与资源条件，再独占执行同四腿100、request-samples、sampleEvery=1；核200个GW UUID及trace完整性，按markers和exclusive阶段定位，trace成绩不作性能验收 |
+| P0 / C0性能与过载 | 30/10ms未过；cap A/B、完整R9尚未执行 | 按真实瓶颈窄修，受控serial有效后再cap关闭/8候选A/B、完整R9；保留c=200、60秒、SSE10分钟、ratio≥2.7、零意外错误及成功/429分列门槛 |
+| P0 / A1完整指定范围 | A1o不证明thinking已关闭/开启；A1a disabled、thinking enabled、cancel/resume及可获得的模型版本证据开放 | 分场景捕获原始协议事实并实跑；无法取得backend revision时明确未知，不用CLI版本替代，不把有限互通观察写成M1通过 |
+| P0 / B0、B1真实支付 | binding/退款/收银工程已有本地与PG证据，真实PSP未验 | 补真实Alipay主体、CNY钱包/计划、回调验签配置及受控退款额度；验证原POST重入、回调到账、全/部分退款、旧binding回调退款与歧义reconciliation |
+| P0 / C2收费生产 | KMS/IAM、独立同步PG/WAL/fencing与异地backup/PITR证据未齐 | 演练最后已确认金融commit的独立持久恢复，再验异地恢复、告警和运营签收；软件KMS/异步归档及本地stop/start不替代这些证据 |
+| P0 / A2 Codex完整托管 | 可信计量registry仍空，正向后端合同与真实compact/WS未验 | 获得精确endpoint/backend计量、输出enforcement、opaque/remote history合同后再登记可信profile；缺证保持unavailable，不能补造正向profile |
+| 发布收口 | M1/M2/M3均未关闭 | 对最终确切候选收齐必需CI、相应真实工作流/支付/性能/恢复及签收；各gate分别记录结果 |
 
-外部证据：真实A0正常闭环已有结果，真实CLI A1仍待验；Codex可信计量registry为空；真实PSP、生产KMS/IAM、独立同步PG/金融恢复、异地backup/PITR与运营签收未完成。M1/M2/M3均开放。
+本机资源队列内，性能采样与CLI/check/build互斥；源码静态工作可按原ownership并行。恢复顺序不意味着现在已获执行GO：本次暂停期间只保存改动、收尾与文档交接。
 
-1. 第一条正式供给已绑定Kimi Code/kimi-for-coding并过A0；本机Claude Code 2.1.216真实工具场景按下节继续，不再询问已提供的凭据来源。
-2. Alipay 真实商户主体、CNY 钱包/计划发布、回调域名、验签材料与受控退款额度由谁提供？当前待外部配置。
-3. 历史订单是否能唯一归属商户 binding？歧义清单必须先完成 reconciliation 决议。
-4. Codex 精确 endpoint/backend revision 能否提供输出 enforcement 和 compact/remote history 计量契约？缺证阻塞 A2。
-5. 专用性能 runner、同版本依赖和压测资源窗口何时可用？资源污染不得据此修改 R9 门槛。
-6. 生产 KMS/IAM、独立故障域同步 PG 副本、金融提交等待/fencing、异地备份及演练责任人是否落实？软件 KMS 和异步归档不能替代。
-7. 金融 GO 必须演练最后已确认 commit 的独立持久恢复；15 分钟 RPO 仅非金融/非收费 pilot，RTO/保留目标待确认。
-8. 当前9d绑定#169全68/68成功，所有旧CI/失败按确切SHA保留；A1新增代码及后续文档仍需各自明确证据。
+## 11. A1a / A1o：真实CLI工作流暂停交接
 
-下一步为A1a无Provider capture→真实CLI两轮Read：隔离工作树中复用正常A0 P01/Key生命周期，默认A0断言保持；先实测本机参数/预算，合格后再执行受控3次模型请求。取消重连、thinking enabled、未暴露backend revision、R9及生产PSP/KMS/独立金融恢复仍按各自门槛推进。
+本机Claude Code实际version/help为2.1.216。三次capture均仅dummy key→自有loopback，未启动A0/probe/GW/PG或供应商。run01只有通用拒绝，run02为JSON_INVALID；补始终可用的固定transport元数据后，run03明确首请求是`HEAD /`，在读body前被METHOD_NOT_POST拒绝。因此尚无实际模型POST的max_tokens/thinking/tools事实，更无真实两轮工具或三笔账务结果；不能把候选环境变量当已观察请求。
 
-## 11. A1a：真实CLI两轮工具的最小有界验收
+### 11.1 已冻结的观察器与辅助请求合同
 
-现有HTTP工具/取消fixture及本项目built CLI保留原证据，A1a另启动本机真实Claude Code。已在独立配置、dummy key和loopback base下执行version/help，实际2.1.216；帮助列出的非交互、Read工具集、独立MCP及settings来源选项可作为候选，未列出的token/turn选项不能据此断言不支持。最新[官方CLI参考](https://code.claude.com/docs/en/cli-reference)和[环境变量参考](https://code.claude.com/docs/en/env-vars)仅用于配置设计，本机行为仍以capture实测为准。
+WIP仅给exact `HEAD /`新增独立预算：version/workflow每阶段最多1、总2，验证空body，返回observer自身root的404空响应，不转发GW/provider、不计入3次generation。其它未知端点仍失败关闭；不能把本地404称为已观察GW404，也不推断HEAD目的。capture在返回前刷新最终辅助计数。该修复及A1o新增尚未执行。
 
-1. **先capture-only。** 真实CLI只连接自有loopback观察器，使用dummy客户Key，不启动A0/probe/GW或供应商。首message检查公开model映射、stream、真实max_tokens为正整数且≤512、thinking禁用事实及工具集合，然后固定拒绝并终止。未知端点、参数或预算不符立即失败，不自动尝试参数矩阵，不通过改写body或放宽上限硬跑。
-2. **复用正常P01窗口。** A0仅新增内部可选consumer；默认单fetch、1request及原财务断言保持。CLI consumer发生在正式MFA/注册、资金、真实worker probe、verified/P01/显式Key和GW就绪之后、finally清理之前。上下文仅客户proxy key、GW/public model及生命周期能力，不包含上游Key、SQL或完整fixture。
-3. **真实工具回传。** 私有目录第一文件给出随机第二文件名，第二文件保存短opaque答案，prompt不包含第二路径或答案。CLI只启Read，真实执行两次串行读取与两次tool_result，第三个message生成答案；观察器在内存核验use/result ID唯一性、顺序及最终答案，只记录安全布尔值/计数/数值usage和请求ID。
-4. **硬限受控路径。** 单用途观察器固定转发该fixture GW，原body/headers/SSE不改；最多转发3个message，失败尝试/重试/辅助message都计入，第4个或未知端点拒绝并终止。每次均重新检查输出上限等事实。服务端限定单候选、retryBudget=0；新fixture预计1probe+至多3generation，不把消息计数冒充独立供应商wire counter。该限制不声明OS级所有egress隔离；CLI独立配置并关闭非必要流量，不加载附带MCP/工具。
-5. **父层严格对账。** callback只返回固定三条`{requestId, usage}`，usage四字段必须来自真实SSE，缺失不能补0。父层逐条复用现durable classification，对齐原生数值、3request/attempt/usage/settlement、3ledger transactions/6entries、钱包总额与hold0；不能伪造Response填入仅属于默认HTTP helper的私有usage记录。
+错误只投影固定stage/code、method/path类别、MIME/encoding类别、实读字节数桶及白名单shape；first-failure保留。无原body、prompt、未知header/URL、环境、思考文本、signature或CLI stdout/stderr。现仅分类encoding，未解压或试改compression参数。
 
-实施ownership：SolPayment仅A0 callback；SolProtocol新CLI driver；SolCodex命名platform-cli runner及opt-in integration root；SolGateway focused纯契约测试；Astra双路实际审阅、Luna执行。代码目前位于独立临时工作树，尚未并入9d候选或执行真实CLI模型请求。
+### 11.2 两个场景保持独立
 
-A1a成功只覆盖这条thinking-disabled两轮Read及相关账务；thinking enabled、真实取消/resume和未暴露backend revision仍独立记录。CLI版本不等于后端revision，合成fixture价格/资金不代表供应商真实报价。M1仍按完整指定A1范围验收。
+| 场景 | 入口与合同 | 暂停时证据 |
+|---|---|---|
+| A1a / `claude-two-read-thinking-disabled` | suite `platform-cli`；live必须capture真实thinking=disabled，omitted不放行 | 源码已实现，尚未观察到模型POST；不能宣告disabled |
+| A1o / `claude-two-read-thinking-omitted-observation` | suite `platform-cli-observation`；独立LIVE/CAPTURE opt-in，实际thinking omitted且max_tokens≤512、stream、唯一Read、公开model匹配后才P01/probe | 新源码静态审查通过，27组纯测试源码已冻结；最终版本未typecheck/pure/capture/live |
+
+官方[环境变量说明](https://code.claude.com/docs/en/env-vars)明确第三方provider下MAX_THINKING_TOKENS=0会省略thinking；省略不等于Kimi禁用。A1o只做有限互通观察，不声称enabled/disabled、供应商硬计费保证、backend revision或生产GO。正数thinking预算1024/output1536仅完成另一候选设计，未实施，不更改当前512上限。
+
+### 11.3 工具、用量及失败状态
+
+两个场景均复用正常MFA/注册/资金→真实worker probe→verified/P01→显式客户Key→GW，默认A0单fetch不变。driver上下文只有客户Key/origin/public model/生命周期，无SQL、完整fixture或上游Key。私有第一文件指向随机第二文件，第二文件保存opaque答案；两次真实Read/tool_result后第三个message返回答案，最多3次generation，失败尝试/重试同样计数，保持原body/headers/SSE字节。
+
+仅A1o允许非opaque thinking/signature原样经过，在内存有界核对后续assistant历史的完整值与顺序；redacted/opaque、缺失/篡改/重排拒绝，不输出或持久化思考内容。四个native usage字段必须实际存在且合法；terminal output>512立即使观察失败并阻止后续message，但不能倒转已发生的结算。
+
+成功仍严格核对三条request/attempt/usage/settlement、三账本事务/六entries、钱包总额及hold0。失败在cleanup前按fixture tenant/project/显式Key读取有限durable/资金快照，真实状态可能是settled、unknown或pending；不伪造unknown、不退款/释放/重派、不补0，诊断consumer异常也不得覆盖首错。请求上限与事后观察不包装为供应商事前硬保证。
+
+### 11.4 保存位置与恢复验证边界
+
+六文件WIP已独立提交推送`cf5008b`，最终Astra静态审查通过。最后实际检查仍属于HEAD/A1o修复之前的run03：scoped strict/runner语法通过、三roots共23项（21pass/2skip），随后的capture在HEAD首错；这些结果不覆盖当前WIP的27组测试源码。恢复后从当前确切源码重新检查/capture，不重用旧绿色。成功A1o也不关闭A1a、完整A1或M1。
