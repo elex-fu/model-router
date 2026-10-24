@@ -2,7 +2,7 @@
 // Owns a new initdb cluster OR a new Docker container, and fresh test DBs only.
 // Usage: node scripts/run-commercial-postgres-gate.mjs
 //        (--pg-bin /path/to/bin | --docker-image postgres:15-alpine)
-//        [--suite commercial|composite|all|kimi|platform-access] [--output-dir /new/evidence/dir]
+//        [--suite commercial|composite|all|kimi|platform-access|platform-cli|platform-cli-observation] [--output-dir /new/evidence/dir]
 // Or:    ... --test-file tests/path.postgres.integration.test.ts [--worker-role]
 // `all` runs the two deterministic gates. `kimi` requires the separate live
 // opt-in and credential; this runner never discovers or supplies credentials.
@@ -24,6 +24,8 @@ const suites = {
   composite: 'tests/saas/gateway/composite-resolved-supply-billing.postgres.integration.test.ts',
   kimi: 'tests/integration/kimi-commercial-live.test.ts',
   'platform-access': 'tests/integration/platform-access-first-request-live.test.ts',
+  'platform-cli': 'tests/integration/platform-access-cli-workflow-live.test.ts',
+  'platform-cli-observation': 'tests/integration/platform-access-cli-observation-live.test.ts',
 };
 const options = { pgBin: undefined, dockerImage: undefined, suite: 'commercial', outputDir: undefined,
   testFile: undefined, workerRole: false };
@@ -39,7 +41,7 @@ for (let index = 0; index < argumentsList.length; index += 1) {
   const key = { '--pg-bin': 'pgBin', '--docker-image': 'dockerImage', '--suite': 'suite', '--output-dir': 'outputDir',
     '--test-file': 'testFile' }[name];
   if (!key || (!inlineValue && !argumentsList[index + 1])) {
-    throw new Error('usage: --pg-bin /path/to/bin OR --docker-image postgres:15-alpine; --suite commercial|composite|all|kimi|platform-access');
+    throw new Error('usage: --pg-bin /path/to/bin OR --docker-image postgres:15-alpine; --suite commercial|composite|all|kimi|platform-access|platform-cli|platform-cli-observation');
   }
   options[key] = inlineValue ?? argumentsList[++index];
 }
@@ -63,7 +65,14 @@ if (options.suite === 'kimi' && (process.env.RUN_KIMI_COMMERCIAL_LIVE !== '1' ||
 if (options.suite === 'platform-access' && (process.env.RUN_PLATFORM_ACCESS_FIRST_REQUEST_LIVE !== '1' || !process.env.KIMI_CODE_API_KEY)) {
   throw new Error('platform-access requires explicit RUN_PLATFORM_ACCESS_FIRST_REQUEST_LIVE=1 and ephemeral KIMI_CODE_API_KEY');
 }
-const firstRequestLive = options.suite === 'platform-access';
+if (options.suite === 'platform-cli' && (process.env.RUN_PLATFORM_ACCESS_CLI_WORKFLOW_LIVE !== '1' || !process.env.KIMI_CODE_API_KEY)) {
+  throw new Error('platform-cli requires explicit RUN_PLATFORM_ACCESS_CLI_WORKFLOW_LIVE=1 and ephemeral KIMI_CODE_API_KEY');
+}
+if (options.suite === 'platform-cli-observation' && (process.env.RUN_PLATFORM_ACCESS_CLI_OBSERVATION_LIVE !== '1' || !process.env.KIMI_CODE_API_KEY)) {
+  throw new Error('platform-cli-observation requires explicit RUN_PLATFORM_ACCESS_CLI_OBSERVATION_LIVE=1 and ephemeral KIMI_CODE_API_KEY');
+}
+const cliLive = options.suite === 'platform-cli' || options.suite === 'platform-cli-observation';
+const firstRequestLive = options.suite === 'platform-access' || cliLive;
 if (firstRequestLive && !existsSync(resolve(root, 'dist/cli/index.js'))) throw new Error('build the current server before platform-access acceptance');
 const docker = Boolean(options.dockerImage);
 if (docker && !/^postgres:(?:1[5-9]|[2-9][0-9])(?:\.\d+)*(?:-alpine)?$/.test(options.dockerImage)) {
@@ -72,6 +81,12 @@ if (docker && !/^postgres:(?:1[5-9]|[2-9][0-9])(?:\.\d+)*(?:-alpine)?$/.test(opt
 const pgBin = options.pgBin ? resolve(options.pgBin) : undefined;
 if (pgBin) for (const binary of ['initdb', 'pg_ctl', 'psql', 'postgres']) {
   if (!existsSync(join(pgBin, binary))) throw new Error(`missing PostgreSQL binary: ${binary}`);
+}
+const postgresVersion = pgBin ? spawnSync(join(pgBin, 'postgres'), ['--version'], { encoding: 'utf8', env: nonSuiteChildEnv }).stdout.trim() : null;
+if (cliLive && (docker
+  ? !/^postgres:18(?:\.\d+)*(?:-alpine)?$/.test(options.dockerImage ?? '')
+  : !/\(PostgreSQL\) 18(?:\.|\s|$)/.test(postgresVersion ?? ''))) {
+  throw new Error('platform-cli acceptance requires an explicit PostgreSQL 18 backend');
 }
 const selectedSuites = options.suite === 'all' ? ['commercial', 'composite'] : [options.suite];
 const needsWorker = options.workerRole || selectedSuites.includes('kimi') || firstRequestLive;
@@ -160,7 +175,7 @@ const summary = {
   dockerImage: options.dockerImage ?? null,
   dockerImageId: null,
   containerId: null,
-  postgresVersion: pgBin ? spawnSync(join(pgBin, 'postgres'), ['--version'], { encoding: 'utf8', env: nonSuiteChildEnv }).stdout.trim() : null,
+  postgresVersion,
   sourceScope: 'literal relative import closure, runner, role manifest, package-lock.json',
   sourceBefore: await sourceSnapshot(),
   sourceAfter: null,
@@ -218,7 +233,7 @@ async function run(stage, command, args, env = nonSuiteChildEnv, timeoutMs = 180
   let result;
   try {
     result = await new Promise((resolveRun, reject) => {
-      const ownedTestGroup = firstRequestLive && stage === 'platform-access-test';
+      const ownedTestGroup = firstRequestLive && stage === `${options.suite}-test`;
       const child = spawn(command, args, { cwd: root, env, detached: ownedTestGroup, stdio: ['ignore', log.fd, log.fd] });
       activeChild = child;
       activeOwnedTestGroup = ownedTestGroup;
@@ -341,7 +356,7 @@ try {
     const database = `model_router_test_${suite.replaceAll('-', '_')}_${randomUUID().replaceAll('-', '')}`;
     roleUrl('postgres', database); // Validate before embedding the identifier in CREATE DATABASE.
     const env = {
-      ...process.env,
+      ...(suite === 'kimi' || suite === 'platform-access' || suite === 'platform-cli' || suite === 'platform-cli-observation' ? process.env : nonSuiteChildEnv),
       NODE_ENV: 'test',
       PGSSLMODE: 'disable',
       MODEL_ROUTER_SAAS_DATABASE_URL: roleUrl('model_router_saas_migrator', database),
@@ -354,7 +369,12 @@ try {
         MODEL_ROUTER_SAAS_VALIDATION_E2E_MIGRATOR_URL: roleUrl('model_router_saas_migrator', database),
         MODEL_ROUTER_SAAS_VALIDATION_E2E_WORKER_URL: roleUrl('model_router_saas_validation_worker', database),
       } : {}),
-      ...(suite === 'platform-access' ? { PLATFORM_FIRST_REQUEST_RUNTIME_PARENT: join(outputDir, 'platform-access-runtime') } : {}),
+      ...(suite === 'platform-access' || suite === 'platform-cli' || suite === 'platform-cli-observation'
+        ? { PLATFORM_FIRST_REQUEST_RUNTIME_PARENT: join(outputDir, 'platform-access-runtime') } : {}),
+      ...(suite === 'platform-cli' || suite === 'platform-cli-observation' ? {
+        RUN_PLATFORM_ACCESS_FIRST_REQUEST_LIVE: '1',
+        PLATFORM_ACCESS_CLI_WORKFLOW_RUNNER: suite,
+      } : {}),
       ...(suite === 'kimi' ? {
         KIMI_COMMERCIAL_EVIDENCE_DIR: join(outputDir, 'kimi-evidence'),
       } : {}),
