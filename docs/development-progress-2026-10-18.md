@@ -1373,6 +1373,8 @@ markers：latency腿 upstream-send p50=172.9ms、first-byte=179.8、eof=179.9、
 
 下一动作：静态枚举pre-dispatch查询路径（auth→admission→prelock→preparation→dispatch）以确定每请求SQL往返构成与窄修候选；之后按原顺序窄修→有效serial→cap A/B→完整R9，门槛不变。证据：`/private/tmp/model-router-c0-serial-trace-20261024-run-01/`（含`serial-profile-request-traces.json`、`serial-profile-request-samples.json`、gateway日志）与wrapper目录。
 
+另：同日A1a capture-only探针（loopback、无供应商，`/private/tmp/model-router-a1a-capture-run01-20261024/`）确认CLI 2.1.216在现环境合同下模型POST仍为`thinking:"omitted"`（capture 1/1 pass、upstream未接触）。A1a"实际显式disabled"门槛在本CLI版本+配置下不可满足的现状由直接证据固定；A1a、thinking enabled、cancel/resume场景继续开放，等待CLI侧能力或方案修订，不以A1o替代。
+
 ### 29.60 恢复开发首轮：run04 capture首次通过，A1o事实合同闭合
 
 用户以明确指令恢复开发（按技术方案开发、最大化并行、聚焦核心能力）。恢复后执行通道立即重跑A1o capture-only preflight（run04）：`RUN_PLATFORM_ACCESS_CLI_OBSERVATION_CAPTURE=1 node --import tsx --test tests/integration/platform-access-cli-observation-live.test.ts`，在整合main工作树（源码与`89b31fd`一致）执行。真实Claude Code 2.1.216在HEAD `/`修复后首次通过observer推进到模型POST，返回的安全投影为`messageObserved=true`、`upstreamContacted=false`、`maxTokens=512`、`thinking=omitted`、`stream=true`、`toolCount=1`；测试1/1 pass、0 fail/0 skip、单测时长约0.67s。日志`/private/tmp/model-router-a1o-capture-run04-20261024/capture-run04.log`。
