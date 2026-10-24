@@ -1400,3 +1400,7 @@ C0后续顺序维持：窄修①→受控serial复测（trace对照）→有效�
 run01（通用拒绝）/run02（JSON_INVALID）/run03（METHOD_NOT_POST首错）的历史失败至此由修复闭环解决：run04证明修复后的observer接受CLI的version/workflow根HEAD并在空body、限额内返回404，CLI随后发出可解析的模型POST。capture仍是loopback+dummy key，`upstreamContacted=false`保持；不构成A1o live、thinking禁用/启用证明或M1关闭。
 
 下一步按§10顺序：绑定确切候选fresh build并补该候选CI（非skip ci提交），随后经LIVE wrapper启动正常P01/probe、显式Key与至多3次generation逐笔对账；C0 trace wrapper静态审阅并行进行，其独占诊断排在CLI执行窗口之后。Kimi凭据经wrapper合同确认可用（inline、sk-shaped，未打印值）。
+
+### 29.64 恢复开发首个工作块收尾
+
+`0f7f454`（窄修⑤+诊断文档）CI #40092054423 completed/success 68/68。本工作块交付：A1o完整闭环（capture→live→三根因修复→干净候选`e988644` CI 68/68→run08复验）；C0首瓶颈完整定位（trace+静态枚举+路线图+零风险窄修落地）；A1a omitted边界证据固定。下个工作块入口：C0窄修①（去重重复重验证，需保持fence-先于-幂等claim不变量与"fence后至少一次读取"语义）、10ms TTFB门槛的架构级方案决策、B0/B1真实Alipay（外部材料仍缺）、C2/A2按原计划。
