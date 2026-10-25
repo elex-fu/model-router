@@ -459,7 +459,11 @@ export class ConfigServiceV2 {
   ): Promise<void> {
     let available: boolean | undefined;
     if (secret.type === 'inline') available = secret.value.length > 0;
-    else if (secret.type === 'env') available = Boolean(process.env[secret.name]);
+    else if (secret.type === 'env') {
+      // Established inline convention: a provider-shaped key literal
+      // (sk-…) stored as the env reference name resolves to itself.
+      available = /^sk-[A-Za-z0-9_-]{20,}$/.test(secret.name) || Boolean(process.env[secret.name]);
+    }
     else if (this.options.hasSecret) available = await this.options.hasSecret(secret.id);
     if (available === false) {
       (required ? errors : warnings).push({

@@ -11,7 +11,12 @@ const label = z.string().trim().min(1).max(200);
 const positiveInt = z.number().int().positive();
 const nonNegativeInt = z.number().int().nonnegative();
 const secretSource = z.discriminatedUnion('type', [
-  z.object({ type: z.literal('env'), name: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/) }).strict(),
+  // An env reference is either a real environment variable name or the
+  // established inline provider-key literal convention (a name that is
+  // itself a provider-shaped key such as sk-…). The runtime resolves the
+  // latter as the literal value; live configurations and verification
+  // wrappers rely on this shape.
+  z.object({ type: z.literal('env'), name: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$|^sk-[A-Za-z0-9_-]+$/) }).strict(),
   z.object({ type: z.literal('inline'), value: z.string().min(1) }).strict(),
   z.object({ type: z.literal('secret'), id }).strict(),
 ]);

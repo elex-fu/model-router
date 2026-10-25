@@ -10,7 +10,9 @@ async function resolveSecret(source: SecretSource, resolver?: SecretResolver): P
     source.type === 'inline'
       ? source.value
       : source.type === 'env'
-        ? process.env[source.name]
+        // Established inline convention: a provider-shaped key literal
+        // (sk-…) stored as the env reference name resolves to itself.
+        ? (/^sk-[A-Za-z0-9_-]{20,}$/.test(source.name) ? source.name : process.env[source.name])
         : await resolver?.(source.id);
   if (!value) {
     const reference = source.type === 'inline' ? 'inline' : source.type === 'env' ? source.name : source.id;
