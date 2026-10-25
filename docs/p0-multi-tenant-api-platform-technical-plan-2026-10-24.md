@@ -450,3 +450,43 @@ WIP仅给exact `HEAD /`新增独立预算：version/workflow每阶段最多1、�
 ### 11.4 保存位置与恢复验证边界
 
 六文件WIP已独立提交推送`cf5008b`，并按后续用户授权整合至main `9f43335`，最终Astra静态审查通过。最后实际检查仍属于HEAD/A1o修复之前的run03：scoped strict/runner语法通过、三roots共23项（21pass/2skip），随后的capture在HEAD首错；这些结果不覆盖当前整合版本的27组测试源码。2026-10-24确认轮已在整合main `89b31fd`（六文件与`cf5008b`字节一致）实际重跑六文件scoped strict与27组纯测试并全部通过（27/27、0 fail/0 skip），构成当前整合版本的直接证据；capture/live与整合候选CI绑定仍需从当前确切源码执行，不重用旧绿色。成功A1o也不关闭A1a、完整A1或M1。
+
+## 12. D1–D4 决策落地设计（2026-10-25 裁定）
+
+对照参考 sub2api 实证（宽 auth 快照 15s/300s + 事后异步单事务扣费 = 稳态 pre-dispatch 0 SQL；其代价为 15s~5min 控制面生效窗口与 post-paid 单请求透支）与本方证据链，四项决策按以下设计落地。
+
+### 12.1 D1：A1a gate 保持严格、声明 CLI 级 unavailable，M1 明示限制收口（纯文档）
+
+**变更**：不改任何源码与 gate 合同——`claude-two-read-thinking-disabled` 的 live 合同（必须实际显式 disabled，omitted 不放行）原样保留。
+
+1. §11.2 A1a 行状态更新：CLI 2.1.216 结构性不产出显式 disabled（unset→adaptive、MAX_THINKING_TOKENS=0→omitted，loopback 探针实证 §29.66）→ **该 gate 维持 unavailable**；未来 CLI 版本支持时自然可过，不降门槛。
+2. §9 gate 表 A1 行与 §10 剩余任务行同步：A1 指定范围以"明示限制"收口——A1a CLI 级 unavailable（服务器端 disabled 合同另有 A0 postKimi 显式 disabled + 纯测试 disabled 分支证据）、backend revision 保持 unknown（不用 CLI 版本替代）。
+3. M1 声明（§1 里程碑行）：`A0✓ + A1✓(明示限制) + 指定供给全链真实证据`；限制三项原文写入声明，不把 unavailable 写成通过。
+
+**验收**：全文档 A1a 提及处一致；M1 声明含限制清单；进度文档记录裁定与收口。
+
+### 12.2 D2：C0 分阶段架构投入（宽快照方向，先量化后深化）
+
+**不变量（全阶段）**：pre-hold 强一致不弃（不采用 sub2api post-paid/透支语义）；guard 事务内 fresh 重读保持为唯一强一致防线；30/10ms 门槛不无证据修改。
+
+**Phase T1（量化，无源码）**：安静负载窗口（host load1 与基线 run01 的 8.45 可比，逐轮记录 host-samples）重跑 serial trace，量化现有 authority 缓存命中稳态的 query/elapsed p50-p99 与 upstream-send marker。判定：显著下降→进入 A2；不变→先诊断缓存键稳定性再决定。
+
+**Phase A2a（宽快照扩展，源码）**：把 pre-dispatch 的静态可缓存读逐层纳入版本键缓存，动态状态保留直查：
+- entitlement.resolve（B2，2 条）→ 版本键缓存（键=entitlement 版本元组+caller 身份+模型），复用 `CachedRequestPreparationAuthority` 模式；
+- 调度器静态部分（B4 中 billing group 解析、阈值候选、route join、eligibility 大 join、window-cost 政策、runtime health 视图——7 读）→ 版本键+候选集缓存；**动态部分不缓存**：并发租约计数（S8）、选择审计 INSERT（S9）、租约/账本写；
+- guard fresh 重读（C10）、幂等绑定、钱包 hold、requests/attempts 写：**全部保留直查**。
+预期合计再省 ~20-30 条/请求；交付含新增单测（版本变更→miss、拒绝不缓存、TTL、尺寸上界，镜像 authority 缓存测试形态）。
+
+**Phase A2b（失效广播，可选非阻塞）**：复用 admission outbox 基础设施模式（`saas_request_admission_outbox` 同构）新增 authority/entitlement 失效事件，gateway 轮询（500ms 量级）删除本地缓存条目——仅缩短 AUTHORITY_MISMATCH fail-closed 拒绝窗口（可用性优化），不改变 guard 最终防线。默认关闭开关，独立 CI 验证失效正确性。
+
+**Phase A3（条件触发）**：T1+A2 后若 TTFB 仍 >10ms，按 upstream-send marker 之前的查询逐项分类（必须先行：auth+guard+幂等+hold；可后移：审计/快照/预算窗口写），**hold-先于-派发不可移**；届时基于证据提交口径决策（如 warm 稳态口径），不在本设计预设。
+
+**验收**：每 Phase 一轮受控 serial trace 对照（host-samples 负载可比性记录）；达标后按原顺序 cap A/B→完整 R9，门槛数值不变。
+
+### 12.3 D3：prepared statements 维持 off、不入门槛口径（记录性决策）
+
+生产默认 off（pgbouncer transaction pool 兼容合同）与 C0 基线一致；sub2api 实证（lib/pq+ent 未启 PrepareStmt 仍达标，因其查询数近零）支持"优化查询数而非 SQL 执行形态"。压测中开 native 而生产 off 视为配置绕门槛，禁止。若未来生产部署变更为 native（无 pgbouncer 场景），作为独立运营决策重跑门槛并在证据中注明配置。
+
+### 12.4 D4：接受 authority 缓存 5s fail-closed 语义（记录性决策）
+
+先例一致：`CachedKeyAuthenticator` 同为 5s TTL/4096 条且经 warm-cache 三类撤销 30/30 PG 验收（§29.55 前史）；fail-closed 方向（AUTHORITY_MISMATCH 拒绝直至过期）与金融安全语义一致。亚秒级生效增强并入 D2 Phase A2b，不单独承诺。
