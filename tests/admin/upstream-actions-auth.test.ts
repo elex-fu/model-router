@@ -177,3 +177,31 @@ test('provider errors cannot echo the resolved credential into action results', 
     globalThis.fetch = originalFetch;
   }
 });
+
+test('legacy env literal uses canonical secret semantics for admin probes without exposing it', async () => {
+  const literal = 'sk-synthetic_provider_literal_abcdefghijk';
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async (_input, init) => {
+    calls++;
+    assert.equal(new Headers(init?.headers).get('authorization'), `Bearer ${literal}`);
+    return Response.json({ model: 'model-1', choices: [{ message: { content: `hello ${literal}` } }] });
+  };
+  try {
+    const configured = upstream({ mode: 'bearer' });
+    configured.credentials[0]!.secret = { type: 'env', name: literal };
+    const result = await actions(configured).generate(
+      'vendor',
+      'model-1',
+      'hi',
+      16,
+      undefined,
+      new AbortController().signal,
+    );
+    assert.equal(calls, 1);
+    assert.equal(JSON.stringify(result).includes(literal), false);
+    assert.equal(result.output, 'hello [redacted]');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

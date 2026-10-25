@@ -6,12 +6,12 @@ import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { test, type TestContext } from 'node:test';
+import { type TestContext, test } from 'node:test';
 import { createClient } from '@redis/client';
 import Database from 'better-sqlite3';
 import { SQLiteQuotaLedger } from '../../src/quota/ledger.js';
 import { RedisQuotaLedger } from '../../src/quota/redis-ledger.js';
-import { RedisQuotaState, type QuotaStatePersistence } from '../../src/quota/redis-state.js';
+import { type QuotaStatePersistence, RedisQuotaState } from '../../src/quota/redis-state.js';
 import { initializeQuotaStore } from '../../src/quota/store.js';
 import { QuotaWriteClient } from '../../src/quota/write-client.js';
 import type { SaasDatabase, SqlExecutor } from '../../src/saas/db/types.js';
@@ -432,6 +432,17 @@ test('SaaS instances share capacity and only release cancellation after SQL term
     'a rolled-back/pending SQL cancellation keeps capacity',
   );
   assert.notEqual((await first.reserve(executor, input(30), limits, 1n, 1n, null, 10n)).decision, 'allow');
+  // A running image/unknown upstream request may legitimately outlive ten minutes.
+  const capacityKey = JSON.stringify(['capacityRequest', admitted.requestId]);
+  await a.state.mutate([capacityKey], 'local r=read(keys[1]); r.deadlineMs=0; save(keys[1],r); return true', {});
+  committed.set(admitted.requestId, { execution_state: 'pending', any_sent: true });
+  await owner.complete(admitted.requestId, true);
+  assert.equal(
+    (await owner.find(admitted.requestId))?.state,
+    'reserved',
+    'expired scan deadline is not a terminal outcome',
+  );
+  assert.notEqual((await first.reserve(executor, input(30), limits, 1n, 1n, null, 10n)).decision, 'allow');
   committed.set(admitted.requestId, { execution_state: 'failed', any_sent: false });
   await owner.complete(admitted.requestId);
   await owner.complete(admitted.requestId);
@@ -446,4 +457,126 @@ test('SaaS instances share capacity and only release cancellation after SQL term
     30,
     'cancelled tokens refunded exactly once',
   );
+});
+
+test('Redis restart replays a snapshot journal not yet flushed to SQL', { skip: !enabled }, async (t) => {
+  const f = await fixture(t);
+  const a = await f.open();
+  await a.admit(f.admission('unflushed'));
+  await a.settle('unflushed', 80);
+  assert.equal((f.db.prepare('SELECT COUNT(*) AS n FROM quota_reservations').get() as { n: number }).n, 0);
+  await f.inspect.sendCommand(['SAVE']);
+  await f.restartFromSnapshot();
+  const b = await f.open();
+  assert.equal((await b.balance('shared-key', 'today')).reportedUsed, 80);
+  assert.equal((await b.admit(f.admission('over-budget', { reserveTokens: 30 }))).reason, 'daily_tokens_exceeded');
+});
+
+test('Redis snapshot journal replay cannot overwrite newer SQL versions', { skip: !enabled }, async (t) => {
+  const f = await fixture(t);
+  const a = await f.open();
+  await a.admit(f.admission('snapshot'));
+  await a.settle('snapshot', 70);
+  await f.inspect.sendCommand(['SAVE']);
+  await a.state.flush();
+  await a.admit(f.admission('newer'));
+  await a.settle('newer', 20);
+  await a.state.flush();
+  await f.restartFromSnapshot();
+  const b = await f.open();
+  assert.equal((await b.balance('shared-key', 'today')).reportedUsed, 90);
+});
+
+test('restored journal replay failure preserves evidence and refuses admission', { skip: !enabled }, async (t) => {
+  const f = await fixture(t);
+  const a = await f.open();
+  await a.admit(f.admission('unflushed'));
+  await a.settle('unflushed', 80);
+  const generation = await f.persistence.generation();
+  await f.inspect.sendCommand(['SAVE']);
+  await f.restartFromSnapshot();
+  f.setFailure(true);
+  await assert.rejects(f.open(), /Shared quota store unavailable/);
+  assert.equal(await f.persistence.generation(), generation);
+  assert.ok(await f.inspect.hGet(f.redisKey, 'e:1'), 'failed replay must not delete its journal');
+  f.setFailure(false);
+  const b = await f.open();
+  assert.equal((await b.balance('shared-key', 'today')).reportedUsed, 80);
+});
+
+test('a pending snapshot journal from another SQL generation fails closed', { skip: !enabled }, async (t) => {
+  const f = await fixture(t);
+  const a = await f.open();
+  await a.admit(f.admission('ambiguous'));
+  await f.inspect.sendCommand(['SAVE']);
+  const generation = await f.persistence.generation();
+  await f.persistence.beginGeneration(generation);
+  await f.restartFromSnapshot();
+  await assert.rejects(f.open(), /Shared quota store unavailable/);
+  assert.ok(await f.inspect.hGet(f.redisKey, 'e:1'));
+  assert.equal(await f.persistence.generation(), generation + 1);
+});
+
+test('standalone long execution admission extends recovery deadline', { skip: !enabled }, async (t) => {
+  const f = await fixture(t);
+  const a = await f.open();
+  await a.admit(f.admission('long', { recoveryTimeoutMs: 1860000 }));
+  const r = await a.state.read<{ admittedAtMs: number; deadlineMs: number }>(JSON.stringify(['request', 'long']));
+  assert.equal(r!.deadlineMs - r!.admittedAtMs, 1860000);
+  await a.settle('long', 7);
+  assert.equal((await a.balance('shared-key', 'today')).reportedUsed, 7);
+});
+
+test('partial restored journal replay resumes idempotently after SQL commit acknowledgement loss', {
+  skip: !enabled,
+}, async (t) => {
+  const f = await fixture(t);
+  const a = await f.open();
+  for (let i = 0; i < 125; i++) await a.adjust(`adjust-${i}`, 'shared-key', 'today', 1, 'test');
+  await f.inspect.sendCommand(['SAVE']);
+  await f.restartFromSnapshot();
+  f.loseCommitAck();
+  await assert.rejects(f.open(), /Shared quota store unavailable/);
+  assert.ok(await f.inspect.hGet(f.redisKey, 'e:1'));
+  const b = await f.open();
+  assert.equal((await b.balance('shared-key', 'today')).adjustmentTokens, 125);
+  assert.equal((f.db.prepare('SELECT COUNT(*) AS n FROM quota_ledger_adjustments').get() as { n: number }).n, 125);
+});
+
+test('replayed journal is acknowledged before a generation commit loses its reply', { skip: !enabled }, async (t) => {
+  const f = await fixture(t);
+  const a = await f.open();
+  await a.admit(f.admission('generation-ack'));
+  await a.settle('generation-ack', 80);
+  await f.inspect.sendCommand(['SAVE']);
+  await f.restartFromSnapshot();
+  let loseReply = true;
+  const persistence = {
+    ...f.persistence,
+    beginGeneration: async (expected: number) => {
+      const generation = await f.persistence.beginGeneration(expected);
+      if (loseReply) {
+        loseReply = false;
+        throw new Error('injected lost generation commit reply');
+      }
+      return generation;
+    },
+  };
+  await assert.rejects(f.open(persistence), /Shared quota store unavailable/);
+  assert.equal(await f.inspect.hGet(f.redisKey, 'persisted'), await f.inspect.hGet(f.redisKey, 'revision'));
+  assert.equal(await f.inspect.hGet(f.redisKey, 'e:1'), null);
+  const b = await f.open();
+  assert.equal((await b.balance('shared-key', 'today')).reportedUsed, 80);
+});
+
+test('competing bootstrap instances replay a restored journal once', { skip: !enabled }, async (t) => {
+  const f = await fixture(t);
+  const a = await f.open();
+  await a.admit(f.admission('competing'));
+  await a.settle('competing', 80);
+  await f.inspect.sendCommand(['SAVE']);
+  await f.restartFromSnapshot();
+  const [b, c] = await Promise.all([f.open(), f.open(f.writers[1])]);
+  assert.equal((await b.balance('shared-key', 'today')).reportedUsed, 80);
+  assert.equal((await c.balance('shared-key', 'today')).reportedUsed, 80);
 });

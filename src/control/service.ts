@@ -1,6 +1,12 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { lstatSync, readdirSync, readFileSync, unlinkSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
+import {
+  isLegacyEnvLiteral,
+  normalizeLegacySecretSources,
+  normalizeSecretSource,
+  redactSecretSources,
+} from '../config/secret-source.js';
 import { compileRuntimeConfig } from '../config/v2-runtime.js';
 import {
   type ConfigV2,
@@ -73,6 +79,7 @@ function importDiff(before: ConfigV2, after: ConfigV2): ConfigDiff[] {
   const redact = (value: unknown): unknown => {
     if (Array.isArray(value)) return value.map(redact);
     if (!object(value)) return value;
+    if (isLegacyEnvLiteral(value)) return { type: 'inline', value: '[redacted]' };
     if (value.type === 'inline' && typeof value.value === 'string') return { ...value, value: '[redacted]' };
     return Object.fromEntries(
       Object.entries(value).map(([key, item]) => [key, key === 'keyHash' ? '[redacted]' : redact(item)]),
@@ -109,7 +116,7 @@ function importDiff(before: ConfigV2, after: ConfigV2): ConfigDiff[] {
 }
 
 function isInlineSecretValuePath(path: string): boolean {
-  return /(?:\.secret\.value|\.clientSecret\.value)$/.test(path);
+  return /(?:\.secret\.(?:value|name)|\.clientSecret\.(?:value|name))$/.test(path);
 }
 
 function redactDiffValues(changes: ConfigDiff[]): ConfigDiff[] {
@@ -120,7 +127,11 @@ function redactDiffValues(changes: ConfigDiff[]): ConfigDiff[] {
           before: item.before === undefined ? undefined : '[redacted]',
           after: item.after === undefined ? undefined : '[redacted]',
         }
-      : item,
+      : {
+          ...item,
+          before: redactSecretSources(item.before, '[redacted]'),
+          after: redactSecretSources(item.after, '[redacted]'),
+        },
   );
 }
 
@@ -165,13 +176,7 @@ export function redactConfig(config: ConfigV2): ConfigV2 {
 
 /** A management-safe config copy. Inline values are accepted on writes but never returned to clients. */
 export function redactInlineSecrets(config: ConfigV2): ConfigV2 {
-  const redacted = structuredClone(config);
-  for (const upstream of redacted.upstreams) {
-    for (const credential of upstream.credentials)
-      if (credential.secret.type === 'inline') credential.secret.value = '';
-    if (upstream.auth.clientSecret?.type === 'inline') upstream.auth.clientSecret.value = '';
-  }
-  return redacted;
+  return redactSecretSources(config) as ConfigV2;
 }
 
 export function configChecksum(config: ConfigV2): string {
@@ -437,6 +442,7 @@ export class ControlService {
     const candidate = structuredClone(input) as Record<string, unknown>;
     if (!Array.isArray(candidate.upstreams)) return candidate;
     const restore = (source: unknown, previous: SecretSource | undefined) => {
+      if (previous) previous = normalizeSecretSource(previous);
       if (
         object(source) &&
         source.type === 'inline' &&
@@ -466,7 +472,8 @@ export class ControlService {
     input: unknown,
     mode: ImportMode,
   ): Promise<{ preview: ImportPreview; candidate?: ConfigV2 }> {
-    input = this.restoreInlineValues(input, current);
+    input = normalizeLegacySecretSources(this.restoreInlineValues(input, current));
+    current = normalizeLegacySecretSources(current);
     const parsed = configV2Schema.safeParse(input);
     if (!parsed.success) {
       return {
@@ -618,7 +625,7 @@ export class ControlService {
   }> {
     if (!this.applyConfig) await this.reconcileOfflineState(false);
     const previous = await this.loadConfig();
-    const restored = this.restoreInlineValues(next, previous);
+    const restored = normalizeLegacySecretSources(this.restoreInlineValues(next, previous));
     const validated = await this.config.validate(object(restored) ? { ...restored, revision: expected + 1 } : restored);
     if (!validated.valid || !validated.config) throw new ConfigValidationError(validated.errors);
     const changes = diff(previous, validated.config);

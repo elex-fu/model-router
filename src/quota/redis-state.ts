@@ -285,9 +285,11 @@ export class RedisQuotaState {
         try {
           const raced = await this.commands().hmGet(this.redisKey, ['identity', 'generation', 'runId']);
           if (raced[0] && raced[0] !== this.identity) throw new Error('Quota database identity mismatch');
-          // Redis may restore an AOF/RDB older than an already committed SQL
-          // write. A new server process always starts a fenced generation and
-          // hydrates SQL, never trusting the restored cache as newer evidence.
+          // Replay retained write-behind evidence before advancing the durable
+          // fence. SQL's per-row generation/version check makes replay idempotent
+          // and prevents an older snapshot from rolling back committed state.
+          // If replay fails, keep the journal and refuse initialization/admission.
+          if (raced[0] && raced[2] !== this.runId) await this.replayRestoredJournal(lockKey, expectedGeneration);
           const generation =
             raced[0] && raced[2] === this.runId
               ? Number(raced[1])
@@ -322,6 +324,56 @@ export class RedisQuotaState {
       }
     }
     throw new Error('Quota initialization timed out');
+  }
+
+  private async replayRestoredJournal(lockKey: string, expectedGeneration: number): Promise<void> {
+    const metadata = await this.commands().hmGet(this.redisKey, ['generation', 'persisted', 'revision']);
+    const [generation, head, tail] = metadata.map(Number);
+    if (![generation, head, tail].every(Number.isSafeInteger) || generation < 1 || head < 0 || tail < head)
+      throw new Error('Invalid restored quota journal');
+    if (head === tail) return;
+    // A pending journal from a different durable epoch cannot be merged safely.
+    // Do not delete it or silently reopen admission with incomplete accounting.
+    if (generation !== expectedGeneration) throw new Error('Restored quota journal generation requires reconciliation');
+    for (let first = head + 1; first <= tail; first += 100) {
+      const renewed = await this.commands().eval(
+        "if redis.call('GET',KEYS[1])~=ARGV[1] then return 0 end redis.call('PEXPIRE',KEYS[1],10000) return 1",
+        { keys: [lockKey], arguments: [this.owner] },
+      );
+      if (Number(renewed) !== 1) throw new Error('Quota bootstrap lease lost');
+      const versions = Array.from({ length: Math.min(100, tail - first + 1) }, (_, i) => first + i);
+      const raw = await this.commands().hmGet(
+        this.redisKey,
+        versions.map((version) => `e:${version}`),
+      );
+      const batches = raw.map((value, index) => {
+        if (!value) throw new Error('Restored quota journal gap');
+        const batch = JSON.parse(value) as QuotaStateBatch;
+        if (
+          batch.generation !== generation ||
+          batch.version !== versions[index] ||
+          !Array.isArray(batch.rows) ||
+          batch.rows.some((row) => typeof row.key !== 'string' || row.version !== batch.version)
+        )
+          throw new Error('Invalid restored quota journal event');
+        return batch;
+      });
+      await boundedPersistence(this.options.persistence.apply(batches));
+    }
+    // Record the SQL-confirmed replay before advancing its generation. If that
+    // subsequent SQL commit loses its ACK or Redis bootstrap fails, the next
+    // initializer can distinguish fully persisted state from pending evidence.
+    const acknowledged = await this.commands().eval(
+      `if redis.call('GET',KEYS[2])~=ARGV[1]
+        or redis.call('HGET',KEYS[1],'generation')~=ARGV[2]
+        or redis.call('HGET',KEYS[1],'persisted')~=ARGV[3]
+        or redis.call('HGET',KEYS[1],'revision')~=ARGV[4] then return 0 end
+      for i=tonumber(ARGV[3])+1,tonumber(ARGV[4]) do redis.call('HDEL',KEYS[1],'e:'..i) end
+      redis.call('HSET',KEYS[1],'persisted',ARGV[4])
+      return 1`,
+      { keys: [this.redisKey, lockKey], arguments: [this.owner, String(generation), String(head), String(tail)] },
+    );
+    if (Number(acknowledged) !== 1) throw new Error('Quota bootstrap replay acknowledgement lost its fence');
   }
 
   async mutate<T>(keys: string[], script: string, input: unknown): Promise<T> {

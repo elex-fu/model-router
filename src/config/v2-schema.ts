@@ -1,5 +1,6 @@
 import { isIP } from 'node:net';
 import { z } from 'zod';
+import { legacyProviderKeyPattern } from './secret-source.js';
 
 const id = z
   .string()
@@ -11,12 +12,19 @@ const label = z.string().trim().min(1).max(200);
 const positiveInt = z.number().int().positive();
 const nonNegativeInt = z.number().int().nonnegative();
 const secretSource = z.discriminatedUnion('type', [
-  // An env reference is either a real environment variable name or the
-  // established inline provider-key literal convention (a name that is
-  // itself a provider-shaped key such as sk-…). The runtime resolves the
-  // latter as the literal value; live configurations and verification
-  // wrappers rely on this shape.
-  z.object({ type: z.literal('env'), name: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$|^sk-[A-Za-z0-9_-]+$/) }).strict(),
+  // Read old key-shaped env references without changing CAS snapshot identity.
+  // Config commits canonicalize them to inline sources before persistence.
+  z
+    .object({
+      type: z.literal('env'),
+      name: z
+        .string()
+        .refine(
+          (name) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || legacyProviderKeyPattern.test(name),
+          'Invalid environment variable name',
+        ),
+    })
+    .strict(),
   z.object({ type: z.literal('inline'), value: z.string().min(1) }).strict(),
   z.object({ type: z.literal('secret'), id }).strict(),
 ]);

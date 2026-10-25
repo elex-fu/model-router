@@ -2227,9 +2227,10 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
    * R7 strategy composition (plan §R7): soonest-reset promotion first (a
    * filter, not a comparator), then the ordered comparator registry
    * [cost-priority?, load, lru?], then the tail — the seeded in-group
-   * shuffle when LRU is enabled, otherwise the unchanged deterministic
+   * shuffle when LRU is enabled, otherwise the deterministic
    * weighted draw (with the optional latency coefficient folded into the
-   * effective weights). The returned trace names the tail algorithm and the
+   * effective weights). Cost priority first restricts the draw to the minimum
+   * known-cost tier, independently of LRU. The returned trace names the tail algorithm and the
    * strategy dimensions that actually discriminated the outcome.
    */
   private chooseByStrategyRegistry(
@@ -2257,6 +2258,12 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
       );
       if (discriminates) reasons.push(strategy.name);
     }
+    // Sorting alone does not alter weighted selection probabilities. Preserve
+    // the ranking/soonest-reset gates above, then only draw within the best
+    // cost tier; unknown costs tie only when no known rate is available.
+    const selectionPool = this.strategies.costPriorityEnabled
+      ? ordered.filter((candidate) => compareSupplierCost(candidate, ordered[0]!) === 0)
+      : ordered;
     if (
       this.strategies.latencyWeightCoefficient > 0 &&
       ordered.some((candidate) => candidate.latencyMs !== null && candidate.latencyMs > 0)
@@ -2269,7 +2276,11 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
       return { candidate: chosen, trace: { strategy: 'lru-order+seeded-shuffle', reasons } };
     }
     return {
-      candidate: drawWeighted(ordered, selectionSeed(input.requestId, input), this.strategies.latencyWeightCoefficient),
+      candidate: drawWeighted(
+        selectionPool,
+        selectionSeed(input.requestId, input),
+        this.strategies.latencyWeightCoefficient,
+      ),
       trace: { strategy: 'weighted-draw', reasons },
     };
   }

@@ -1120,6 +1120,15 @@ export async function proxyHandler(
       return;
     }
 
+    const runtimeTimeouts = config.server as Config['server'] &
+      Partial<{
+        connectTimeoutMs: number;
+        firstByteTimeoutMs: number;
+        streamIdleTimeoutMs: number;
+        totalRequestTimeoutMs: number;
+      }>;
+    const requestTimeoutMs =
+      options.requestTimeoutMs ?? runtimeTimeouts.totalRequestTimeoutMs ?? config.server.requestTimeoutMs ?? 120_000;
     const quotaAttemptReserve = options.quotaLedger
       ? estimateQuotaAttemptReserve(bodyBuffer, parsedBody, options.quotaReserveTokens)
       : 0;
@@ -1142,6 +1151,7 @@ export async function proxyHandler(
         rpm: proxyKey.rpm,
         maxConcurrentRequests: (proxyKey as { maxConcurrentRequests?: number }).maxConcurrentRequests,
         missingUsagePolicy: options.missingUsagePolicy,
+        recoveryTimeoutMs: requestTimeoutMs + 60_000,
       });
       if (!decision.allowed) {
         quotaNeedsSettlement = false;
@@ -1159,13 +1169,6 @@ export async function proxyHandler(
     observeRequest(requestRecord);
 
     const isStreaming = parsedBody?.stream === true;
-    const runtimeTimeouts = config.server as Config['server'] &
-      Partial<{
-        connectTimeoutMs: number;
-        firstByteTimeoutMs: number;
-        streamIdleTimeoutMs: number;
-        totalRequestTimeoutMs: number;
-      }>;
     const streamIdleTimeoutMs =
       options.streamIdleTimeoutMs ?? runtimeTimeouts.streamIdleTimeoutMs ?? DEFAULT_STREAM_IDLE_MS;
     const connectTimeoutMs = options.connectTimeoutMs ?? runtimeTimeouts.connectTimeoutMs;
@@ -1174,8 +1177,6 @@ export async function proxyHandler(
       runtimeTimeouts.firstByteTimeoutMs ??
       (isStreaming ? streamIdleTimeoutMs : undefined);
     const maxRetries = previousOwner ? 1 : (options.maxRetries ?? config.server.maxRetries ?? 3);
-    const requestTimeoutMs =
-      options.requestTimeoutMs ?? runtimeTimeouts.totalRequestTimeoutMs ?? config.server.requestTimeoutMs ?? 120_000;
     const deadline = monotonicStart + requestTimeoutMs;
 
     const abortController = new AbortController();
@@ -1323,8 +1324,8 @@ export async function proxyHandler(
                 (id, index) => id === credentialEntry.credentialId && upstream.apiKeys[index] === credentialEntry.key,
               ) ?? null)
             : null;
-          const tryStart = Date.now();
-          const attemptRecord: AttemptRecord = {
+          let tryStart = Date.now();
+          const createAttempt = (): AttemptRecord => ({
             id: randomUUID(),
             requestId,
             ordinal: totalAttempts,
@@ -1342,9 +1343,82 @@ export async function proxyHandler(
             pricingVersion: null,
             costMicros: null,
             currency: null,
-          };
+          });
+          let attemptRecord = createAttempt();
           observeAttempt(attemptRecord);
           lastAttemptRecord = attemptRecord;
+          const finishAttempt = async (result: TryResult) => {
+            const simpleUsage =
+              result.usage ??
+              (result.usagePromise
+                ? await result.usagePromise.catch(() => ({}) as NonNullable<TryResult['usage']>)
+                : undefined);
+            const telemetryUsage =
+              result.rawUsage !== undefined
+                ? normalizeTelemetryUsage(upstream.protocol, result.rawUsage, {
+                    inputIncludesCache: upstream.inputIncludesCache,
+                    provider:
+                      upstream.provider === 'deepseek'
+                        ? 'deepseek'
+                        : upstream.provider.startsWith('kimi')
+                          ? 'kimi'
+                          : 'custom',
+                  })
+                : upstream.protocol === 'anthropic'
+                  ? normalizeTelemetryUsage(
+                      'anthropic',
+                      simpleUsage
+                        ? {
+                            input_tokens: simpleUsage.inputTokens,
+                            output_tokens: simpleUsage.outputTokens,
+                            cache_read_input_tokens: simpleUsage.cacheReadTokens,
+                            cache_creation_input_tokens: simpleUsage.cacheCreationTokens,
+                          }
+                        : {},
+                      { inputIncludesCache: upstream.inputIncludesCache },
+                    )
+                  : normalizeTelemetryUsage(
+                      'openai',
+                      simpleUsage
+                        ? {
+                            prompt_tokens: simpleUsage.inputTokens,
+                            completion_tokens: simpleUsage.outputTokens,
+                            prompt_tokens_details: { cached_tokens: simpleUsage.cacheReadTokens },
+                          }
+                        : {},
+                    );
+            attemptRecord.outcome = result.ok ? 'completed' : result.statusCode === 499 ? 'cancelled' : 'failed';
+            attemptRecord.status = result.statusCode ?? null;
+            attemptRecord.retryReason = result.ok
+              ? null
+              : (result.failureReason ?? (result.shouldRetry ? 'retryable_upstream_error' : null));
+            attemptRecord.endedAtMs = Date.now();
+            attemptRecord.usage = telemetryUsage;
+            if (options.priceAttempt) {
+              const cost = options.priceAttempt(telemetryUsage, {
+                upstreamId: attemptRecord.upstreamId,
+                provider: upstream.provider,
+                presetId: upstream.presetId,
+                model: resolvedModel,
+                atMs: tryStart,
+              });
+              attemptRecord.pricingVersion = cost.pricingVersion;
+              attemptRecord.costMicros = cost.costMicros;
+              attemptRecord.currency = cost.currency;
+            }
+            // Persist the terminal observation even if durable quota usage
+            // tracking fails. The caller must not finalize this attempt twice.
+            observeAttempt(attemptRecord);
+            const charged = confirmedTokens(telemetryUsage);
+            if (charged !== null) {
+              reportedAttemptTokens += charged;
+              hasReportedAttemptTokens = true;
+              reportedAttempts++;
+              await options.quotaLedger?.recordAttemptUsage?.(requestId, attemptRecord.id, charged);
+            }
+
+            return telemetryUsage;
+          };
           const result = await trySingleUpstream({
             req,
             res,
@@ -1380,78 +1454,62 @@ export async function proxyHandler(
             firstByteTimeoutMs,
             elapsedMs: elapsedLatencyMs,
             oauthResolver: options.oauthResolver,
+            onCorrectiveRetry: async (previous) => {
+              if (totalAttempts >= maxRetries || abortController.signal.aborted || performance.now() >= deadline) {
+                return { ...previous, shouldRetry: false, failureReason: 'corrective_retry_budget_exhausted' };
+              }
+              await finishAttempt({ ...previous, failureReason: 'thinking_corrective_retry' });
+              totalAttempts += 1;
+              tryStart = Date.now();
+              attemptRecord = createAttempt();
+              observeAttempt(attemptRecord);
+              lastAttemptRecord = attemptRecord;
+              if (options.quotaLedger) {
+                try {
+                  if (!options.quotaLedger.topUp) throw new Error('quota top-up unavailable');
+                  const topUp = await options.quotaLedger.topUp(
+                    requestId,
+                    quotaAttemptReserve,
+                    proxyKey.dailyTokens,
+                    reportedAttemptTokens,
+                  );
+                  if (!topUp.allowed) {
+                    const unavailable = topUp.reason === 'recorder_degraded' || topUp.reason === 'quota_unavailable';
+                    return {
+                      ok: false,
+                      shouldRetry: false,
+                      statusCode: unavailable ? 503 : 429,
+                      errorMessage: unavailable
+                        ? 'Quota ledger is unavailable; retry later'
+                        : rateLimitMessage(
+                            topUp.reason === 'recorder_degraded' || topUp.reason === 'quota_unavailable'
+                              ? undefined
+                              : topUp.reason,
+                          ),
+                      failureReason: 'corrective_retry_quota_rejected',
+                    };
+                  }
+                } catch {
+                  // A new attempt is already observed; return a terminal failure
+                  // through its normal finalizer, without another network send.
+                  return {
+                    ok: false,
+                    shouldRetry: false,
+                    statusCode: 503,
+                    errorMessage: 'Quota ledger is unavailable; retry later',
+                    failureReason: 'corrective_retry_quota_unavailable',
+                  };
+                }
+              }
+              return undefined;
+            },
             onAttemptSent: async () => {
               await options.quotaLedger?.markAttemptSent(requestId, attemptRecord.id);
               sentAttempts++;
             },
           });
 
-          const simpleUsage =
-            result.usage ??
-            (result.usagePromise
-              ? await result.usagePromise.catch(() => ({}) as NonNullable<TryResult['usage']>)
-              : undefined);
-          const telemetryUsage =
-            result.rawUsage !== undefined
-              ? normalizeTelemetryUsage(upstream.protocol, result.rawUsage, {
-                  inputIncludesCache: upstream.inputIncludesCache,
-                  provider:
-                    upstream.provider === 'deepseek'
-                      ? 'deepseek'
-                      : upstream.provider.startsWith('kimi')
-                        ? 'kimi'
-                        : 'custom',
-                })
-              : upstream.protocol === 'anthropic'
-                ? normalizeTelemetryUsage(
-                    'anthropic',
-                    simpleUsage
-                      ? {
-                          input_tokens: simpleUsage.inputTokens,
-                          output_tokens: simpleUsage.outputTokens,
-                          cache_read_input_tokens: simpleUsage.cacheReadTokens,
-                          cache_creation_input_tokens: simpleUsage.cacheCreationTokens,
-                        }
-                      : {},
-                    { inputIncludesCache: upstream.inputIncludesCache },
-                  )
-                : normalizeTelemetryUsage(
-                    'openai',
-                    simpleUsage
-                      ? {
-                          prompt_tokens: simpleUsage.inputTokens,
-                          completion_tokens: simpleUsage.outputTokens,
-                          prompt_tokens_details: { cached_tokens: simpleUsage.cacheReadTokens },
-                        }
-                      : {},
-                  );
-          attemptRecord.outcome = result.ok ? 'completed' : result.statusCode === 499 ? 'cancelled' : 'failed';
-          attemptRecord.status = result.statusCode ?? null;
-          attemptRecord.retryReason = result.ok
-            ? null
-            : (result.failureReason ?? (result.shouldRetry ? 'retryable_upstream_error' : null));
-          attemptRecord.endedAtMs = Date.now();
-          attemptRecord.usage = telemetryUsage;
-          if (options.priceAttempt) {
-            const cost = options.priceAttempt(telemetryUsage, {
-              upstreamId: attemptRecord.upstreamId,
-              provider: upstream.provider,
-              presetId: upstream.presetId,
-              model: resolvedModel,
-              atMs: tryStart,
-            });
-            attemptRecord.pricingVersion = cost.pricingVersion;
-            attemptRecord.costMicros = cost.costMicros;
-            attemptRecord.currency = cost.currency;
-          }
-          const charged = confirmedTokens(telemetryUsage);
-          if (charged !== null) {
-            reportedAttemptTokens += charged;
-            hasReportedAttemptTokens = true;
-            reportedAttempts++;
-            await options.quotaLedger?.recordAttemptUsage?.(requestId, attemptRecord.id, charged);
-          }
-          observeAttempt(attemptRecord);
+          const telemetryUsage = await finishAttempt(result);
 
           if (requestRecord.firstByteMs === null && result.firstByteMs !== undefined)
             requestRecord.firstByteMs = result.firstByteMs;
@@ -1825,6 +1883,7 @@ async function trySingleUpstream(options: {
   elapsedMs: () => number;
   oauthResolver?: OAuthTokenResolver;
   onAttemptSent?: () => Promise<void> | void;
+  onCorrectiveRetry?: (previous: TryResult) => Promise<TryResult | undefined>;
 }): Promise<TryResult> {
   const {
     req,
@@ -1843,6 +1902,7 @@ async function trySingleUpstream(options: {
     elapsedMs,
     oauthResolver,
     onAttemptSent,
+    onCorrectiveRetry,
   } = options;
 
   const localCtl = new AbortController();
@@ -2124,6 +2184,28 @@ async function trySingleUpstream(options: {
     }
 
     if (rectifiedBody) {
+      const previous: TryResult = {
+        ok: false,
+        shouldRetry: false,
+        statusCode: upstreamRes.status,
+        errorMessage: message,
+        rawUsage: errorUsage,
+        firstByteMs,
+      };
+      // Every additional wire send must be explicitly admitted and observed.
+      let rejection: TryResult | undefined;
+      try {
+        rejection = onCorrectiveRetry ? await onCorrectiveRetry(previous) : previous;
+      } catch (error) {
+        // The first attempt may already have been finalized. Do not feed an
+        // admission/accounting exception back through its finalizer twice.
+        cleanupSignal();
+        throw error;
+      }
+      if (rejection) {
+        cleanupSignal();
+        return rejection;
+      }
       const retryBody = bridge.transformRequest(rectifiedBody);
       if (retryBody && typeof retryBody === 'object') {
         retryBody.model = resolvedModel;
@@ -2136,6 +2218,18 @@ async function trySingleUpstream(options: {
       }
 
       let retryRes: Response;
+      try {
+        await onAttemptSent?.();
+      } catch {
+        cleanupSignal();
+        return {
+          ok: false,
+          shouldRetry: false,
+          statusCode: 503,
+          errorMessage: 'Proxy temporarily unavailable',
+          failureReason: 'quota_tracking_unavailable',
+        };
+      }
       try {
         startPhase('connect_timeout', connectTimeoutMs);
         retryRes = await fetch(upstreamUrl.toString(), {
@@ -2155,8 +2249,10 @@ async function trySingleUpstream(options: {
 
       if (retryRes.status >= 400 && retryRes.status < 500) {
         let retryMessage = 'Upstream returned client error';
+        let retryUsage: unknown;
         try {
           const errBody: any = await readJsonWithFirstByte(retryRes, markFirstByte);
+          retryUsage = errBody?.usage;
           retryMessage = errBody?.error?.message ?? errBody?.error ?? retryMessage;
           if (typeof retryMessage !== 'string') retryMessage = JSON.stringify(retryMessage);
         } catch {}
@@ -2166,13 +2262,22 @@ async function trySingleUpstream(options: {
           return { ...result, firstByteMs };
         }
         cleanupSignal();
-        return { ok: false, shouldRetry: false, statusCode: retryRes.status, errorMessage: retryMessage, firstByteMs };
+        return {
+          ok: false,
+          shouldRetry: false,
+          statusCode: retryRes.status,
+          errorMessage: retryMessage,
+          rawUsage: retryUsage,
+          firstByteMs,
+        };
       }
 
       if (retryRes.status >= 500) {
         let retryMessage = 'Upstream returned server error';
+        let retryUsage: unknown;
         try {
           const errBody: any = await readJsonWithFirstByte(retryRes, markFirstByte);
+          retryUsage = errBody?.usage;
           retryMessage = errBody?.error?.message ?? retryMessage;
         } catch {}
         if (localCtl.signal.aborted) {
@@ -2181,7 +2286,14 @@ async function trySingleUpstream(options: {
           return { ...result, firstByteMs };
         }
         cleanupSignal();
-        return { ok: false, shouldRetry: true, statusCode: retryRes.status, errorMessage: retryMessage, firstByteMs };
+        return {
+          ok: false,
+          shouldRetry: true,
+          statusCode: retryRes.status,
+          errorMessage: retryMessage,
+          rawUsage: retryUsage,
+          firstByteMs,
+        };
       }
 
       // Retry succeeded – fall through to normal success handling

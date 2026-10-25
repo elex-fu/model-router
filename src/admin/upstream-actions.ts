@@ -1,3 +1,4 @@
+import { normalizeSecretSource } from '../config/secret-source.js';
 import { type UpstreamDefinition, upstreamSchema } from '../config/v2-schema.js';
 import { ControlError, type ControlService } from '../control/service.js';
 import { joinApiUrl } from '../providers/url.js';
@@ -38,12 +39,13 @@ export class UpstreamActions {
       throw new ControlError(422, 'INVALID_AUTH_HEADER', 'Configured authentication header is invalid');
     const credential = upstream.credentials.find((item) => item.enabled);
     if (!credential) throw new ControlError(422, 'CREDENTIAL_UNAVAILABLE', 'No enabled credential');
+    const source = normalizeSecretSource(credential.secret);
     const secret =
-      credential.secret.type === 'inline'
-        ? credential.secret.value
-        : credential.secret.type === 'env'
-          ? process.env[credential.secret.name]
-          : this.control.store.secrets.get(credential.secret.id);
+      source.type === 'inline'
+        ? source.value
+        : source.type === 'env'
+          ? process.env[source.name]
+          : this.control.store.secrets.get(source.id);
     if (!secret) throw new ControlError(422, 'CREDENTIAL_UNAVAILABLE', 'Credential reference cannot be resolved');
     let headerName: string;
     if (upstream.auth.mode === 'custom-header') {

@@ -2,6 +2,7 @@ import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
 import { closeSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type Database from 'better-sqlite3';
+import { normalizeSecretSource } from '../config/secret-source.js';
 
 /** The key is independent of config.json and must be backed up with control.sqlite. */
 export class SecretStore {
@@ -62,6 +63,7 @@ export class SecretStore {
     configured: boolean;
     reference: string;
   } {
+    source = normalizeSecretSource(source);
     if (source.type === 'inline')
       return { type: 'inline', configured: source.value.length > 0, reference: 'configuration file' };
     return source.type === 'env'

@@ -2,10 +2,12 @@ import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'node:crypt
 import { mkdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import Database from 'better-sqlite3';
+import { isLegacyEnvLiteral } from '../config/secret-source.js';
 import { SecretStore } from '../secrets/store.js';
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 const historyInlinePrefix = 'history_inline_';
+const historyLegacyEnvPrefix = 'history_env_';
 const equal = (a: string, b: string) => {
   const left = Buffer.from(a);
   const right = Buffer.from(b);
@@ -62,6 +64,24 @@ export class ControlStore {
     if (!journalColumns.has('superseded_by_checksum'))
       this.db.exec('ALTER TABLE config_journal ADD COLUMN superseded_by_checksum TEXT');
     this.secrets = new SecretStore(this.db, this.keyPath, masterKey);
+    this.migratePlaintextHistorySecrets();
+  }
+
+  /** Logical, atomic migration. Does not claim erasure from backups, WAL or free pages.
+   * Preserve decoded bytes/order so existing journal checksums keep their meaning.
+   */
+  private migratePlaintextHistorySecrets(): void {
+    this.db.transaction(() => {
+      const rows = this.db.prepare('SELECT revision,config_json FROM config_history').all() as Array<{
+        revision: number;
+        config_json: string;
+      }>;
+      const update = this.db.prepare('UPDATE config_history SET config_json=? WHERE revision=?');
+      for (const row of rows) {
+        const encrypted = JSON.stringify(this.encodeHistoryConfig(JSON.parse(row.config_json)));
+        if (encrypted !== row.config_json) update.run(encrypted, row.revision);
+      }
+    })();
   }
 
   private migratePricingVersions(): void {
@@ -180,6 +200,11 @@ export class ControlStore {
       if (Array.isArray(value)) return value.map(visit);
       if (!value || typeof value !== 'object') return value;
       const item = value as Record<string, unknown>;
+      if (isLegacyEnvLiteral(item)) {
+        const id = `${historyLegacyEnvPrefix}${randomBytes(16).toString('hex')}`;
+        this.secrets.put(id, JSON.stringify(item));
+        return { type: 'secret', id };
+      }
       if (item.type === 'inline' && typeof item.value === 'string' && item.value.length > 0) {
         const id = `${historyInlinePrefix}${randomBytes(16).toString('hex')}`;
         this.secrets.put(id, item.value);
@@ -194,6 +219,11 @@ export class ControlStore {
       if (Array.isArray(value)) return value.map(visit);
       if (!value || typeof value !== 'object') return value;
       const item = value as Record<string, unknown>;
+      if (item.type === 'secret' && typeof item.id === 'string' && item.id.startsWith(historyLegacyEnvPrefix)) {
+        const secret = this.secrets.get(item.id);
+        if (!secret) throw new Error('Encrypted legacy credential is missing from config history');
+        return JSON.parse(secret);
+      }
       if (item.type === 'secret' && typeof item.id === 'string' && item.id.startsWith(historyInlinePrefix)) {
         const secret = this.secrets.get(item.id);
         if (!secret) throw new Error('Encrypted inline credential is missing from config history');

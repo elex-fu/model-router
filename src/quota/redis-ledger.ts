@@ -1,5 +1,5 @@
 import type { QuotaAdmission, QuotaBalance, QuotaDecision } from './ledger.js';
-import { RedisQuotaState, type QuotaStatePersistence } from './redis-state.js';
+import type { QuotaStatePersistence, RedisQuotaState } from './redis-state.js';
 
 export const quotaStateKey = (...parts: string[]): string => JSON.stringify(parts);
 
@@ -57,7 +57,7 @@ if op=='admit' then
   r={kind='request',requestId=input.requestId,proxyKeyId=input.proxyKeyId,periodId=input.periodId,
      reservedTokens=input.reserveTokens,attemptReserveTokens=input.reserveTokens,settledTokens=0,
      state='active',sent=0,usage={},sentAttempts={},missingUsagePolicy=input.missingUsagePolicy or 'estimate',
-     admittedAtMs=now,deadlineMs=now+600000,periodEndMs=input.periodEndMs}
+     admittedAtMs=now,deadlineMs=now+math.max(600000,input.recoveryTimeoutMs or 600000),periodEndMs=input.periodEndMs}
   save(keys[1],a); save(keys[2],p); save(keys[3],r)
   return {allowed=true}
 elseif op=='adjust' then
@@ -152,7 +152,8 @@ export class RedisQuotaLedger {
     ];
   }
   async admit(a: QuotaAdmission): Promise<QuotaDecision> {
-    for (const n of [a.reserveTokens, a.dailyTokens, a.rpm, a.maxConcurrentRequests]) nonnegative(n);
+    for (const n of [a.reserveTokens, a.dailyTokens, a.rpm, a.maxConcurrentRequests, a.recoveryTimeoutMs])
+      nonnegative(n);
     if (a.periodEndMs <= a.atMs || a.periodStartMs > a.atMs) throw new RangeError('Invalid quota period');
     const decision = await this.state.mutate<QuotaDecision>(
       this.keys(a.proxyKeyId, a.periodId, a.requestId),

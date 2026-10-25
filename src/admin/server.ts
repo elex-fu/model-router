@@ -9,6 +9,7 @@ import {
   type ServerResponse,
 } from 'node:http';
 import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { redactSecretSources } from '../config/secret-source.js';
 import type { ConfigV2, UpstreamDefinition } from '../config/v2-schema.js';
 import type { ConfigDiff } from '../control/service.js';
 import { ConfigConflictError, ConfigValidationError, ControlError, ControlService } from '../control/service.js';
@@ -54,13 +55,7 @@ function requestHeader(req: IncomingMessage, name: string): string | undefined {
   return typeof value === 'string' ? value : undefined;
 }
 
-function redactInlineValues(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(redactInlineValues);
-  if (!value || typeof value !== 'object') return value;
-  const item = value as Record<string, unknown>;
-  if (item.type === 'inline' && typeof item.value === 'string') return { ...item, value: '' };
-  return Object.fromEntries(Object.entries(item).map(([key, child]) => [key, redactInlineValues(child)]));
-}
+const redactInlineValues = redactSecretSources;
 
 function databaseDiagnostics(controlStore: ControlStore, telemetryStore: SQLiteTelemetryStore | undefined): Json {
   const inspect = (db: import('better-sqlite3').Database | undefined) => {
@@ -771,7 +766,7 @@ export function createAdminServer(options: AdminServerOptions): AdminServer {
       const status = store.secrets.status(credential.secret);
       return {
         ...credential,
-        secret: credential.secret.type === 'inline' ? { type: 'inline' as const, value: '' } : credential.secret,
+        secret: redactSecretSources(credential.secret),
         status: status.configured ? 'configured' : 'missing',
         secretStatus: status,
         maskedValue: status.configured ? '••••••••' : null,

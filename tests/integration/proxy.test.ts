@@ -2320,3 +2320,206 @@ test('integration: /v1/embeddings fails closed with 422 for a non-OpenAI upstrea
     await upstream.close();
   }
 });
+
+for (const [maxRetries, initialUsage] of [
+  [1, true],
+  [2, true],
+  [2, false],
+] as const) {
+  test(`thinking corrective retry obeys total send budget ${maxRetries} and records each send (initial usage ${initialUsage})`, async () => {
+    let count = 0;
+    const upstream = await startMockUpstream(() =>
+      ++count === 1
+        ? {
+            status: 400,
+            body: {
+              error: { message: 'Invalid signature in thinking block' },
+              ...(initialUsage ? { usage: { input_tokens: 2, output_tokens: 0 } } : {}),
+            },
+          }
+        : {
+            status: 200,
+            body: {
+              id: 'msg_ok',
+              type: 'message',
+              role: 'assistant',
+              content: [{ type: 'text', text: 'ok' }],
+              stop_reason: 'end_turn',
+              usage: { input_tokens: 3, output_tokens: 2 },
+            },
+          },
+    );
+    const attempts: AttemptRecord[] = [];
+    const sent: string[] = [];
+    const usages: Array<[string, number]> = [];
+    const settled: Array<number | null> = [];
+    const missing: number[] = [];
+    let topUps = 0;
+    const proxy = await startProxy(
+      baseConfig([
+        {
+          name: 'claude',
+          provider: 'anthropic',
+          protocol: 'anthropic',
+          baseUrl: upstream.baseUrl,
+          apiKeys: ['synthetic-upstream-key'],
+          models: ['claude'],
+          enabled: true,
+        },
+      ]),
+      {
+        maxRetries,
+        telemetryStore: {
+          upsertRequest: async () => {},
+          upsertAttempt: async (a) => {
+            attempts.push({ ...a });
+          },
+        },
+        quotaLedger: {
+          admit: async () => ({ allowed: true }),
+          topUp: async () => {
+            topUps++;
+            return { allowed: true };
+          },
+          markAttemptSent: async (_id, attemptId) => {
+            assert.ok(attemptId, 'every corrective send has an explicit attempt ID');
+            sent.push(attemptId);
+          },
+          recordAttemptUsage: async (_id, attemptId, tokens) => {
+            usages.push([attemptId, tokens]);
+          },
+          settle: async (_id, tokens, unknownAttempts) => {
+            missing.push(unknownAttempts ?? 0);
+            settled.push(tokens);
+          },
+        },
+      },
+    );
+    try {
+      const response = await fetch(`${proxy.baseUrl}/v1/messages`, {
+        method: 'POST',
+        headers: { authorization: 'Bearer sk-test-12345', 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: 'claude',
+          max_tokens: 128,
+          messages: [
+            {
+              role: 'assistant',
+              content: [
+                { type: 'thinking', thinking: 'reason', signature: 'bad' },
+                { type: 'text', text: 'hi' },
+              ],
+            },
+            { role: 'user', content: 'continue' },
+          ],
+        }),
+      });
+      await response.text();
+      assert.equal(upstream.calls.length, maxRetries);
+      assert.equal(response.status, maxRetries === 1 ? 400 : 200);
+      assert.equal(sent.length, maxRetries);
+      assert.equal(new Set(sent).size, maxRetries);
+      assert.equal(topUps, maxRetries - 1);
+      const final = attempts.filter((a) => a.outcome !== 'started');
+      assert.equal(final.length, maxRetries);
+      assert.deepEqual(
+        final.map((a) => a.ordinal),
+        Array.from({ length: maxRetries }, (_, i) => i + 1),
+      );
+      assert.equal(final[0].status, 400);
+      assert.equal(final[0].usage?.inputTotal, initialUsage ? 2 : null);
+      assert.deepEqual(
+        usages.map((x) => x[1]),
+        !initialUsage ? [5] : maxRetries === 1 ? [2] : [2, 5],
+      );
+      assert.deepEqual(settled, [!initialUsage ? 5 : maxRetries === 1 ? 2 : 7]);
+      assert.deepEqual(missing, [initialUsage ? 0 : 1]);
+    } finally {
+      await proxy.close();
+      await upstream.close();
+    }
+  });
+}
+
+for (const failure of ['quota-denied', 'quota-thrown', 'usage-tracking-failed', 'sent-tracking-failed'] as const) {
+  test(`thinking corrective retry never sends when ${failure}`, async () => {
+    const upstream = await startMockUpstream(() => ({
+      status: 400,
+      body: {
+        error: { message: 'Invalid signature in thinking block' },
+        usage: { input_tokens: 2, output_tokens: 0 },
+      },
+    }));
+    const attempts: AttemptRecord[] = [];
+    let sent = 0;
+    const settled: Array<number | null> = [];
+    const proxy = await startProxy(
+      baseConfig([
+        {
+          name: 'claude',
+          provider: 'anthropic',
+          protocol: 'anthropic',
+          baseUrl: upstream.baseUrl,
+          apiKeys: ['synthetic-upstream-key'],
+          models: ['claude'],
+          enabled: true,
+        },
+      ]),
+      {
+        maxRetries: 2,
+        telemetryStore: {
+          upsertRequest: async () => {},
+          upsertAttempt: async (a) => {
+            attempts.push({ ...a });
+          },
+        },
+        quotaLedger: {
+          admit: async () => ({ allowed: true }),
+          topUp: async () => {
+            if (failure === 'quota-thrown') throw new Error('synthetic top-up failure');
+            return failure === 'quota-denied' ? { allowed: false, reason: 'daily_tokens_exceeded' } : { allowed: true };
+          },
+          markAttemptSent: async () => {
+            if (++sent === 2) throw new Error('synthetic tracking failure');
+          },
+          recordAttemptUsage: async () => {
+            if (failure === 'usage-tracking-failed') throw new Error('synthetic usage tracking failure');
+          },
+          settle: async (_id, tokens) => {
+            settled.push(tokens);
+          },
+        },
+      },
+    );
+    try {
+      const response = await fetch(`${proxy.baseUrl}/v1/messages`, {
+        method: 'POST',
+        headers: { authorization: 'Bearer sk-test-12345', 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: 'claude',
+          messages: [
+            {
+              role: 'assistant',
+              content: [
+                { type: 'thinking', thinking: 'reason', signature: 'bad' },
+                { type: 'text', text: 'hi' },
+              ],
+            },
+            { role: 'user', content: 'continue' },
+          ],
+        }),
+      });
+      await response.text();
+      assert.equal(response.status, failure === 'quota-denied' ? 429 : 503);
+      assert.equal(upstream.calls.length, 1);
+      assert.deepEqual(settled, [2]);
+      const finals = attempts.filter((a) => a.outcome !== 'started');
+      assert.equal(finals.length, failure === 'usage-tracking-failed' ? 1 : 2);
+      assert.equal(finals[0].status, 400);
+      if (failure !== 'usage-tracking-failed') assert.equal(finals[1].status, response.status);
+    } finally {
+      await proxy.close();
+      await upstream.close();
+    }
+  });
+}

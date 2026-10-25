@@ -1,4 +1,5 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
+import { normalizeSecretSource } from './secret-source.js';
 import { ConfigStore } from './store.js';
 import type { Config, ProxyKey, UpstreamConfig } from './types.js';
 import type { ConfigV2, SecretSource } from './v2-schema.js';
@@ -6,13 +7,12 @@ import type { ConfigV2, SecretSource } from './v2-schema.js';
 export type SecretResolver = (id: string) => string | undefined | Promise<string | undefined>;
 
 async function resolveSecret(source: SecretSource, resolver?: SecretResolver): Promise<string> {
+  source = normalizeSecretSource(source);
   const value =
     source.type === 'inline'
       ? source.value
       : source.type === 'env'
-        // Established inline convention: a provider-shaped key literal
-        // (sk-…) stored as the env reference name resolves to itself.
-        ? (/^sk-[A-Za-z0-9_-]{20,}$/.test(source.name) ? source.name : process.env[source.name])
+        ? process.env[source.name]
         : await resolver?.(source.id);
   if (!value) {
     const reference = source.type === 'inline' ? 'inline' : source.type === 'env' ? source.name : source.id;

@@ -513,6 +513,52 @@ async function launch(stage, command, commandArgs, env) {
   children.push(owned);
   return child;
 }
+// Count observed upstream attempts, not configured benchmark samples. Both
+// direct legs are unauthenticated and recorded by the mock as "(anonymous)";
+// subtracting a configured count is wrong for streaming and partial failures.
+function gatewayCensusRequestCount(mockStats) {
+  assert.ok(mockStats?.accounts && typeof mockStats.accounts === 'object' && !Array.isArray(mockStats.accounts),
+    'Statement census requires observed mock account counters');
+  let requests = 0;
+  for (const [account, row] of Object.entries(mockStats.accounts)) {
+    assert.ok(row && Number.isSafeInteger(row.requests) && row.requests >= 0,
+      'Statement census encountered an invalid request counter');
+    if (account === '(anonymous)') continue;
+    requests += row.requests;
+    assert.ok(Number.isSafeInteger(requests), 'Statement census request count exceeds safe integer bounds');
+  }
+  assert.ok(requests > 0, 'Statement census requires at least one observed gateway upstream request');
+  return requests;
+}
+
+// Dependency injection keeps the real exporter executable in offline tests,
+// without launching the supervisor, PostgreSQL or any upstream provider.
+async function exportPgStatementCensus(createDatabase, connectionString, directory) {
+  const censusDb = createDatabase({ connectionString, max: 1 });
+  try {
+    const total = (await censusDb.query('SELECT COALESCE(sum(calls),0)::bigint AS calls, COALESCE(sum(total_exec_time),0)::double precision AS exec_ms FROM public.pg_stat_statements')).rows[0];
+    const top = (await censusDb.query('SELECT queryid, calls, round(total_exec_time::numeric,1) AS exec_ms, left(query, 120) AS query FROM public.pg_stat_statements ORDER BY calls DESC LIMIT 20')).rows;
+    assert.ok(total && Number.isSafeInteger(Number(total.calls)) && Number(total.calls) >= 0 &&
+      Number.isFinite(Number(total.exec_ms)) && Number(total.exec_ms) >= 0 && Array.isArray(top),
+      'Statement census returned invalid SQL counters');
+    const mockStats = JSON.parse(await readFile(join(directory, 'final-mock-stats.json'), 'utf8'));
+    const requests = gatewayCensusRequestCount(mockStats);
+    const callsPerRequest = Number((Number(total.calls) / requests).toFixed(1));
+    const evidence = { schema: 2, normalization: 'observed-authenticated-mock-upstream-attempts', total, requests, callsPerRequest, top };
+    await writeFile(join(directory, 'pg-stat-statements.json'), JSON.stringify(evidence, null, 2) + '\n', { mode: 0o600 });
+    return { observationOk: true, calls: total.calls, execMs: total.exec_ms, requests, callsPerRequest };
+  } finally {
+    // A cleanup error also invalidates this requested observation. Do not
+    // silently certify an exporter whose database connection was not closed.
+    await censusDb.close();
+  }
+}
+
+function pgStatementCensusSatisfied(required, observation) {
+  return !required || (observation?.observationOk === true && Number.isSafeInteger(observation.requests) &&
+    observation.requests > 0 && Number.isFinite(observation.callsPerRequest) && observation.callsPerRequest >= 0);
+}
+
 async function closeOwned() {
   await Promise.allSettled(children.map(async ({ child, log }) => {
     if (child.exitCode === null && child.signalCode === null) {
@@ -526,39 +572,15 @@ async function closeOwned() {
   }));
   manifest.cleanup.processesStopped = children.every(({ child }) => child.exitCode !== null || child.signalCode !== null);
   if (database) await database.close();
-  if (pgStarted && process.env.R9_PG_STAT_STATEMENTS === '1' && !interrupted) {
-    // Dump the statement census before teardown; the migrator role can read
-    // the shared view. Written as evidence for paired cache diagnostics.
+  if (process.env.R9_PG_STAT_STATEMENTS === '1') {
     try {
+      assert.ok(pgStarted && !interrupted && censusDatabaseUrl,
+        'Requested statement census unavailable because PostgreSQL did not start or the run was interrupted');
       const { createSaasDatabase } = await import(pathToFileURL(join(root, 'dist/saas/db/index.js')).href);
-      const census = createSaasDatabase({ connectionString: censusDatabaseUrl(), max: 1 });
-      try {
-        const total = (await census.query('SELECT COALESCE(sum(calls),0)::bigint AS calls, COALESCE(sum(total_exec_time),0)::double precision AS exec_ms FROM public.pg_stat_statements')).rows[0];
-        const top = (await census.query('SELECT queryid, calls, round(total_exec_time::numeric,1) AS exec_ms, left(query, 120) AS query FROM public.pg_stat_statements ORDER BY calls DESC LIMIT 20')).rows;
-        // Normalize by the actual gateway upstream request count: the bench
-        // warmup is a fixed time window, so a faster (cache-on) run admits
-        // more warmup requests and raw totals confound paired comparisons.
-        let requests = null;
-        try {
-          const mockStats = JSON.parse(await readFile(join(outputDir, 'final-mock-stats.json'), 'utf8'));
-          const values = Object.values(mockStats.accounts ?? {}).map((row) => Number(row.requests ?? 0));
-          const mockTotal = values.reduce((sum, value) => sum + value, 0) || null;
-          // The mock also serves the benchmark's direct leg (no gateway), so
-          // the per-request denominator subtracts it using the report's
-          // configured request count.
-          let direct = 0;
-          try {
-            const report = JSON.parse(await readFile(join(outputDir, 'serial-profile-current-3cli.json'), 'utf8'));
-            direct = Number(report?.config?.requests ?? 0);
-          } catch { /* report missing: fall back to the raw mock total */ }
-          requests = mockTotal !== null ? Math.max(1, mockTotal - direct) : null;
-        } catch { /* normalization is best-effort evidence enrichment */ }
-        const census = { schema: 1, total, requests, callsPerRequest: requests ? Number((Number(total.calls) / requests).toFixed(1)) : null, top };
-        await writeFile(join(outputDir, 'pg-stat-statements.json'), JSON.stringify(census, null, 2) + '\n', { mode: 0o600 });
-        manifest.pgStatementCensus = { calls: total.calls, execMs: total.exec_ms, requests, callsPerRequest: census.callsPerRequest };
-      } finally { await census.close().catch(() => {}); }
+      manifest.pgStatementCensus = await exportPgStatementCensus(createSaasDatabase, censusDatabaseUrl(), outputDir);
     } catch (error) {
-      manifest.pgStatementCensus = { error: String(error?.message ?? error) };
+      manifest.pgStatementCensus = { observationOk: false, error: String(error?.message ?? error) };
+      firstFault('pg-statement-census', 'Requested statement census export failed; see pgStatementCensus');
     }
   }
   if (pgStarted) {
@@ -1053,7 +1075,8 @@ try {
   manifest.finishedAt = new Date().toISOString();
   manifest.interrupted = interrupted;
   manifest.ok = !manifest.firstFault && !manifest.sourceChanged && !manifest.distChanged && !manifest.harnessChanged && !interrupted &&
-    manifest.cleanup.processesStopped && manifest.cleanup.postgresStopped && manifest.cleanup.runtimeRemoved;
+    manifest.cleanup.processesStopped && manifest.cleanup.postgresStopped && manifest.cleanup.runtimeRemoved &&
+    pgStatementCensusSatisfied(process.env.R9_PG_STAT_STATEMENTS === '1', manifest.pgStatementCensus);
   await writeFile(join(outputDir, 'summary.json'), `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
   console.log(`R9 ${options.serialProfile ? 'serial profile' : options.diagnostic ? 'diagnostic' : 'full'} summary: ${join(outputDir, 'summary.json')} (ok=${manifest.ok})`);
   process.exitCode = manifest.ok ? 0 : 1;

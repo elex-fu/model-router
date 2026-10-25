@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import { isIP } from 'node:net';
 import path from 'node:path';
 import { joinApiUrl } from '../providers/url.js';
+import { normalizeLegacySecretSources, normalizeSecretSource } from './secret-source.js';
 import { DEFAULT_CONFIG, type Config as LegacyConfig } from './types.js';
 import { type ConfigV2, configV2Schema, defaultConfigV2, type SecretSource } from './v2-schema.js';
 
@@ -430,7 +431,7 @@ export class ConfigServiceV2 {
     if (typeof next !== 'object' || next === null || Array.isArray(next)) {
       throw new ConfigValidationError([{ path: '$', code: 'type', message: 'Expected config object' }]);
     }
-    const candidate = { ...next, schemaVersion: 2, revision: current.revision + 1 };
+    const candidate = normalizeLegacySecretSources({ ...next, schemaVersion: 2, revision: current.revision + 1 });
     const validation = await this.validate(candidate);
     if (!validation.valid || !validation.config) throw new ConfigValidationError(validation.errors);
     if (validation.config.instanceId !== current.instanceId) {
@@ -457,13 +458,10 @@ export class ConfigServiceV2 {
     errors: ConfigIssue[],
     warnings: ConfigIssue[],
   ): Promise<void> {
+    secret = normalizeSecretSource(secret);
     let available: boolean | undefined;
     if (secret.type === 'inline') available = secret.value.length > 0;
-    else if (secret.type === 'env') {
-      // Established inline convention: a provider-shaped key literal
-      // (sk-…) stored as the env reference name resolves to itself.
-      available = /^sk-[A-Za-z0-9_-]{20,}$/.test(secret.name) || Boolean(process.env[secret.name]);
-    }
+    else if (secret.type === 'env') available = Boolean(process.env[secret.name]);
     else if (this.options.hasSecret) available = await this.options.hasSecret(secret.id);
     if (available === false) {
       (required ? errors : warnings).push({

@@ -6,6 +6,7 @@ import { performance } from 'node:perf_hooks';
 import { createInterface } from 'node:readline';
 import { AdminMaintenance } from '../admin/maintenance.js';
 import { offlineRestore } from '../backup/offline-restore.js';
+import { normalizeSecretSource } from '../config/secret-source.js';
 import type { ConfigV2 } from '../config/v2-schema.js';
 import { type ConfigIssue, ConfigServiceV2, safeMigrationUrl } from '../config/v2-service.js';
 import { ControlService } from '../control/service.js';
@@ -204,10 +205,11 @@ async function migrationPreview(raw: Json, file: string) {
       );
       const legacyBase = object(legacy) && typeof legacy.baseUrl === 'string' ? legacy.baseUrl : undefined;
       const credentials = upstream.credentials.map((credential) => {
+        const source = normalizeSecretSource(credential.secret);
         const secret =
-          credential.secret.type === 'env'
-            ? `env:${credential.secret.name}`
-            : credential.secret.type === 'inline'
+          source.type === 'env'
+            ? `env:${source.name}`
+            : source.type === 'inline'
               ? 'inline value in config file'
               : 'encrypted secret';
         return { id: credential.id, label: credential.label, enabled: credential.enabled, secretSource: secret };

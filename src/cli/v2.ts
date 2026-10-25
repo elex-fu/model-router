@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { closeSync, existsSync, openSync, readFileSync, unlinkSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
+import { normalizeSecretSource } from '../config/secret-source.js';
 import type { ConfigV2, ProxyKeyDefinition, RouteDefinition, UpstreamDefinition } from '../config/v2-schema.js';
 import { ControlService } from '../control/service.js';
 import { ControlStore } from '../control/store.js';
@@ -361,12 +362,13 @@ async function execute(control: ControlService, action: Action, args: string[], 
     if (upstream.protocol === 'gemini') throw new Error('V2 CLI probe does not support Gemini');
     if (mode !== 'none') {
       if (!credential) throw new Error('No enabled upstream credential');
+      const source = normalizeSecretSource(credential.secret);
       const secret =
-        credential.secret.type === 'inline'
-          ? credential.secret.value
-          : credential.secret.type === 'env'
-            ? process.env[credential.secret.name]
-            : control.store.secrets.get(credential.secret.id);
+        source.type === 'inline'
+          ? source.value
+          : source.type === 'env'
+            ? process.env[source.name]
+            : control.store.secrets.get(source.id);
       if (!secret) throw new Error('Upstream credential unavailable');
       if (mode === 'x-api-key') headers['x-api-key'] = secret;
       else if (mode === 'bearer') headers.authorization = `Bearer ${secret}`;

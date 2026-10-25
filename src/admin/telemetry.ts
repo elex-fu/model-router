@@ -1,6 +1,7 @@
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { Worker } from 'node:worker_threads';
+import { normalizeSecretSource } from '../config/secret-source.js';
 import type { SecretSource } from '../config/v2-schema.js';
 import { ControlError, type ControlService } from '../control/service.js';
 import type { QuotaAdminLedger } from '../quota/ledger.js';
@@ -389,7 +390,8 @@ export function telemetryAdapters(
         if (upstream.auth.clientSecret) sources.push(upstream.auth.clientSecret);
       }
       const values = new Set<string>();
-      for (const source of sources) {
+      for (const rawSource of sources) {
+        const source = normalizeSecretSource(rawSource);
         const value =
           source.type === 'inline'
             ? source.value

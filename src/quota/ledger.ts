@@ -11,6 +11,8 @@ export interface QuotaAdmission {
   periodEndMs: number;
   timezoneVersionId?: number;
   reserveTokens: number;
+  /** Recovery must not precede the request execution timeout (including cleanup grace). */
+  recoveryTimeoutMs?: number;
   dailyTokens?: number;
   rpm?: number;
   maxConcurrentRequests?: number;

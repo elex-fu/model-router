@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { PostgresQuotaStatePersistence } from '../../quota/postgres-state.js';
-import { RedisQuotaState, type QuotaStateBatch, type QuotaStateRow } from '../../quota/redis-state.js';
+import type { QuotaStateBatch, QuotaStateRow, RedisQuotaState } from '../../quota/redis-state.js';
 import type { SaasDatabase, SqlExecutor } from '../db/types.js';
 import type {
   PostgresPreparationCapacityPort,
@@ -9,8 +9,8 @@ import type {
 import {
   allowRequestPreparation,
   blockRequestPreparation,
-  rejectRequestPreparation,
   type RequestPreparationDecision,
+  rejectRequestPreparation,
 } from './request-preparation-service.js';
 
 type Input = Parameters<PostgresPreparationCapacityPort['reserve']>[1];
@@ -384,7 +384,10 @@ export class RedisPreparationCapacity {
       [r.tenantId, r.requestId],
     );
     const row = result.rows[0];
-    if (row && !['succeeded', 'failed'].includes(row.execution_state) && r.deadlineMs > Date.now()) return;
+    // A deadline is a recovery scan hint, not evidence that an execution ended.
+    // Pending/unknown work keeps capacity until SQL records a terminal outcome.
+    if (row && !['succeeded', 'failed'].includes(row.execution_state)) return;
+    if (!row && r.deadlineMs > Date.now()) return;
     const op = !row || !row.any_sent ? 'cancel' : 'complete';
     await this.state.mutate([requestKey(id), ...r.scopes], SCRIPT, { op });
     this.localAdmissions.delete(id);
@@ -401,7 +404,7 @@ export class RedisPreparationCapacity {
         `SELECT s.value->>'requestId' AS id FROM saas_redis_quota_state s
         LEFT JOIN saas_requests q ON q.tenant_id=(s.value->>'tenantId')::uuid AND q.id=(s.value->>'requestId')::uuid
         WHERE s.namespace=$1 AND s.value->>'kind'='capacityRequest' AND s.value->>'state'='active'
-          AND (q.execution_state IN ('succeeded','failed') OR (s.value->>'deadlineMs')::bigint<=$2) LIMIT 100`,
+          AND (q.execution_state IN ('succeeded','failed') OR (q.id IS NULL AND (s.value->>'deadlineMs')::bigint<=$2)) LIMIT 100`,
         [this.namespace, Date.now()],
       );
       for (const row of rows.rows) await this.complete(row.id, true);

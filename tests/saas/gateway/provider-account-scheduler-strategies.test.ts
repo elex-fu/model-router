@@ -468,6 +468,38 @@ test('cost priority orders the zero-cost subscription pool ahead of metered keys
   }
 });
 
+test('cost priority without LRU filters to the cheapest tier before weighted selection', async () => {
+  const dependencies: ProviderAccountSchedulerDependencies = {
+    eligibility: eligibilityPort(
+      new Map([
+        ['free-a', { priority: 1, weight: 10, supplierCostRate: { numeratorMinorUnits: 0n, denominatorUnits: 1n } }],
+        ['free-b', { priority: 1, weight: 10, supplierCostRate: { numeratorMinorUnits: 0n, denominatorUnits: 1000n } }],
+        [
+          'expensive',
+          { priority: 1, weight: 1000, supplierCostRate: { numeratorMinorUnits: 3n, denominatorUnits: 1000n } },
+        ],
+        ['unknown', { priority: 1, weight: 1000, supplierCostRate: null }],
+      ]),
+    ),
+    health: healthPort(new Map()),
+    concurrency: concurrencyPort(new Map()),
+  };
+  const selected = new Set<string>();
+  for (let index = 0; index < 100; index += 1) {
+    const { accountId, scheduling } = await selectAccount(
+      dependencies,
+      ['unknown', 'expensive', 'free-b', 'free-a'].map(candidate),
+      { costPriority: { enabled: true } },
+      `cost-only-${index}`,
+    );
+    assert.ok(accountId === 'free-a' || accountId === 'free-b', `selected ${accountId}`);
+    assert.equal(scheduling?.strategy, 'weighted-draw');
+    assert.ok(scheduling?.reasons.includes('cost-priority'));
+    selected.add(accountId);
+  }
+  assert.equal(selected.size, 2, 'equal-cost candidates retain weighted selection');
+});
+
 test('cost comparison is exact rational arithmetic, not floating point', async () => {
   // 1/3 vs 1000000000000000001/3000000000000000000: float-equal, rationally
   // the left is strictly cheaper. Only bigint cross-multiplication separates
@@ -476,8 +508,9 @@ test('cost comparison is exact rational arithmetic, not floating point', async (
     eligibility: eligibilityPort(
       new Map([
         ['exact', { priority: 1, weight: 10, supplierCostRate: { numeratorMinorUnits: 1n, denominatorUnits: 3n } }],
-        {
-          floatEqual: {
+        [
+          'floatEqual',
+          {
             priority: 1,
             weight: 10,
             supplierCostRate: {
@@ -485,20 +518,22 @@ test('cost comparison is exact rational arithmetic, not floating point', async (
               denominatorUnits: 3_000_000_000_000_000_000n,
             },
           },
-        },
+        ],
       ]),
     ),
     health: healthPort(new Map()),
     concurrency: concurrencyPort(new Map()),
   };
-  for (let index = 0; index < 12; index += 1) {
-    const { accountId } = await selectAccount(
-      dependencies,
-      [candidate('floatEqual'), candidate('exact')],
-      { costPriority: { enabled: true }, lru: { enabled: true } },
-      `request-${index}`,
-    );
-    assert.equal(accountId, 'exact');
+  for (const lruEnabled of [false, true]) {
+    for (let index = 0; index < 12; index += 1) {
+      const { accountId } = await selectAccount(
+        dependencies,
+        [candidate('floatEqual'), candidate('exact')],
+        { costPriority: { enabled: true }, lru: { enabled: lruEnabled } },
+        `request-${index}`,
+      );
+      assert.equal(accountId, 'exact');
+    }
   }
 });
 
