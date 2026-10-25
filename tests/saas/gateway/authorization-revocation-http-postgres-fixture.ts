@@ -154,8 +154,20 @@ export async function proveAuthorizationRevocationHttp(input: {
       const result = await post(gateway, secret);
       assert.equal(result.response.status, 403);
       assert.equal(result.body.error?.code, 'REQUEST_REJECTED');
-      assert.deepEqual({ stage: gateway.failure()?.stage, code: gateway.failure()?.code }, kind === 'entitlement'
-        ? { stage: 'entitlement', code: 'entitlement_denied' } : { stage: 'admission', code: 'caller_denied' });
+      // An entitlement revocation is enforced either at the pre-admission
+      // entitlement resolve (fresh read) or, when the warm entitlement
+      // version-key cache served a stale allow, by the admission guard's
+      // fresh in-transaction re-read — the final strong-consistency defense
+      // line (D4/A2a §12.2: a stale epoch fails closed as a bounded
+      // entitlement_denied at admission). Both are typed fail-closed 403s.
+      const failure = gateway.failure();
+      if (kind === 'entitlement') {
+        assert.equal(failure?.code, 'entitlement_denied');
+        assert.ok(failure?.stage === 'entitlement' || failure?.stage === 'admission',
+          'entitlement revocation must be enforced at the fresh resolve or the admission guard (fail-closed)');
+      } else {
+        assert.deepEqual({ stage: failure?.stage, code: failure?.code }, { stage: 'admission', code: 'caller_denied' });
+      }
     }
     assert.equal(sourceCount(), authCalls, 'revocation rejection must use the already cached authenticated snapshot');
     assert.equal(denied - denials, kind === 'prelock' ? 2 : 0, 'caller rejection must be the real authorization prelock refusal');
