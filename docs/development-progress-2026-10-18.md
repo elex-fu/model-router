@@ -1457,3 +1457,13 @@ run01（通用拒绝）/run02（JSON_INVALID）/run03（METHOD_NOT_POST首错）
 - **D3/D4 记录性裁定**：prepared statements 维持 off 不入门槛口径（sub2api 未启 PrepareStmt 仍达标的实证支持"优化查询数"方向；压测开 native 生产 off 视为绕门槛）；authority 缓存 5s fail-closed 语义接受（CachedKeyAuthenticator 5s 同构先例 30/30 验收），亚秒失效增强并入 A2b。
 
 M2 剩余：B0/B1（外部 Alipay）、C0（D2 分阶段执行）、C1 余项（部分依赖 B 线）、C2 剩余（异地/告警/签收外部）、发布签收。
+
+### 29.70 D2 Phase A2a 落地：宽快照第二层（entitlement + 调度器静态资格）
+
+按§12.2设计实施（`3ba59bb`）：`CachedRequestPreparationEntitlement`（entitlement解析，键=caller id字段+4 epoch+model/protocol，事务内executor调用全旁路保证fence读新鲜）与`CachedProviderAccountEligibility`（调度器静态资格revalidate：S4 route join+S5 ~15表eligibility大join+supplier-cost点查；键用泛型深规范化覆盖除时钟外全部输入——漏列epoch字段即错命中bug，泛型只会多miss不会错hit；`now`不入键有测试钉住）。全部沿用已验收先例机制（allow-only/版本键/5s TTL/4096 LRU/single-flight压力旁路/克隆隔离），guard事务内fresh重读**未动**（唯一强一致防线，陈旧epoch以≤TTL AUTHORITY_MISMATCH fail-closed）。kill switch：`MODEL_ROUTER_PREPARATION_ENTITLEMENT_CACHE=0`/`MODEL_ROUTER_SCHEDULER_STATIC_CACHE=0`，默认开。
+
+**审慎跳过（安全原因）**：S1 billing group解析——`saas_billing_groups`无版本列（就地更新无epoch），版本键契约不成立，留schema决策（加版本列或结构重构，见方案§12.2后续）；S6 window-cost为动态窗口聚合不缓存。调度信号有界陈旧（≤5s，仅调制权重不授予授权，deny永不缓存）已显式接受并写入头注释——与D4语义一致。
+
+**验证**：36新合同用例（版本稳定复用/逐epoch miss/TTL/拒绝不缓存/LRU上界/executor旁路/时钟不入键）全绿；386回归测试0失败（含composition/startup以缓存默认开姿态通过）；tsc零错误、全套件363/0失败；dist已重建。CI #40150762147运行中。
+
+**T1量化状态更新**：01:23排程的T1将量化**合并缓存栈**（authority+A2a两层）的命中稳态收益——对照基线仍为run01（173.1/156.8ms p50）；安静负载窗口判定不变（load1可比性逐轮记录）。若合并栈p50显著下降，按§12.2判定进入A2b评估或直接按序推进serial门槛复测。
