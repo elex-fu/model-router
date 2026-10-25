@@ -1467,3 +1467,19 @@ M2 剩余：B0/B1（外部 Alipay）、C0（D2 分阶段执行）、C1 余项（
 **验证**：36新合同用例（版本稳定复用/逐epoch miss/TTL/拒绝不缓存/LRU上界/executor旁路/时钟不入键）全绿；386回归测试0失败（含composition/startup以缓存默认开姿态通过）；tsc零错误、全套件363/0失败；dist已重建。CI #40150762147运行中。
 
 **T1量化状态更新**：01:23排程的T1将量化**合并缓存栈**（authority+A2a两层）的命中稳态收益——对照基线仍为run01（173.1/156.8ms p50）；安静负载窗口判定不变（load1可比性逐轮记录）。若合并栈p50显著下降，按§12.2判定进入A2b评估或直接按序推进serial门槛复测。
+
+### 29.71 T1缓存墙钟量化：配对四轮不可判（如实记录），诊断能力落地
+
+为T1增加同负载配对法：R9 runner新增三个缓存kill switch的env透传（`MODEL_ROUTER_PREPARATION_AUTHORITY_CACHE`/`PREPARATION_ENTITLEMENT_CACHE`/`SCHEDULER_STATIC_CACHE`，经baseEnvironment→kmsEnv→gateway），wrapper级cache-off/on两配置同轮背靠背执行，消除跨日机器状态方差。
+
+**四轮结果（observationOk全true 200/200，host load1 p50：11.40/11.81/13.04/33.69）**：
+| 轮序 | 配置 | latency query p50/p99 | ttfb query p50/p99 |
+|---|---|---|---|
+| P1-1st | off | 95.3/301.2 | 76.9/226.9 |
+| P1-2nd | on | 87.4/189.1 | 90.4/334.8 |
+| P2-1st | on | 74.3/175.4 | 123.2/729.4 |
+| P2-2nd | off | 76.9/236.5 | 73.8/292.4 |
+
+**判定：不可判**。同配置轮间方差（off: 95.3 vs 76.9；on: 87.4 vs 74.3）与配置间差同量级；ttfb两对方向矛盾且与轮序/负载尖峰相关（P2-off在load1=33.7下反而最快，说明load1采样窗与请求测量窗错位、外部负载特征主导）；当日绝对值约为昨日基线一半（95 vs 173@相近负载）——机器日状态差（昨日有119s checkpoint级磁盘压力）远超缓存效应。latency腿p99在on侧两次较低（189/175 vs 301/236）为弱信号，不作结论。
+
+**T1结论**：缓存单元级效果已证（0 SQL on hit，104用例）；墙钟量化需真正安静窗口（load1持续<6）择机执行——本机当前外部负载（fseventsd/Chrome/多进程）不满足。§12.2判定规则下A2b与门槛复测维持等待量化结论；不基于弱信号推进。证据目录：`/private/tmp/model-router-c0-serial-trace-t1{,b}-{on,off}-20261025/`。

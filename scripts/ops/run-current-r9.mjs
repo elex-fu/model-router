@@ -102,6 +102,12 @@ const manifest = { schema: 1, startedAt: new Date().toISOString(), assembly: 'cu
   stages: [], scenes: [], firstFault: null, cleanup: {}, sourceBefore: {}, sourceAfter: {}, distBefore: {}, distAfter: {}, ok: false };
 const baseEnvironment = { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR,
   LC_ALL: 'C', LANG: 'C', NODE_ENV: 'test' };
+// Version-key cache kill switches pass through so paired cache-off/on
+// diagnostic runs (same-load T1 quantification) stay controllable.
+for (const cacheSwitch of ['MODEL_ROUTER_PREPARATION_AUTHORITY_CACHE',
+  'MODEL_ROUTER_PREPARATION_ENTITLEMENT_CACHE', 'MODEL_ROUTER_SCHEDULER_STATIC_CACHE']) {
+  if (process.env[cacheSwitch] !== undefined) baseEnvironment[cacheSwitch] = process.env[cacheSwitch];
+}
 
 const REQUEST_SAMPLE_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 function projectRequestDiagnostic(source) {
