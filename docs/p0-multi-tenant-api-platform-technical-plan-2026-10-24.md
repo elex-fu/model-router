@@ -19,7 +19,7 @@
 
 | 里程碑 | 可作出的声明 | 必须满足 | 当前状态 |
 |---|---|---|---|
-| M1 选定供给演示 | 新租户正式入口完成指定模型请求 | A 正式 provision、指定协议工作流、明示限制 | 关键代码与定向/PG18 验证已推进；正式指定供给全链待验收 |
+| M1 选定供给演示 | 新租户正式入口完成指定模型请求 | A 正式 provision、指定协议工作流、明示限制 | **已收口（2026-10-25 D1 裁定，明示限制）**：A0（9d Kimi 3/3）+ A1 指定范围（A1o/thinking/cancel/usage/重连五维，4场景候选CI全绿）+ 明示限制三项：A1a disabled 为 CLI 级 unavailable（CLI 2.1.216 结构不产出，§29.66 实证；服务器端 disabled 合同另有 A0 postKimi+纯测试证据）、backend revision unknown、重连以取消后一致性为证据形态 |
 | M2 可收费运营 GO | 经批准的供给、币种、商户范围可收费 | M1 + B + C 性能/恢复 + 生产 KMS/同步持久恢复 + 发布候选必需 CI + 运营签收 | 未关闭；工程候选87 CI通过，真实 PSP、R9、生产 KMS/恢复待证据 |
 | M3 全 P0 完成 | 本方案关键能力全部收口 | M2 + 完整协议矩阵 + Codex 外部契约与真实工作流证据 | 专项回归、完整协议/真实工作流及外部证据待验，未关闭 |
 
@@ -381,7 +381,7 @@ P02a 依赖 P01 契约先行，P03 只等待开户批；P02b 在 P06/P07 接口�
 | Gate | 验收范围 | 通过证据 | 阻塞时处理 |
 |---|---|---|---|
 | A0 | 新租户正式平台供给 | 9d正式Kimi新客3/3：正常operation/权益/显式Key/生成/usage/settlement与hold0；P01禁用/版本冲突沿各自受限PG证据，本次真实供应商仅正常首请求 | 正常真实供给闭环已过；不能替代A1真实CLI |
-| A1 | 指定 CLI 协议工作流 | WIP cf5008b含A1a/A1o及27组测试源码，仅静态审阅；最后实际capture在HEAD /首错，修复后尚未再验；两轮工具、thinking、取消/重连与真实usage未关闭 | 暂停；独立WIP不作为真实工作流通过 |
+| A1 | 指定 CLI 协议工作流 | 两轮工具✓（A1o）、thinking✓（adaptive场景）、取消✓、真实usage✓、重连以一致性证据形态✓——四场景（A1o/enabled/cancel+A0）候选CI全绿（e988644/580d408/b1ae489各68/68）；A1a disabled CLI 级 unavailable（明示限制，D1裁定§12.1）；backend revision unknown | **已按明示限制收口（D1）**；未来CLI支持显式disabled时A1a gate自然可过，不降门槛 |
 | A2 | Codex 完整能力 | 后端 enforcement、opaque/remote input、reasoning 上界与真实 compact/WS | unavailable；M3 阻塞 |
 | B0 | 单 Alipay/CNY | 实际 precreate、丢响应原 POST 重入、回调、到账、查询、全/部分退款及乱序 | M2 阻塞 |
 | B1 | 商户/密钥历史 | 切 merchant/轮换、历史单回调退款、歧义回填隔离 | 保留 draining，禁止新启用 |
@@ -407,7 +407,7 @@ M1 至少 A0+A1 指定范围；M2 还需要 B0/B1/C0/C1/C2；M3 额外需要 A2 
 | P0 / A1o真实CLI有限互通 | **已通过并完成候选绑定**：run08绑定干净候选`e988644`+fresh build，真实Claude Code 2.1.216经观察器→GW→真实Kimi完成两轮Read+三轮generation，3笔native usage逐笔结算（4573+4873+4996=14442）、wallet 985558、hold 0、ledger 4/8、4 leases释放；`f27f06c`与`e988644`（CI #40089334882）均68/68 success | thinkingModeProven/backendRevisionProven/providerHardLimitProven/productionGo保持false边界；A1o不关闭A1a、完整A1或M1 |
 | P0 / C0首瓶颈定位 | **已完成**：trace诊断（200/200完整、query阶段独占~87%）+全路径静态枚举——pre-send≈150条语句+5次fsync，173ms p50≈1.15ms/条（prepared-off逐条parse/plan），~1/3为重复重验证读，p99尾部为O(增长)聚合扫描；窄修路线图已定（去重重验证~45-60ms为首选，冗余SET已移除） | 窄修①（去重重复重验证）→受控serial复测trace对照→cap A/B→完整R9；**核算提示：10ms TTFB与30ms门槛需架构级改造**（admission缓存/工作后移/流水线化），窄修不可及，需方案层预算决策；native prepared statements属部署配置（生产默认off），不用于改门槛语义 |
 | P0 / C0性能与过载 | 30/10ms未过；cap A/B、完整R9尚未执行 | 按真实瓶颈窄修，受控serial有效后再cap关闭/8候选A/B、完整R9；保留c=200、60秒、SSE10分钟、ratio≥2.7、零意外错误及成功/429分列门槛 |
-| P0 / A1完整指定范围 | **代码侧全部完成**：两轮工具✓（A1o）、thinking✓（enabled场景`580d408`）、取消✓（cancel场景`b1ae489` CI success：requests=1/attempts=1无重复派发、hold如实保留、取消的generation永不结算）、真实usage✓（三场景逐笔结算）、重连以取消后状态一致性+独立后续请求为可获得证据形态；backend revision保持unknown | **M1最终关闭仅剩A1a方案决策**：显式disabled为CLI结构不可满足负结论——gate修订为omitted/adaptive或接受unavailable，由方案层裁定后M1可收口 |
+| P0 / A1完整指定范围 | **已按 D1 裁定收口（§12.1）**：五维全闭环+A1a unavailable 明示限制（负结论实证 §29.66）+backend revision unknown；M1 同步收口（§1 里程碑行） | 无剩余动作；A1a gate 保持严格等待未来 CLI 能力 |
 | P0 / B0、B1真实支付 | binding/退款/收银工程已有本地与PG证据，真实PSP未验 | 补真实Alipay主体、CNY钱包/计划、回调验签配置及受控退款额度；验证原POST重入、回调到账、全/部分退款、旧binding回调退款与歧义reconciliation |
 | P0 / C2收费生产 | **独立同步持久恢复演练已通过**（`9523b64`：standby演练run01——同步复制注册、确认commit经standby重放deep-equal、主库immediate崩溃+promote、最后确认金融commit从独立副本完整恢复、清理完整）；KMS/IAM、异地backup/PITR、告警与运营签收未齐 | 异地恢复、告警、运营签收按原顺序补证；软件KMS/异步归档及本地stop/start仍不替代剩余证据；演练不声称PITR/异步零丢失/HA自动化 |
 | P0 / A2 Codex完整托管 | 可信计量registry仍空，正向后端合同与真实compact/WS未验 | 获得精确endpoint/backend计量、输出enforcement、opaque/remote history合同后再登记可信profile；缺证保持unavailable，不能补造正向profile |
@@ -433,7 +433,7 @@ WIP仅给exact `HEAD /`新增独立预算：version/workflow每阶段最多1、�
 
 | 场景 | 入口与合同 | 暂停时证据 |
 |---|---|---|
-| A1a / `claude-two-read-thinking-disabled` | suite `platform-cli`；live必须capture真实thinking=disabled，omitted不放行 | 源码已实现；**2026-10-24负结论**：CLI 2.1.216无任何环境组合可产出显式disabled（unset→adaptive、MAX_THINKING_TOKENS=0→omitted，loopback探针实证），门槛在本CLI版本结构上不可满足——待方案层决策（gate修订为omitted/adaptive或接受unavailable），不以A1o/thinking场景替代 |
+| A1a / `claude-two-read-thinking-disabled` | suite `platform-cli`；live必须capture真实thinking=disabled，omitted不放行 | **unavailable（D1 裁定 §12.1）**：CLI 2.1.216结构不产出显式disabled（负结论实证§29.66）——gate合同原样保留，未来CLI支持时自然可过；M1以明示限制收口，不以A1o/thinking场景替代 |
 | A1o / `claude-two-read-thinking-omitted-observation` | suite `platform-cli-observation`；独立LIVE/CAPTURE opt-in，实际thinking omitted且max_tokens≤512、stream、唯一Read、公开model匹配后才P01/probe | **2026-10-24恢复后通过**（run07脏树/run08干净候选`e988644`）：capture+live全链路，3笔generation逐笔结算、hold 0、账务合同满足；GW x-api-key认证、Kimi thinking usage分解、CLI thinking省略回放三根因已修复（详见进度文档29.61） |
 | A1t / `claude-two-read-thinking-enabled-observation` | suite `platform-cli-thinking`；独立LIVE/CAPTURE opt-in，thinking必须为实测adaptive形状（可选有界max_thinking_tokens≤1024）、max_tokens≤1536、stream、唯一Read、公开model匹配 | **2026-10-24通过**：run03（脏树）/run04（干净候选`580d408`+CI #40099149399 68/68）——真实Kimi三轮generation逐笔结算14551、wallet 2985449、hold 0、ledger 4/8；实测事实：CLI正预算即adaptive、thinking回放同样省略（与A1o一致）；thinkingModeProven=true其余边界false（详见进度文档29.66） |
 
