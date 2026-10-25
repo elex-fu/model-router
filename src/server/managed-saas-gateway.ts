@@ -6,6 +6,7 @@ import { SaasCatalogService } from '../saas/catalog/service.js';
 import type { SaasDatabase } from '../saas/db/index.js';
 import { BEDROCK_ENDPOINT } from '../saas/gateway/bedrock/catalog-identity.js';
 import { CachedRequestPreparationAuthority } from '../saas/gateway/cached-request-preparation-authority.js';
+import { CachedRequestPreparationEntitlement } from '../saas/gateway/cached-request-preparation-entitlement.js';
 import { CLAUDE_ENDPOINT, CLAUDE_MESSAGES_ENDPOINT } from '../saas/gateway/claude/catalog-identity.js';
 import {
   MINIMAX_ENDPOINT,
@@ -1612,6 +1613,35 @@ function preparationAuthorityCacheDisabled(): boolean {
 }
 
 /**
+ * §12.2 Phase A2a (D2): the version-keyed preparation entitlement cache is
+ * ON by default, mirroring the authority cache above (the admission guard
+ * still re-reads and revalidates the entitlement/project-policy versions
+ * inside the admission transaction, so a bounded cache cannot fail open).
+ * The MODEL_ROUTER_PREPARATION_ENTITLEMENT_CACHE kill switch ('0' / 'false')
+ * is an emergency escape hatch, not an opt-in.
+ */
+function preparationEntitlementCacheDisabled(): boolean {
+  const setting = process.env.MODEL_ROUTER_PREPARATION_ENTITLEMENT_CACHE;
+  return setting === '0' || setting === 'false';
+}
+
+/**
+ * §12.2 Phase A2a (D2): the version-keyed scheduler static-read cache (the
+ * eligibility authority's route + eligibility joins) is ON by default. The
+ * admission guard remains the fail-closed defense line — it re-reads every
+ * route/account/credential/pool/rights/capability epoch inside the
+ * admission transaction — so a bounded, version-keyed, allow-only cache
+ * cannot fail open. Dynamic scheduler state (concurrency leases, selection
+ * audit writes, model cooldowns, runtime health) is never part of this
+ * cache. The MODEL_ROUTER_SCHEDULER_STATIC_CACHE kill switch ('0' / 'false')
+ * is an emergency escape hatch, not an opt-in.
+ */
+function schedulerStaticCacheDisabled(): boolean {
+  const setting = process.env.MODEL_ROUTER_SCHEDULER_STATIC_CACHE;
+  return setting === '0' || setting === 'false';
+}
+
+/**
  * R5b-2 OpenCode Go adaptive protocol routing, authority layer: the resolved
  * protocol is written into `authority.route.providerProtocol` — the field the
  * preparation service's route facts, `validatePayload` and the signed
@@ -2109,6 +2139,17 @@ export function createManagedSaasGatewayProductionComposition(
     ...(options.schedulerRedisConcurrencySlots
       ? { redisConcurrencySlots: options.schedulerRedisConcurrencySlots }
       : {}),
+    // §12.2 Phase A2a (D2): version-keyed, allow-only cache around the
+    // scheduler's STATIC eligibility reads (route join + eligibility join).
+    // The key is the complete caller/entitlement/candidate identity +
+    // version tuple; the admission guard still re-reads and revalidates
+    // every authority epoch inside the admission transaction (fail-closed),
+    // so the cache can never bypass the final defense line. Dynamic state
+    // (concurrency, audit writes, cooldowns, runtime health) stays on its
+    // own per-call ports. Only the production wiring passes the option, so
+    // direct scheduler constructions in tests stay byte-identical. Disable
+    // with MODEL_ROUTER_SCHEDULER_STATIC_CACHE=0.
+    ...(schedulerStaticCacheDisabled() ? {} : { staticEligibilityCache: {} }),
   });
 
   const routes = new SaasRouteConfigService(database);
@@ -2557,7 +2598,22 @@ export function createManagedSaasGatewayProductionComposition(
     ...(options.preparationFailureObserver ? { preparationFailureObserver: options.preparationFailureObserver } : {}),
     preparation: {
       caller: options.caller,
-      entitlement: new PostgresRequestPreparationEntitlementAdapter(options.entitlement, byokEntitlements),
+      // §12.2 Phase A2a (D2): version-keyed, allow-only cache around the
+      // pre-dispatch entitlement resolution (the outermost DB-facing layer,
+      // including the BYOK plan overlay). The key is the caller's complete
+      // identity/entitlement version tuple plus publicModel/protocol; the
+      // admission guard still re-reads the entitlement/profile/project-policy
+      // rows inside the admission transaction and revalidates the frozen
+      // versions (fail-closed), so the cache can never bypass the final
+      // defense line. Only the preparation/model-list paths flow here —
+      // executor-carrying (in-transaction) resolves bypass the cache
+      // entirely inside the decorator. Disable with
+      // MODEL_ROUTER_PREPARATION_ENTITLEMENT_CACHE=0.
+      entitlement: preparationEntitlementCacheDisabled()
+        ? new PostgresRequestPreparationEntitlementAdapter(options.entitlement, byokEntitlements)
+        : new CachedRequestPreparationEntitlement(
+            new PostgresRequestPreparationEntitlementAdapter(options.entitlement, byokEntitlements),
+          ),
       authority,
       scheduler,
       payload,

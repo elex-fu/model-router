@@ -2,6 +2,10 @@ import { randomUUID } from 'node:crypto';
 import type { SaasDatabase } from '../db/index.js';
 import { createPreparedSqlStatement, queryPreparedOrAnonymous } from '../db/prepared-statements.js';
 import type { RedisConcurrencySlots } from '../runtime/redis-concurrency-slots.js';
+import {
+  type CachedProviderAccountEligibilityOptions,
+  wrapProviderAccountEligibilityCache,
+} from './cached-provider-account-eligibility.js';
 import { CLAUDE_PRODUCT_ID, CLAUDE_PROVIDER_ID } from './claude/catalog-identity.js';
 import { validateClaudeCodeClient } from './claude/claude-code-validator.js';
 import type { GatewayProtocol } from './contracts.js';
@@ -290,6 +294,21 @@ export interface PostgresProviderAccountSchedulerOptions extends ProviderAccount
    * Absent keeps the selection byte-identical.
    */
   readonly windowCost?: ProviderAccountSchedulerWindowCostPort;
+  /**
+   * §12.2 Phase A2a (D2): version-keyed, allow-only cache around this
+   * scheduler's STATIC eligibility reads (the route join + the ~15-table
+   * eligibility join inside PostgresEligibilityAuthority). ABSENT — the
+   * default for every non-production construction — keeps the eligibility
+   * authority byte-identical (no cache object, no key computation). The
+   * production wiring (managed-saas-gateway.ts) passes it behind the
+   * MODEL_ROUTER_SCHEDULER_STATIC_CACHE kill switch; see
+   * cached-provider-account-eligibility.ts for the safety argument (the
+   * admission guard remains the fail-closed defense line). Dynamic state —
+   * concurrency leases, selection-audit writes, model-cooldown reads,
+   * runtime health — is NOT part of this cache; those stay on their own
+   * per-call ports.
+   */
+  readonly staticEligibilityCache?: CachedProviderAccountEligibilityOptions;
 }
 
 interface PersistedRoute extends ProviderAccountSchedulerRevalidatedRoute {
@@ -2133,11 +2152,17 @@ export class PostgresProviderAccountScheduler implements ProviderAccountSchedule
       this.redisSlotMaxSlots = maxSlots;
       this.redisSlotWindowMs = windowMs;
     }
-    const eligibility = new PostgresEligibilityAuthority(options.database, {
-      // Only the cost-priority strategy needs an extra authority read; the
-      // default (strategy-free) path never issues the supplier-cost query.
-      supplierCostRates: options.strategies?.costPriority?.enabled === true,
-    });
+    // §12.2 Phase A2a (D2): the version-keyed static-read cache wraps the
+    // eligibility authority ONLY when the composition asks for it; absent
+    // options keep the authority byte-identical (see the option comment).
+    const eligibility = wrapProviderAccountEligibilityCache(
+      new PostgresEligibilityAuthority(options.database, {
+        // Only the cost-priority strategy needs an extra authority read; the
+        // default (strategy-free) path never issues the supplier-cost query.
+        supplierCostRates: options.strategies?.costPriority?.enabled === true,
+      }),
+      options.staticEligibilityCache,
+    );
     this.scheduler = new ProviderAccountScheduler(
       {
         eligibility,
