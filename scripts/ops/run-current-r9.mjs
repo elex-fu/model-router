@@ -82,6 +82,7 @@ const dataDir = join(runtimeDir, 'pgdata');
 const children = [];
 const activeRuns = new Set();
 let database;
+let censusDatabaseUrl;
 let requestSamplesTenantId;
 let requestSamplesFile;
 let pgStarted = false;
@@ -525,6 +526,41 @@ async function closeOwned() {
   }));
   manifest.cleanup.processesStopped = children.every(({ child }) => child.exitCode !== null || child.signalCode !== null);
   if (database) await database.close();
+  if (pgStarted && process.env.R9_PG_STAT_STATEMENTS === '1' && !interrupted) {
+    // Dump the statement census before teardown; the migrator role can read
+    // the shared view. Written as evidence for paired cache diagnostics.
+    try {
+      const { createSaasDatabase } = await import(pathToFileURL(join(root, 'dist/saas/db/index.js')).href);
+      const census = createSaasDatabase({ connectionString: censusDatabaseUrl(), max: 1 });
+      try {
+        const total = (await census.query('SELECT COALESCE(sum(calls),0)::bigint AS calls, COALESCE(sum(total_exec_time),0)::double precision AS exec_ms FROM public.pg_stat_statements')).rows[0];
+        const top = (await census.query('SELECT queryid, calls, round(total_exec_time::numeric,1) AS exec_ms, left(query, 120) AS query FROM public.pg_stat_statements ORDER BY calls DESC LIMIT 20')).rows;
+        // Normalize by the actual gateway upstream request count: the bench
+        // warmup is a fixed time window, so a faster (cache-on) run admits
+        // more warmup requests and raw totals confound paired comparisons.
+        let requests = null;
+        try {
+          const mockStats = JSON.parse(await readFile(join(outputDir, 'final-mock-stats.json'), 'utf8'));
+          const values = Object.values(mockStats.accounts ?? {}).map((row) => Number(row.requests ?? 0));
+          const mockTotal = values.reduce((sum, value) => sum + value, 0) || null;
+          // The mock also serves the benchmark's direct leg (no gateway), so
+          // the per-request denominator subtracts it using the report's
+          // configured request count.
+          let direct = 0;
+          try {
+            const report = JSON.parse(await readFile(join(outputDir, 'serial-profile-current-3cli.json'), 'utf8'));
+            direct = Number(report?.config?.requests ?? 0);
+          } catch { /* report missing: fall back to the raw mock total */ }
+          requests = mockTotal !== null ? Math.max(1, mockTotal - direct) : null;
+        } catch { /* normalization is best-effort evidence enrichment */ }
+        const census = { schema: 1, total, requests, callsPerRequest: requests ? Number((Number(total.calls) / requests).toFixed(1)) : null, top };
+        await writeFile(join(outputDir, 'pg-stat-statements.json'), JSON.stringify(census, null, 2) + '\n', { mode: 0o600 });
+        manifest.pgStatementCensus = { calls: total.calls, execMs: total.exec_ms, requests, callsPerRequest: census.callsPerRequest };
+      } finally { await census.close().catch(() => {}); }
+    } catch (error) {
+      manifest.pgStatementCensus = { error: String(error?.message ?? error) };
+    }
+  }
   if (pgStarted) {
     const log = await open(join(outputDir, 'stop-postgres.log'), 'w', 0o600);
     try {
@@ -754,17 +790,28 @@ try {
   const controlPort = await freePort();
   const gatewayPorts = [await freePort(), await freePort(), await freePort()];
   const databaseName = `model_router_test_r9_${randomUUID().replaceAll('-', '')}`;
+  censusDatabaseUrl = () => `postgresql://model_router_saas_migrator@127.0.0.1:${pgPort}/${databaseName}?sslmode=disable`;
   const roleUrl = (role) => `postgresql://${role}@127.0.0.1:${pgPort}/${databaseName}?sslmode=disable`;
   manifest.ports = { postgres: pgPort, redis: redisPort, mock: mockPort, mockControl: controlPort, gateways: gatewayPorts };
   manifest.database = databaseName;
   await requireRun('initdb', join(pgBin, 'initdb'), ['-D', dataDir, '--username=postgres', '--auth-local=trust', '--auth-host=trust', '--encoding=UTF8', '--no-locale']);
-  await requireRun('start-postgres', join(pgBin, 'pg_ctl'), ['-D', dataDir, '-l', join(outputDir, 'postgres.log'), '-w', '-o', `-h 127.0.0.1 -p ${pgPort} -c unix_socket_directories=`, 'start']);
+  await requireRun('start-postgres', join(pgBin, 'pg_ctl'), ['-D', dataDir, '-l', join(outputDir, 'postgres.log'), '-w',
+    '-o', `-h 127.0.0.1 -p ${pgPort} -c unix_socket_directories=${process.env.R9_PG_STAT_STATEMENTS === '1' ? ' -c shared_preload_libraries=pg_stat_statements -c pg_stat_statements.track=all' : ''}`, 'start']);
   pgStarted = true;
   const psql = (name) => ['-X','-v','ON_ERROR_STOP=1','-h','127.0.0.1','-p',String(pgPort),'-U','postgres','-d',name];
   await requireRun('create-database', join(pgBin, 'psql'), [...psql('postgres'), '-c', `CREATE DATABASE ${databaseName}`]);
+
   await requireRun('roles-before', join(pgBin, 'psql'), [...psql(databaseName), '-f', join(root, 'deploy/managed-saas-postgres-roles.sql')]);
   await requireRun('migrate-current-dist', process.execPath, [join(root, 'dist/cli/index.js'), 'saas:migrate'], { ...baseEnvironment, MODEL_ROUTER_SAAS_DATABASE_URL: roleUrl('model_router_saas_migrator') });
   await requireRun('roles-after', join(pgBin, 'psql'), [...psql(databaseName), '-f', join(root, 'deploy/managed-saas-postgres-roles.sql')]);
+  if (process.env.R9_PG_STAT_STATEMENTS === '1') {
+    // pg_stat_statements counts every protocol shape (including the
+    // parameterized extended protocol log_statement misses), giving a
+    // load-immune per-run statement census for paired cache diagnostics.
+    // Created only after every roles security self-audit has passed: the
+    // extension objects must not trip the runtime-privilege validation.
+    await requireRun('enable-pg-stat-statements', join(pgBin, 'psql'), [...psql(databaseName), '-c', 'CREATE EXTENSION IF NOT EXISTS pg_stat_statements']);
+  }
   const redisArguments = ['--bind','127.0.0.1','--port',String(redisPort),'--dir',runtimeDir,'--save','','--appendonly','no','--daemonize','no',
     ...(options.recoveryProfile ? ['--dbfilename','dump.rdb'] : [])];
   const redis = await launch('redis', options.redisBin, redisArguments, baseEnvironment);
