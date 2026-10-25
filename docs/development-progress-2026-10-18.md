@@ -1447,3 +1447,13 @@ run01（通用拒绝）/run02（JSON_INVALID）/run03（METHOD_NOT_POST首错）
 **run01通过（exit=0，全阶段）**：basebackup→standby启动→同步注册（sync_state='sync'、state='streaming'，`synchronous_standby_names='*'`）→经GW的确认金融commit（requestId 4b6acfb3 settled+1 usage+1 settlement）→failover前standby重放deep-equal→主库immediate崩溃→promote→**promoted standby独立恢复验证**：最后确认金融commit完整（preservedFinancialFacts deep-equal、settlement/usage各恰好1条、fsync/synchronous_commit保持on）→清理完整（processesStopped/postgresStopped/runtimeRemoved全true）。证据边界：仅确认commit的failover恢复——不声称PITR、异步副本零丢失、HA自动化或生产KMS（pitrVerified/asyncReplicaLossTested=false、automationFree=true、productionGo保持false）。证据：`/private/tmp/model-router-c2-standby-drill-run01-20261024/`（含standby-recovery.json、两份PG日志、progress）。C2的"独立同步持久恢复演练"本地可执行部分由此闭合；异地PITR、告警、运营签收仍开放。
 
 **C0缓存量化（trace run03）**：observationOk=true 200/200完整，但对比无效——run03在主机负载p50 12.52下运行（run01基线为8.45、10核机；run03时fseventsd/Chrome/多进程外部负载），query p50 225ms vs 173ms的差值被负载噪声主导。缓存单元级效果已由68/68适配器测试证明（版本不变→第二次resolve零SQL）；墙钟量化需可比负载窗口，如实记录不强行解读。cap A/B与完整R9维持"受控serial有效"前置不变。
+
+### 29.69 D1–D4 裁定落地：M1 收口（明示限制）与 C0 分阶段设计
+
+用户批准推荐组合（sub2api 对照分析+本方证据链），方案§12新增完整落地设计：
+
+- **D1 执行完毕**：A1a gate 合同原样保留、声明 CLI 级 unavailable（CLI 2.1.216 结构不产出显式 disabled，§29.66 负结论实证）；M1 按其定义的"明示限制"条款收口——A0（9d 3/3）+ A1 指定范围五维（A1o 两轮工具/thinking adaptive/取消/真实usage/重连一致性）四场景候选 CI 全绿（e988644/580d408/b1ae489 各 68/68）+ 三项明示限制（A1a unavailable、backend revision unknown、重连证据形态）。里程碑 §1/§9/§10/§11.2 同步更新。未来 CLI 支持显式 disabled 时 A1a gate 自然可过，不降门槛。
+- **D2 设计定稿**：分阶段宽快照——T1 量化（安静负载窗口 trace 对照，无源码）→ A2a entitlement+调度器静态读纳入版本键缓存（guard fresh 重读与全部金融写保留直查；预期再省 ~20-30 条/请求）→ A2b 失效广播（复用 admission outbox 模式，可选非阻塞）→ A3 条件触发（TTFB 仍不达标时按 marker 分类查询并基于证据提口径决策）。不变量：pre-hold 不弃、guard 唯一强一致防线、门槛不无证据修改。
+- **D3/D4 记录性裁定**：prepared statements 维持 off 不入门槛口径（sub2api 未启 PrepareStmt 仍达标的实证支持"优化查询数"方向；压测开 native 生产 off 视为绕门槛）；authority 缓存 5s fail-closed 语义接受（CachedKeyAuthenticator 5s 同构先例 30/30 验收），亚秒失效增强并入 A2b。
+
+M2 剩余：B0/B1（外部 Alipay）、C0（D2 分阶段执行）、C1 余项（部分依赖 B 线）、C2 剩余（异地/告警/签收外部）、发布签收。
