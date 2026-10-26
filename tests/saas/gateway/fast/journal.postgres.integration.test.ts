@@ -2157,7 +2157,12 @@ test('fast money journal real PostgreSQL: atomic reserve, durable completion, ex
     { timeout: 15000 },
     async (t) => {
       for (const kind of ['empty', 'other_wallet', 'other_owner', 'failed'] as const) {
-        await t.test(kind, async () => {
+        await t.test(kind, async (t) => {
+          const realMonotonicNow = performance.now.bind(performance);
+          let recoveryStarted = 0,
+            refillDelayMs = 0;
+          const phases: Array<{ phase: string; elapsedMs: number }> = [];
+          const mark = (phase: string) => phases.push({ phase, elapsedMs: realMonotonicNow() - recoveryStarted });
           function latch() {
             let release!: () => void;
             const promise = new Promise<void>((resolve) => {
@@ -2178,8 +2183,14 @@ test('fast money journal real PostgreSQL: atomic reserve, durable completion, ex
             ...gateway,
             query: async <Row>(sql: string, values?: readonly unknown[]): Promise<SqlResult<Row>> => {
               const result = await gateway.query<Row>(sql, values);
-              if (watching && sql.includes('fast-journal:reserve-intent')) statements++;
-              if (watching && sql.startsWith('SELECT i.request_id, i.intent_digest')) replay.release();
+              if (watching && sql.includes('fast-journal:reserve-intent')) {
+                statements++;
+                mark(`reserve_ack_${statements}`);
+              }
+              if (watching && sql.startsWith('SELECT i.request_id, i.intent_digest')) {
+                mark('replay_ack');
+                replay.release();
+              }
               return result;
             },
             transaction: async (work) => {
@@ -2206,7 +2217,10 @@ test('fast money journal real PostgreSQL: atomic reserve, durable completion, ex
                   }),
                 );
               } finally {
-                if (worker && pausing) workerFinished = true;
+                if (worker && pausing) {
+                  workerFinished = true;
+                  if (watching) mark('worker_finished');
+                }
               }
             },
           };
@@ -2253,12 +2267,31 @@ test('fast money journal real PostgreSQL: atomic reserve, durable completion, ex
                 'unrelated work must not block this wallet; only matched failed work is awaited',
               );
               refills++;
+              mark('refill_started');
+              if (kind === 'failed') {
+                // Deliberately exceed the real recovery budget. This proves
+                // failure/fallback ordering, not a slow-machine latency SLO.
+                const delayedAt = realMonotonicNow();
+                return new Promise<void>((resolve) => setTimeout(resolve, 150)).then(async () => {
+                  refillDelayMs = realMonotonicNow() - delayedAt;
+                  mark('refill_delay_finished');
+                  await replenish(...args);
+                  mark('refill_committed');
+                });
+              }
             }
             return replenish(...args);
           };
           pausing = true;
           scope.journal.start();
           await workerStarted.promise;
+          recoveryStarted = realMonotonicNow();
+          if (kind === 'failed') {
+            // Only this worker-failure/fallback ordering proof has a logical
+            // recovery clock. Its real PG rollback/refill may exceed 100ms;
+            // the other cases and independent budget/cancel tests stay real.
+            t.mock.method(performance, 'now', () => recoveryStarted);
+          }
           watching = true;
           const pending = scope.journal.reserveIntent(intentFixture(scope.tenantId, scope.owner));
           try {
@@ -2266,13 +2299,20 @@ test('fast money journal real PostgreSQL: atomic reserve, durable completion, ex
               await replay.promise;
               await new Promise<void>((resolve) => setImmediate(resolve));
               assert.equal(refills, 0, 'the matched worker is awaited before its failure');
+              mark('worker_released');
               resumeWorker.release();
             }
+            const result = await pending;
+            mark('admission_finished');
             assert.equal(
-              (await pending).kind,
+              result.kind,
               'created',
-              'an irrelevant/failed poll must not consume fragmentation recovery',
+              `an irrelevant/failed poll must not consume fragmentation recovery: ${JSON.stringify({ result, statements, refills, workerFinished, phases })}`,
             );
+            if (kind === 'failed') {
+              assert.ok(refillDelayMs > 100, 'the ordering proof includes a deliberately slow refill');
+              assert.equal(performance.now(), recoveryStarted, 'the failed-worker ordering clock is frozen locally');
+            }
             assert.equal(statements, 2, 'fallback is in the same recovery stage, not another speculative CAS');
             assert.equal(refills, 1);
             const current = await facts(scope.tenantId);
@@ -2293,6 +2333,7 @@ test('fast money journal real PostgreSQL: atomic reserve, durable completion, ex
             await pending.catch(() => undefined);
             await scope.journal.close();
             await other?.journal.close();
+            if (kind === 'failed') t.diagnostic(JSON.stringify({ kind, refillDelayMs, phases }));
           }
           assert.equal((await facts(scope.tenantId)).backing, kind === 'failed' ? '1920' : '2000');
         });
