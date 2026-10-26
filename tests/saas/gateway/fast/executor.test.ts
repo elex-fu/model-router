@@ -388,3 +388,47 @@ test('one cancelled snapshot waiter cannot cancel a surviving executor or shared
   assert.equal(surviving.calls.filter((x) => x === 'admit').length, 1);
   assert.equal(surviving.intents.length, 1);
 });
+
+test('unknown costly client and compiler-injected extensions fall back before Redis or money', async () => {
+  for (const extension of [
+    { best_of: 10 },
+    { extra_body: { max_candidates: 20 } },
+    { web_search_options: {} },
+    { reasoning_effort: 'high' },
+    { response_format: { type: 'vendor-search' } },
+  ]) {
+    const s = setup();
+    assert.equal(await s.executor.execute({ ...s.input, body: { ...s.input.body, ...extension } }), false);
+    assert.equal(s.intents.length, 0);
+    assert.equal(s.calls.includes('admit'), false);
+  }
+  const s = setup();
+  const executor = new FastGatewayExecutor({
+    ...s.options,
+    payload: (candidate) => ({
+      compile: async (input) => {
+        const result = await s.options.payload(candidate).compile(input);
+        if (result.decision !== 'allow') return result;
+        return {
+          ...result,
+          value: {
+            ...result.value,
+            payloadBytes: Buffer.from(
+              JSON.stringify({ ...(input.clientRequest as Record<string, unknown>), best_of: 99 }),
+            ),
+          },
+        };
+      },
+    }),
+  });
+  assert.equal(await executor.execute(s.input), false);
+  assert.equal(s.intents.length, 0);
+  assert.equal(s.calls.includes('admit'), false);
+});
+
+test('a compiled output ceiling cannot exceed the estimator maximum reservation', async () => {
+  const s = setup();
+  assert.equal(await s.executor.execute({ ...s.input, body: { ...s.input.body, max_tokens: 10000 } }), false);
+  assert.equal(s.intents.length, 0);
+  assert.equal(s.calls.includes('admit'), false);
+});

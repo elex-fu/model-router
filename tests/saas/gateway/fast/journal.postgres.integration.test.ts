@@ -33,7 +33,15 @@ test('fast money journal real PostgreSQL: atomic reserve, durable completion, ex
   });
   await gateway.verifySchema();
   const billing = new PlatformWalletLedgerService();
-  async function setup(balance = '100', tranche = balance, owner = randomUUID(), db = gateway, stripes = 1) {
+  async function setup(
+    balance = '100',
+    tranche = balance,
+    owner = randomUUID(),
+    db = gateway,
+    stripes = 1,
+    prewarm = true,
+    automatic = false,
+  ) {
     const tenantId = randomUUID();
     await migrator.query("INSERT INTO saas_tenants(id,name,slug) VALUES ($1,'fast-journal-test',$2)", [
       tenantId,
@@ -50,10 +58,10 @@ test('fast money journal real PostgreSQL: atomic reserve, durable completion, ex
     );
     const journal = new PostgresFastGatewayJournal(db, {
       allocationOwner: owner,
-      allocationTrancheMinorUnits: tranche,
+      ...(automatic ? {} : { allocationTrancheMinorUnits: tranche }),
       allocationStripes: stripes,
     });
-    await journal.replenish(tenantId, 'USD');
+    if (prewarm) await journal.replenish(tenantId, 'USD');
     return { tenantId, owner, journal };
   }
   async function facts(tenantId: string) {
@@ -630,12 +638,6 @@ test('fast money journal real PostgreSQL: atomic reserve, durable completion, ex
       }
       const small = await setup('100', '100', randomUUID(), gateway, 8);
       const input = intentFixture(small.tenantId, small.owner);
-      assert.equal(
-        (await small.journal.reserveIntent(input)).kind,
-        'denied',
-        'unknown-M prewarm is only a safe cold denial',
-      );
-      await small.journal.replenish(small.tenantId, 'USD', input.maxCostMinorUnits);
       const intent = await reserve(small.journal, input);
       assert.equal((await facts(small.tenantId)).backing, '100');
       assert.equal((await facts(small.tenantId)).available, '20');
@@ -697,6 +699,177 @@ test('fast money journal real PostgreSQL: atomic reserve, durable completion, ex
         await Promise.all([a.journal.close(), b.close()]);
         assert.equal((await facts(a.tenantId)).backing, '0');
       }
+    },
+  );
+  await t.test(
+    'cold funded c32 shares one preparation transaction, warm admission stays one SQL, and cold expiry writes no intent',
+    async () => {
+      let transactions = 0,
+        intentStatements = 0;
+      const measured: SaasDatabase = {
+        ...gateway,
+        query: <Row>(sql: string, values?: readonly unknown[]): Promise<SqlResult<Row>> => {
+          if (sql.includes('fast-journal:reserve-intent')) intentStatements++;
+          return gateway.query<Row>(sql, values);
+        },
+        transaction: (work) => {
+          transactions++;
+          return gateway.transaction(work);
+        },
+      };
+      const scope = await setup('1000000', '1000000', randomUUID(), measured, 8, false);
+      const results = await Promise.all(
+        Array.from({ length: 32 }, (_, i) =>
+          scope.journal.reserveIntent(
+            intentFixture(scope.tenantId, scope.owner, priceFixture(['10000', '20480', '30720'][i % 3])),
+          ),
+        ),
+      );
+      assert.equal(results.filter((result) => result.kind === 'created').length, 32);
+      assert.equal(transactions, 1, 'funded first admissions singleflight the cold preparation');
+      assert.equal(intentStatements, 32);
+      const warm = await scope.journal.reserveIntent(intentFixture(scope.tenantId, scope.owner, priceFixture('20480')));
+      assert.equal(warm.kind, 'created');
+      assert.equal(transactions, 1, 'warm credit hints never add a SQL readiness check');
+      assert.equal(intentStatements, 33);
+      await Promise.all(
+        [...results, warm].map((result) =>
+          result.kind === 'created' ? scope.journal.appendReceipt(receiptFixture(result.intent)) : Promise.resolve(),
+        ),
+      );
+      await scope.journal.close();
+      const delayed: SaasDatabase = {
+        ...gateway,
+        transaction: async (work) => {
+          await new Promise((resolve) => setTimeout(resolve, 80));
+          return gateway.transaction(work);
+        },
+      };
+      const expired = await setup('100', '100', randomUUID(), delayed, 8, false);
+      const result = await expired.journal.reserveIntent({
+        ...intentFixture(expired.tenantId, expired.owner),
+        sendDeadlineMs: Date.now() + 30,
+      });
+      assert.deepEqual(result, { kind: 'denied', reason: 'send_deadline' });
+      assert.equal((await facts(expired.tenantId)).intents, '0');
+      await expired.journal.close();
+      assert.equal((await facts(expired.tenantId)).backing, '0');
+    },
+  );
+  await t.test(
+    'unset cap auto-funds two trusted concurrency waves at builtin M without overriding explicit caps or legacy backing',
+    async () => {
+      const maximum = '524480';
+      for (const concurrency of [32, 64]) {
+        const target = BigInt(maximum) * BigInt(concurrency) * 2n;
+        const auto = await setup('1000000000', 'unused', randomUUID(), gateway, 8, false, true);
+        const request = () => ({
+          ...intentFixture(auto.tenantId, auto.owner, priceFixture(maximum)),
+          allocationTargetConcurrency: concurrency,
+        });
+        assert.deepEqual(
+          await auto.journal.reserveIntent({
+            ...intentFixture(auto.tenantId, auto.owner, priceFixture('80', '0', '0')),
+            allocationTargetConcurrency: concurrency,
+          }),
+          { kind: 'denied', reason: 'strict_zero_maximum_required' },
+        );
+        assert.equal(
+          (await facts(auto.tenantId)).intents,
+          '0',
+          'free platform must strict-fallback before fast admission',
+        );
+        await assert.rejects(
+          auto.journal.reserveIntent(intentFixture(auto.tenantId, auto.owner, priceFixture(maximum))),
+          /TRUSTED_CONCURRENCY_REQUIRED/,
+        );
+        for (const invalid of [0, 1.5, 1025, Infinity])
+          await assert.rejects(
+            auto.journal.reserveIntent({ ...request(), allocationTargetConcurrency: invalid }),
+            /TRUSTED_CONCURRENCY_REQUIRED/,
+          );
+        const first = await Promise.all(
+          Array.from({ length: concurrency }, () => auto.journal.reserveIntent(request())),
+        );
+        assert.equal(first.filter((result) => result.kind === 'created').length, concurrency);
+        assert.equal((await facts(auto.tenantId)).backing, target.toString());
+        const second = await Promise.all(
+          Array.from({ length: concurrency }, () => auto.journal.reserveIntent(request())),
+        );
+        assert.equal(
+          second.filter((result) => result.kind === 'created').length,
+          concurrency,
+          '2x policy includes one wave of receipt lag',
+        );
+        assert.equal((await facts(auto.tenantId)).available, '0');
+        assert.equal(
+          (await auto.journal.reserveIntent(request())).kind,
+          'denied',
+          'auto is a defined backed budget, not unbounded credit',
+        );
+        await Promise.all(
+          [...first, ...second].map((result) =>
+            result.kind === 'created' ? auto.journal.appendReceipt(receiptFixture(result.intent)) : Promise.resolve(),
+          ),
+        );
+        await auto.journal.drain();
+        assert.equal((await facts(auto.tenantId)).balance, (1000000000n - BigInt(concurrency) * 40n).toString());
+        await auto.journal.close();
+        assert.equal(
+          (await facts(auto.tenantId)).backing,
+          '0',
+          'explicit shutdown retires unused escrow operationally',
+        );
+      }
+      const concurrency = 32;
+
+      const fixed = await setup('1000000000', '1000000', randomUUID(), gateway, 8, false);
+      const fixedRequest = () => ({
+        ...intentFixture(fixed.tenantId, fixed.owner, priceFixture(maximum)),
+        allocationTargetConcurrency: concurrency,
+      });
+      const fixedFirst = await fixed.journal.reserveIntent(fixedRequest());
+      assert.equal(fixedFirst.kind, 'created');
+      assert.equal((await fixed.journal.reserveIntent(fixedRequest())).kind, 'denied');
+      assert.equal((await facts(fixed.tenantId)).backing, '1000000', 'explicit cap is never multiplied');
+      if (fixedFirst.kind === 'created') await fixed.journal.appendReceipt(receiptFixture(fixedFirst.intent));
+      await fixed.journal.close();
+
+      const limited = await setup('1000', 'unused', randomUUID(), gateway, 8, false, true);
+      await gateway.transaction((tx) =>
+        billing.reserve(tx, {
+          supplyMode: 'platform',
+          tenantId: limited.tenantId,
+          requestId: randomUUID(),
+          currency: 'USD',
+          amountMinorUnits: '400',
+          priceSnapshotRef: 'fixture',
+          expiresAt: new Date(Date.now() + 60000).toISOString(),
+          businessKey: randomUUID(),
+        }),
+      );
+      const bounded = await limited.journal.reserveIntent({
+        ...intentFixture(limited.tenantId, limited.owner),
+        allocationTargetConcurrency: 32,
+      });
+      assert.equal(bounded.kind, 'created');
+      assert.equal(
+        (await facts(limited.tenantId)).backing,
+        '600',
+        'real wallet free funds, not desired target, bound allocation',
+      );
+      const anotherOwner = randomUUID();
+      const another = new PostgresFastGatewayJournal(gateway, { allocationOwner: anotherOwner });
+      const anotherInput = { ...intentFixture(limited.tenantId, anotherOwner), allocationTargetConcurrency: 32 };
+      assert.equal(
+        (await another.reserveIntent(anotherInput)).kind,
+        'denied',
+        'another owner cannot double allocate backing',
+      );
+      assert.equal((await facts(limited.tenantId)).backing, '600');
+      await another.close();
+      if (bounded.kind === 'created') await limited.journal.appendReceipt(receiptFixture(bounded.intent));
+      await limited.journal.close();
     },
   );
   await t.test(

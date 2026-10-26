@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { normalizeCurrency, parseMinorUnits } from '../../billing/money.js';
+import { MAX_MINOR_UNITS, normalizeCurrency, parseMinorUnits } from '../../billing/money.js';
 import { saasAdvisoryKey, WALLET_FENCE_SQL } from '../../db/advisory-lock-keys.js';
 import type { SaasDatabase, SqlExecutor } from '../../db/types.js';
 import { calculatePriceVersion } from '../../pricing/calculator.js';
@@ -21,6 +21,8 @@ export interface FastReserveIntentInput {
   readonly priceSnapshot: unknown;
   readonly authoritySnapshot: unknown;
   readonly allocationOwner: string;
+  /** Trusted minimum of snapshot and local concurrency caps, never a client field. */
+  readonly allocationTargetConcurrency?: number;
   readonly sendDeadlineMs: number;
 }
 export interface FastIntent {
@@ -72,8 +74,8 @@ export interface FastGatewayJournal {
 }
 export interface FastJournalOptions {
   readonly allocationOwner: string;
-  /** An explicit maximum escrow tranche, not an overdraft or a request estimate. */
-  readonly allocationTrancheMinorUnits: string;
+  /** Present: fixed hard escrow cap. Absent: auto 2*M*trusted concurrency, wallet-backed. */
+  readonly allocationTrancheMinorUnits?: string;
   /** Total tranche is shared by these stripes, never multiplied. Default 8. */
   readonly allocationStripes?: number;
   readonly workerPollMs?: number;
@@ -163,9 +165,18 @@ interface AllocationRow {
 
 export class PostgresFastGatewayJournal implements FastGatewayJournal {
   private readonly epoch = randomUUID();
-  private readonly tranche: bigint;
+  private readonly tranche: bigint | null;
   private readonly stripes: number;
-  private readonly observedMaximum = new Map<string, { maximum: bigint; nextStripe: number }>();
+  private readonly observedMaximum = new Map<
+    string,
+    {
+      maximum: bigint;
+      target: bigint;
+      nextStripe: number;
+      preparedMaximum: bigint | null;
+      preparedTarget: bigint | null;
+    }
+  >();
   private readonly ready: Promise<void>;
   private readonly pendingReplenishments = new Map<string, Promise<void>>();
   private timer?: NodeJS.Timeout;
@@ -181,7 +192,8 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
     private readonly options: FastJournalOptions,
   ) {
     if (!options.allocationOwner.trim()) throw new Error('FAST_JOURNAL_INVALID_OWNER');
-    this.tranche = parseMinorUnits(options.allocationTrancheMinorUnits);
+    this.tranche =
+      options.allocationTrancheMinorUnits === undefined ? null : parseMinorUnits(options.allocationTrancheMinorUnits);
     this.stripes = options.allocationStripes ?? 8;
     if (!Number.isSafeInteger(this.stripes) || this.stripes < 1 || this.stripes > 8)
       throw new Error('FAST_JOURNAL_INVALID_STRIPES');
@@ -260,6 +272,7 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
     if (input.idempotencyKey !== undefined) return { kind: 'denied', reason: 'strict_idempotency_required' };
     if (input.allocationOwner !== this.options.allocationOwner) throw new Error('FAST_JOURNAL_OWNER_MISMATCH');
     const max = parseMinorUnits(input.maxCostMinorUnits, { allowZero: true });
+    let requestedTarget = this.tranche ?? 0n;
     digest(input.requestFingerprint);
     digest(input.payloadSha256);
     if (!Number.isSafeInteger(input.sendDeadlineMs) || input.sendDeadlineMs <= Date.now())
@@ -280,10 +293,56 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
           }).calculation.amountMinorUnits
       )
         throw new Error('FAST_JOURNAL_INVALID_MAXIMUM');
-      if (max > this.tranche) return { kind: 'denied', reason: 'tranche_too_small' };
-      this.observeMaximum(input.tenantId, input.currency, max);
+      // Free/rounded-zero platform pricing remains strict; BYOK's null-currency
+      // zero-cost path above is distinct and needs no allocation.
+      if (max === 0n) return { kind: 'denied', reason: 'strict_zero_maximum_required' };
+      if (this.tranche !== null) {
+        if (max > this.tranche) return { kind: 'denied', reason: 'tranche_too_small' };
+      } else {
+        const concurrency = input.allocationTargetConcurrency;
+        if (concurrency === undefined || !Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > 1024)
+          throw new Error('FAST_JOURNAL_TRUSTED_CONCURRENCY_REQUIRED');
+        // Exact policy, not an estimated overdraft. PostgreSQL wallets themselves
+        // cannot exceed signed bigint; saturating the target cannot create funds.
+        const desired = max * BigInt(concurrency) * 2n;
+        requestedTarget = desired < MAX_MINOR_UNITS ? desired : MAX_MINOR_UNITS;
+      }
+      this.observeMaximum(input.tenantId, input.currency, max, requestedTarget);
     }
     await this.ready;
+    if (input.currency !== null) {
+      // One retry is only for joining an older cold refill whose target predates
+      // this request. This loop is BEFORE the first intent SQL, never an intent retry.
+      for (let preparation = 0; preparation < 2; preparation++) {
+        const hint = this.observedMaximum.get(`${input.tenantId}:${input.currency}`);
+        if (
+          hint?.preparedMaximum !== null &&
+          hint?.preparedMaximum !== undefined &&
+          max <= hint.preparedMaximum &&
+          (this.tranche !== null || (hint.preparedTarget !== null && requestedTarget <= hint.preparedTarget))
+        )
+          break;
+        let timer: NodeJS.Timeout | undefined;
+        try {
+          const prepared = await Promise.race([
+            this.scheduleReplenishment(input.tenantId, input.currency).then(() => true),
+            new Promise<false>((resolve) => {
+              timer = setTimeout(() => resolve(false), Math.max(0, input.sendDeadlineMs - Date.now()));
+              timer.unref();
+            }),
+          ]);
+          // A timeout never cancels or frees a possibly committed credit grant.
+          // Its tracked singleflight remains available to later callers/drain.
+          if (!prepared) return { kind: 'denied', reason: 'send_deadline' };
+        } finally {
+          if (timer) clearTimeout(timer);
+        }
+      }
+    }
+    // Cold credit work can outlive the cached authority window. No intent is
+    // written after expiry, and the caller still rechecks before actual send.
+    if (this.closed) return { kind: 'denied', reason: 'closed' };
+    if (input.sendDeadlineMs <= Date.now()) return { kind: 'denied', reason: 'send_deadline' };
     const id = randomUUID();
     // Do not include the send deadline or process epoch: a replay cannot acquire
     // sending authority even if those differ. Every execution/money identity does.
@@ -426,19 +485,20 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
     }
   }
 
-  private scheduleReplenishment(tenantId: string, currency: string): void {
+  private scheduleReplenishment(tenantId: string, currency: string): Promise<void> {
     const key = `${tenantId}:${currency}`;
-    if (this.closed || this.pendingReplenishments.has(key)) return;
-    const work = this.replenish(tenantId, currency);
+    const existing = this.pendingReplenishments.get(key);
+    if (existing) return existing;
+    if (this.closed) return Promise.resolve();
+    const work = this.replenish(tenantId, currency).finally(() => this.pendingReplenishments.delete(key));
     this.pendingReplenishments.set(key, work);
-    void work
-      .catch(() => this.options.onBackgroundError?.('FAST_JOURNAL_REPLENISH_FAILED'))
-      .finally(() => this.pendingReplenishments.delete(key));
+    void work.catch(() => this.options.onBackgroundError?.('FAST_JOURNAL_REPLENISH_FAILED'));
+    return work;
   }
 
   // Bounded process-local scheduling hints, never money authority. Eviction
   // changes contention/fragmentation only; durable allocation CAS still decides.
-  private observeMaximum(tenantId: string, currency: string, maximum: bigint): void {
+  private observeMaximum(tenantId: string, currency: string, maximum: bigint, target = this.tranche ?? 0n): void {
     const key = `${tenantId}:${currency}`;
     let entry = this.observedMaximum.get(key);
     if (!entry) {
@@ -446,9 +506,12 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
         const oldest = this.observedMaximum.keys().next().value;
         if (oldest !== undefined) this.observedMaximum.delete(oldest);
       }
-      entry = { maximum, nextStripe: 0 };
+      entry = { maximum, target, nextStripe: 0, preparedMaximum: null, preparedTarget: null };
       this.observedMaximum.set(key, entry);
-    } else if (maximum > entry.maximum) entry.maximum = maximum;
+    } else {
+      if (maximum > entry.maximum) entry.maximum = maximum;
+      if (target > entry.target) entry.target = target;
+    }
   }
   private nextStripe(tenantId: string, currency: string | null): number {
     if (currency === null) return 0;
@@ -464,6 +527,8 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
     this.observeMaximum(tenantId, currency, parseMinorUnits(minimumReserveMinorUnits, { allowZero: true }));
     await this.ready;
     normalizeCurrency(currency);
+    let preparedMaximum = this.observedMaximum.get(`${tenantId}:${currency}`)?.maximum ?? 0n;
+    let preparedTarget = this.tranche ?? this.observedMaximum.get(`${tenantId}:${currency}`)?.target ?? 0n;
     await this.database.transaction(async (tx) => {
       const owner = await tx.query<{ epoch: string }>(
         'SELECT epoch FROM saas_fast_gateway_owners WHERE owner = $1 FOR SHARE',
@@ -499,17 +564,20 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
         "SELECT * FROM saas_fast_credit_allocations WHERE tenant_id=$1 AND currency=$2 AND owner=$3 AND epoch=$4 AND state='active' ORDER BY id FOR UPDATE",
         [tenantId, currency, this.options.allocationOwner, this.epoch],
       );
-      const needed = this.tranche - BigInt(wallet.own_backing);
+      preparedTarget = this.tranche ?? this.observedMaximum.get(`${tenantId}:${currency}`)?.target ?? 0n;
+      const needed = preparedTarget - BigInt(wallet.own_backing);
       const free = BigInt(wallet.available);
       const additional = needed > 0n && free > 0n ? (free < needed ? free : needed) : 0n;
       const available = allocations.rows.reduce((sum, row) => sum + BigInt(row.available_minor_units), additional);
       if (available === 0n) return;
       const maximum = this.observedMaximum.get(`${tenantId}:${currency}`)?.maximum ?? 0n;
       // Four-M headroom per stripe when affordable; near-tranche requests use
-      // one stripe. Unknown prewarm can fragment; first safe denial schedules
-      // this cost-aware rebalance without spending or retrying any intent.
+      // one stripe. A local coverage hint lets first admission await a shared
+      // cold rebalance before writing any intent; it is never money authority.
       const affordable = maximum > 0n ? available / (maximum * 4n) : BigInt(this.stripes);
       const count = Math.max(1, Math.min(this.stripes, Number(affordable > 8n ? 8n : affordable)));
+      const coverage = count === 1 ? available : available / (BigInt(count) * 4n);
+      preparedMaximum = maximum > coverage ? maximum : coverage;
       const byStripe = new Map(allocations.rows.map((row) => [row.stripe, row]));
       const rows = Array.from(
         { length: Math.max(count, ...allocations.rows.map((row) => row.stripe + 1)) },
@@ -538,6 +606,11 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
         [tenantId, wallet.id, currency, this.options.allocationOwner, this.epoch, fastJournalCanonicalJson(rows)],
       );
     });
+    const hint = this.observedMaximum.get(`${tenantId}:${currency}`);
+    if (hint) {
+      hint.preparedMaximum = preparedMaximum;
+      hint.preparedTarget = preparedTarget;
+    }
   }
 
   /** Release only demonstrably unused credit; unresolved intents survive retirement. */

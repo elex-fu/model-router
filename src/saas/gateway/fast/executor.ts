@@ -25,6 +25,7 @@ import {
   type FastGatewaySnapshotProvider,
 } from './snapshots.js';
 import { FastTerminalGate } from './terminal-gate.js';
+import { fastTextRequestUnsupported } from './text-eligibility.js';
 
 export interface FastIntentInput {
   readonly requestId: string;
@@ -114,31 +115,10 @@ function hash(value: string | Uint8Array): string {
 function canonical(value: unknown): string {
   return JSON.stringify(value, (_key, item) => (typeof item === 'bigint' ? item.toString() : item));
 }
-function safeInteger(value: unknown): value is number {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
-}
 function fallbackReason(input: FastGatewayExecuteInput): string | null {
   if (input.idempotencyKey !== undefined) return 'client_idempotency';
   if (input.path !== '/v1/chat/completions' || input.protocol !== 'openai') return 'operation';
-  if (!safeInteger(input.body.max_tokens) && !safeInteger(input.body.max_completion_tokens)) return 'output_bound';
-  if (input.body.n !== undefined && input.body.n !== 1) return 'multiple_choices';
-  if (input.body.service_tier !== undefined && input.body.service_tier !== 'default') return 'service_tier';
-  if (
-    ['tools', 'functions', 'audio', 'modalities', 'web_search_options', 'prediction'].some(
-      (key) => input.body[key] !== undefined,
-    )
-  )
-    return 'unbounded_feature';
-  if (
-    !Array.isArray(input.body.messages) ||
-    input.body.messages.some((message) => {
-      if (!message || typeof message !== 'object') return true;
-      const content = (message as Record<string, unknown>).content;
-      return typeof content !== 'string' && content !== null;
-    })
-  )
-    return 'non_text_content';
-  return null;
+  return fastTextRequestUnsupported(input.body);
 }
 function pricingSupported(price: CustomerPriceVersionRecord): boolean {
   return price.tokenMultipliers === null && price.rates.per_unit === null && price.rates.per_unit_tiers === null;
@@ -298,6 +278,22 @@ export class FastGatewayExecutor implements FastGatewayExecutorPort {
     });
     if (compiled.decision !== 'allow') throw new FastGatewayExecutionError(400, 'FAST_PAYLOAD_REJECTED');
     const payload = compiled.value;
+    let compiledBody: unknown;
+    try {
+      compiledBody = JSON.parse(Buffer.from(payload.payloadBytes).toString('utf8'));
+    } catch {
+      input.selected?.('strict', 'compiled_body');
+      return false;
+    }
+    if (
+      !compiledBody ||
+      typeof compiledBody !== 'object' ||
+      Array.isArray(compiledBody) ||
+      fastTextRequestUnsupported(compiledBody as Record<string, unknown>)
+    ) {
+      input.selected?.('strict', 'compiled_fields');
+      return false;
+    }
     if (
       payload.providerProtocol !== 'openai' ||
       payload.providerOperation !== 'chat.completions' ||
@@ -310,6 +306,14 @@ export class FastGatewayExecutor implements FastGatewayExecutorPort {
     const maxOutput = BigInt(payload.usage.outputTotalUpperBound);
     if (maxInput < 0n || maxOutput <= 0n || maxInput + maxOutput > BigInt(Number.MAX_SAFE_INTEGER)) {
       input.selected?.('strict', 'usage_bound');
+      return false;
+    }
+    const compiledOutputLimit = Math.max(
+      Number((compiledBody as Record<string, unknown>).max_tokens ?? 0),
+      Number((compiledBody as Record<string, unknown>).max_completion_tokens ?? 0),
+    );
+    if (BigInt(compiledOutputLimit) > maxOutput) {
+      input.selected?.('strict', 'compiled_output_bound');
       return false;
     }
     let maxCost = 0n;
@@ -395,6 +399,16 @@ export class FastGatewayExecutor implements FastGatewayExecutorPort {
         authoritySnapshot: JSON.parse(
           canonical({
             revision: snapshot.revision,
+            principal: { kind: snapshot.caller.principalKind, id: snapshot.caller.principalId },
+            authorizationVersions: {
+              key: snapshot.caller.authzVersion,
+              modelScope: snapshot.caller.modelScopeVersion,
+              entitlement: snapshot.caller.entitlementVersion,
+              supplyProfile: snapshot.caller.supplyProfileVersion,
+              projectPolicy: snapshot.entitlement.projectPolicyVersion,
+            },
+            commercial: authority.commercial,
+            modelResolution,
             candidate: candidate.authority,
             route: authority.route,
             compilerVersion: payload.compilerVersion,
@@ -506,8 +520,9 @@ export class FastGatewayExecutor implements FastGatewayExecutorPort {
         if (calculated > maxCost) throw new Error('Fast usage exceeds frozen price bound');
         charge = calculated;
       }
+      const receiptIntentId = intentId;
       await this.#options.journal.appendReceipt({
-        intentId,
+        intentId: receiptIntentId,
         requestId: input.requestId,
         tenantId: snapshot.caller.tenantId,
         outcome: succeeded ? 'succeeded' : 'failed',
