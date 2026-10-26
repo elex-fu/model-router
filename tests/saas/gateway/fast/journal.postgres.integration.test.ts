@@ -2015,7 +2015,8 @@ test('fast money journal real PostgreSQL: atomic reserve, durable completion, ex
   await t.test(
     'known no-write recovery joins an existing worker before redistributing scarce unused fragments',
     { timeout: 15000 },
-    async () => {
+    async (t) => {
+      const realMonotonicNow = performance.now.bind(performance);
       function latch() {
         let release!: () => void;
         const promise = new Promise<void>((resolve) => {
@@ -2095,6 +2096,11 @@ test('fast money journal real PostgreSQL: atomic reserve, durable completion, ex
       pauseWorker = true;
       scope.journal.start();
       await workerRead.promise;
+      const logicalNow = realMonotonicNow();
+      // Scope the logical recovery clock to this ordering proof only. Real PG
+      // queries, COMMIT, authority deadlines and timers remain real; this mock
+      // is restored before the independent budget/cancel/authority subtests.
+      t.mock.method(performance, 'now', () => logicalNow);
       watching = true;
       const pending = Array.from({ length: 16 }, () =>
         scope.journal.reserveIntent(intentFixture(scope.tenantId, scope.owner)),
@@ -2104,9 +2110,29 @@ test('fast money journal real PostgreSQL: atomic reserve, durable completion, ex
         await new Promise<void>((resolve) => setImmediate(resolve));
         assert.equal(workerFences, 0, 'the existing worker is demonstrably before its wallet fence');
         assert.equal(refills, 0, 'fragment recovery must not jump ahead of the already-running durable settlement');
+        // This is a scheduling/ordering proof, not a latency benchmark. Force
+        // the barrier past the real recovery budget to keep machine speed out
+        // of its assertions; separate tests retain the real budget boundaries.
+        const barrierStarted = realMonotonicNow();
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        const barrierElapsedMs = realMonotonicNow() - barrierStarted;
+        assert.ok(barrierElapsedMs > 100);
         resumeWorker.release();
         const results = await Promise.all(pending);
-        assert.equal(results.filter((result) => result.kind === 'created').length, 16);
+        const timing = { barrierElapsedMs, logicalElapsedMs: performance.now() - logicalNow };
+        t.diagnostic(JSON.stringify(timing));
+        assert.equal(
+          results.filter((result) => result.kind === 'created').length,
+          16,
+          JSON.stringify({
+            ...timing,
+            outcomes: results.map((result) => (result.kind === 'denied' ? result.reason : result.kind)),
+            attempts: [...attempts.values()],
+            refills,
+            workerFences,
+          }),
+        );
+        assert.equal(timing.logicalElapsedMs, 0, 'only the ordering proof uses a frozen recovery budget clock');
         assert.deepEqual([...attempts.values()], Array(16).fill(2), 'one fresh CAS per request after durable progress');
         assert.equal(refills, 0, 'worker restoration alone is sufficient; no rebalancing transaction is required');
         const current = await facts(scope.tenantId);
