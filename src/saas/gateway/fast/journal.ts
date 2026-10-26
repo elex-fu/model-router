@@ -173,6 +173,11 @@ interface AllocationRow {
   available_minor_units: string;
 }
 
+interface FastBatchProgress {
+  readonly planned: Set<string>;
+  readonly restored: Set<string>;
+}
+
 export class PostgresFastGatewayJournal implements FastGatewayJournal {
   private readonly epoch = randomUUID();
   private readonly tranche: bigint | null;
@@ -186,12 +191,15 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
       preparedMaximum: bigint | null;
       preparedTarget: bigint | null;
       backgroundRefillAfter: number;
+      restoreGeneration: bigint;
     }
   >();
   private readonly ready: Promise<void>;
   private readonly pendingReplenishments = new Map<string, Promise<void>>();
   private timer?: NodeJS.Timeout;
   private running?: Promise<number>;
+  /** Planned scopes become progress hints only after this exact batch commits. */
+  private readonly batchRestorations = new WeakMap<Promise<number>, FastBatchProgress>();
   private closed = false;
   private workerStarted = false;
   private wakeRequested = false;
@@ -390,6 +398,11 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
         return { kind: 'denied', reason: 'send_deadline' };
       if (recoveryDeadline > 0 && performance.now() >= recoveryDeadline) break;
       let recoverable = false;
+      const creditHint = this.observedMaximum.get(`${input.tenantId}:${input.currency}`);
+      const beforeRestore = creditHint?.restoreGeneration;
+      const beforeWorker = this.running;
+      let creditWorker: Promise<number> | undefined;
+      let creditProgress: FastBatchProgress | undefined;
       try {
         const result = await this.database.query<{
           id: string | null;
@@ -436,6 +449,17 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
           throw new Error('FAST_JOURNAL_UNCERTAIN_RESERVE');
         unavailable = result.rows[0].credit_busy ? 'credit_busy' : 'credit_not_ready';
         recoverable = result.rows[0].credit_recoverable;
+        // Capture relevant progress at this acknowledged no-write, before the
+        // replay lookup can finish/replace the worker. A batch observed when
+        // this SQL began may already have committed by the time its ACK arrives.
+        for (const candidate of [beforeWorker, this.running]) {
+          const progress = candidate ? this.batchRestorations.get(candidate) : undefined;
+          if (progress?.planned.has(`${input.tenantId}:${input.currency}`)) {
+            creditWorker = candidate;
+            creditProgress = progress;
+            break;
+          }
+        }
         // Four normal polling periods bound waiting/starting another CAS. An
         // already in-flight SQL is never cancelled/retried as though not written.
         if (recoveryDeadline === 0) recoveryDeadline = performance.now() + 100;
@@ -456,28 +480,50 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
         if (retriedBusy) break;
         retriedBusy = true;
       } else {
-        if (retriedNotReady || (!recoverable && !this.running)) break;
+        const worker = creditWorker;
+        const restorations = creditProgress?.restored;
+        let progressed = creditHint !== undefined && creditHint.restoreGeneration !== beforeRestore;
+        if (retriedNotReady || (!recoverable && !worker && !progressed)) break;
         retriedNotReady = true;
-        // Rebalance ONLY unused, wallet-backed credit. This also joins a worker
-        // already holding the wallet fence, so its restoration is committed
-        // before reselection. Unfunded/capped wallets finish this pass promptly;
-        // no receipt, unknown hold or merely elapsed time releases money.
+        // A refill can win the fence before an existing worker reaches it and
+        // only concentrate scarce fragments. Prefer that captured batch first,
+        // but an empty/unrelated/failed batch must not consume the refill stage.
         let prepared: FastCreditWaitResult | undefined;
-        try {
-          prepared = await waitForFastCreditWork(
-            recoverable
-              ? this.scheduleReplenishment(input.tenantId, input.currency, true)
-              : (this.running ?? Promise.resolve()).then(() => undefined),
-            input,
-            recoveryDeadline,
-          );
-        } catch {
-          // Replenishment already reports its own failure. Do not turn a known
-          // admission denial into new sending authority or an uncertain retry.
+        if (!progressed && worker) {
+          try {
+            prepared = await waitForFastCreditWork(
+              worker.then(() => undefined),
+              input,
+              recoveryDeadline,
+            );
+          } catch {
+            // Failed or ambiguous worker COMMIT is not observed money progress.
+            // An independent refill may still redistribute proven unused funds.
+          }
+          if (prepared === 'cancelled' || prepared === 'authority_expired')
+            return { kind: 'denied', reason: 'send_deadline' };
+          if (prepared === 'budget_exhausted') break;
         }
-        if (prepared === 'cancelled' || prepared === 'authority_expired')
-          return { kind: 'denied', reason: 'send_deadline' };
-        if (prepared !== 'completed') break;
+        progressed ||= prepared === 'completed' && restorations?.has(`${input.tenantId}:${input.currency}`) === true;
+        if (!progressed) {
+          if (!recoverable) break;
+          if (input.sendDeadlineMs <= Date.now() || input.signal?.aborted)
+            return { kind: 'denied', reason: 'send_deadline' };
+          if (performance.now() >= recoveryDeadline) break;
+          try {
+            prepared = await waitForFastCreditWork(
+              this.scheduleReplenishment(input.tenantId, input.currency, true),
+              input,
+              recoveryDeadline,
+            );
+          } catch {
+            // Replenishment reports its own failure; no uncertain intent retry.
+            prepared = undefined;
+          }
+          if (prepared === 'cancelled' || prepared === 'authority_expired')
+            return { kind: 'denied', reason: 'send_deadline' };
+          if (prepared !== 'completed') break;
+        }
       }
       if (performance.now() >= recoveryDeadline) break;
       try {
@@ -602,7 +648,15 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
         const oldest = this.observedMaximum.keys().next().value;
         if (oldest !== undefined) this.observedMaximum.delete(oldest);
       }
-      entry = { maximum, target, nextStripe: 0, preparedMaximum: null, preparedTarget: null, backgroundRefillAfter: 0 };
+      entry = {
+        maximum,
+        target,
+        nextStripe: 0,
+        preparedMaximum: null,
+        preparedTarget: null,
+        backgroundRefillAfter: 0,
+        restoreGeneration: 0n,
+      };
       this.observedMaximum.set(key, entry);
     } else {
       if (maximum > entry.maximum) entry.maximum = maximum;
@@ -736,10 +790,19 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
   }
 
   /** One durable, atomic batch claim. SIGKILL rolls back every claimed job and posting. */
-  async runOnce(limit = 128): Promise<number> {
+  runOnce(limit = 128): Promise<number> {
+    const progress: FastBatchProgress = { planned: new Set(), restored: new Set() };
+    // Keep the exact returned promise: an async wrapper would create another
+    // identity and disconnect the scheduler's running batch from its scopes.
+    const batch = this.runBatch(limit, progress);
+    this.batchRestorations.set(batch, progress);
+    return batch;
+  }
+
+  private async runBatch(limit: number, progress: FastBatchProgress): Promise<number> {
     await this.ready;
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) throw new Error('FAST_JOURNAL_INVALID_BATCH');
-    return this.database.transaction(async (tx) => {
+    const count = await this.database.transaction(async (tx) => {
       const jobs = await tx.query<{ intent_id: string }>(
         `/* fast-journal:worker-claim */ SELECT intent_id FROM saas_fast_billing_jobs
          WHERE state='pending' ORDER BY created_at,intent_id LIMIT $1 FOR UPDATE SKIP LOCKED`,
@@ -749,19 +812,30 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
       await this.settleBatch(
         tx,
         jobs.rows.map((job) => job.intent_id),
+        progress,
       );
       return jobs.rows.length;
     });
+    // Only the actual guarded restore plus successful COMMIT ACK advances the
+    // bounded existing wallet hint. Holding the entry reference across a CAS
+    // makes eviction conservative, never a synthetic progress event.
+    for (const key of progress.restored) {
+      const hint = this.observedMaximum.get(key);
+      if (hint) hint.restoreGeneration++;
+    }
+    return count;
   }
 
-  private async settleBatch(tx: SqlExecutor, intentIds: readonly string[]): Promise<void> {
+  private async settleBatch(tx: SqlExecutor, intentIds: readonly string[], progress: FastBatchProgress): Promise<void> {
     const result = await tx.query<SettlementRow>(
       `SELECT i.*,COALESCE(x.charge_minor_units,r.charge_minor_units) AS charge_minor_units,
          COALESCE(x.usage,r.usage) AS usage,COALESCE(x.usage_digest,r.usage_digest) AS usage_digest,
          CASE WHEN x.kind='non_execution' THEN 'not_executed' WHEN x.kind='verified_usage' THEN 'succeeded' ELSE r.outcome END AS outcome,
-         r.http_status,x.id AS resolution_id,x.kind AS resolution_kind
+         r.http_status,x.id AS resolution_id,x.kind AS resolution_kind,a.owner AS active_allocation_owner
        FROM saas_fast_gateway_intents i LEFT JOIN saas_fast_gateway_receipts r ON r.intent_id=i.id
        LEFT JOIN saas_fast_gateway_resolutions x ON x.intent_id=i.id
+       LEFT JOIN saas_fast_credit_allocations a ON a.id=i.allocation_id AND a.tenant_id=i.tenant_id
+         AND a.currency=i.currency AND a.epoch=i.allocation_epoch AND a.state='active'
        WHERE i.id=ANY($1::uuid[]) ORDER BY i.tenant_id,i.currency,i.id`,
       [intentIds],
     );
@@ -788,6 +862,16 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
           throw new Error('invalid charge');
         }
         valid.push({ row, charge, ledgerId: charge > 0n ? randomUUID() : null });
+        // This existing read's immutable identity + active allocation snapshot
+        // is scheduling evidence only. Mark before the wallet fence so unrelated
+        // or empty polls never consume this wallet's fragment recovery budget.
+        if (
+          row.currency !== null &&
+          row.allocation_epoch === this.epoch &&
+          row.active_allocation_owner === this.options.allocationOwner &&
+          charge < BigInt(row.max_cost_minor_units)
+        )
+          progress.planned.add(`${row.tenant_id}:${row.currency}`);
       } catch {
         invalid.push(row.id);
       }
@@ -942,6 +1026,13 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
         [creditJson],
       );
       if (restored.rowCount !== credits.size) throw new Error('FAST_JOURNAL_STATE_CONFLICT');
+      for (const credit of credits.values()) {
+        // Another owner/epoch or retirement cannot restore this gateway's
+        // admissible credit. Even this positive restore is only a hint until
+        // the enclosing transaction promise acknowledges COMMIT successfully.
+        if (credit.epoch === this.epoch && credit.state === 'active' && credit.restore > 0n)
+          progress.restored.add(`${credit.tenant_id}:${credit.currency}`);
+      }
     }
   }
 
@@ -979,6 +1070,7 @@ interface SettlementRow {
   currency: string | null;
   allocation_id: string | null;
   allocation_epoch: string | null;
+  active_allocation_owner: string | null;
   max_cost_minor_units: string;
   price_snapshot: unknown;
   charge_minor_units: string | null;

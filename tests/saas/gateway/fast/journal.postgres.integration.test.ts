@@ -1073,6 +1073,393 @@ test('fast money journal real PostgreSQL: atomic reserve, durable completion, ex
     },
   );
   await t.test(
+    'known no-write recovery joins an existing worker before redistributing scarce unused fragments',
+    { timeout: 15000 },
+    async () => {
+      function latch() {
+        let release!: () => void;
+        const promise = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        return { promise, release };
+      }
+      const workerRead = latch(),
+        resumeWorker = latch(),
+        firstWave = latch(),
+        replayWave = latch();
+      let pauseWorker = false,
+        watching = false,
+        firstMisses = 0,
+        replays = 0,
+        refills = 0,
+        workerFences = 0;
+      const attempts = new Map<string, number>();
+      const measured: SaasDatabase = {
+        ...gateway,
+        query: async <Row>(sql: string, values?: readonly unknown[]): Promise<SqlResult<Row>> => {
+          const result = await gateway.query<Row>(sql, values);
+          if (watching && sql.includes('fast-journal:reserve-intent')) {
+            const request = String(values?.[1]);
+            const attempt = (attempts.get(request) ?? 0) + 1;
+            attempts.set(request, attempt);
+            if (attempt === 1) {
+              const row = result.rows[0] as { id: string | null; credit_recoverable: boolean };
+              assert.equal(row.id, null);
+              assert.equal(row.credit_recoverable, true);
+              if (++firstMisses === 16) firstWave.release();
+              await firstWave.promise;
+            }
+          }
+          if (watching && sql.startsWith('SELECT i.request_id, i.intent_digest')) {
+            if (++replays === 16) replayWave.release();
+            await replayWave.promise;
+          }
+          return result;
+        },
+        transaction: (work) =>
+          gateway.transaction(async (tx) => {
+            let worker = false;
+            return work({
+              query: async <Row>(sql: string, values?: readonly unknown[]): Promise<SqlResult<Row>> => {
+                if (sql.includes('fast-journal:worker-claim')) worker = true;
+                if (pauseWorker && worker && sql === WALLET_FENCE_SQL) {
+                  workerRead.release();
+                  await resumeWorker.promise;
+                }
+                if (watching && worker && sql === WALLET_FENCE_SQL) workerFences++;
+                return tx.query<Row>(sql, values);
+              },
+            });
+          }),
+      };
+      const scope = await setup('2560', '2560', randomUUID(), measured, 8);
+      const intents: FastIntent[] = [];
+      for (let i = 0; i < 32; i++)
+        intents.push(await reserve(scope.journal, intentFixture(scope.tenantId, scope.owner)));
+      await Promise.all(intents.slice(0, 8).map((intent) => scope.journal.appendReceipt(receiptFixture(intent, '1'))));
+      await scope.journal.runOnce();
+      const fragmented = await gateway.query<{ available: string }>(
+        'SELECT available_minor_units::text AS available FROM saas_fast_credit_allocations WHERE tenant_id=$1 ORDER BY stripe',
+        [scope.tenantId],
+      );
+      assert.deepEqual(
+        fragmented.rows.map((row) => row.available),
+        Array(8).fill('79'),
+      );
+      await Promise.all(intents.slice(8, 24).map((intent) => scope.journal.appendReceipt(receiptFixture(intent, '1'))));
+      const replenish = scope.journal.replenish.bind(scope.journal);
+      scope.journal.replenish = (...args) => {
+        if (watching) refills++;
+        return replenish(...args);
+      };
+      pauseWorker = true;
+      scope.journal.start();
+      await workerRead.promise;
+      watching = true;
+      const pending = Array.from({ length: 16 }, () =>
+        scope.journal.reserveIntent(intentFixture(scope.tenantId, scope.owner)),
+      );
+      try {
+        await replayWave.promise;
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        assert.equal(workerFences, 0, 'the existing worker is demonstrably before its wallet fence');
+        assert.equal(refills, 0, 'fragment recovery must not jump ahead of the already-running durable settlement');
+        resumeWorker.release();
+        const results = await Promise.all(pending);
+        assert.equal(results.filter((result) => result.kind === 'created').length, 16);
+        assert.deepEqual([...attempts.values()], Array(16).fill(2), 'one fresh CAS per request after durable progress');
+        assert.equal(refills, 0, 'worker restoration alone is sufficient; no rebalancing transaction is required');
+        const current = await facts(scope.tenantId);
+        assert.equal(current.intents, '48');
+        assert.equal(current.completed, '24');
+        assert.equal(current.balance, '2536');
+        assert.equal(current.backing, '2536');
+        assert.equal(current.available, '616');
+      } finally {
+        firstWave.release();
+        replayWave.release();
+        resumeWorker.release();
+        watching = false;
+        await Promise.allSettled(pending);
+        await scope.journal.close();
+      }
+      assert.equal((await facts(scope.tenantId)).backing, '1920', 'all 24 unresolved maxima remain backed');
+    },
+  );
+  await t.test(
+    'empty, unrelated and failed worker batches preserve the one fragmentation recovery opportunity',
+    { timeout: 15000 },
+    async (t) => {
+      for (const kind of ['empty', 'other_wallet', 'other_owner', 'failed'] as const) {
+        await t.test(kind, async () => {
+          function latch() {
+            let release!: () => void;
+            const promise = new Promise<void>((resolve) => {
+              release = resolve;
+            });
+            return { promise, release };
+          }
+          const workerStarted = latch(),
+            resumeWorker = latch(),
+            replay = latch();
+          let pausing = false,
+            watching = false,
+            failOnce = kind === 'failed';
+          let workerFinished = false,
+            refills = 0,
+            statements = 0;
+          const measured: SaasDatabase = {
+            ...gateway,
+            query: async <Row>(sql: string, values?: readonly unknown[]): Promise<SqlResult<Row>> => {
+              const result = await gateway.query<Row>(sql, values);
+              if (watching && sql.includes('fast-journal:reserve-intent')) statements++;
+              if (watching && sql.startsWith('SELECT i.request_id, i.intent_digest')) replay.release();
+              return result;
+            },
+            transaction: async (work) => {
+              let worker = false;
+              try {
+                return await gateway.transaction((tx) =>
+                  work({
+                    query: async <Row>(sql: string, values?: readonly unknown[]): Promise<SqlResult<Row>> => {
+                      if (sql.includes('fast-journal:worker-claim')) worker = true;
+                      if (
+                        pausing &&
+                        worker &&
+                        (kind === 'empty' ? sql.includes('fast-journal:worker-claim') : sql === WALLET_FENCE_SQL)
+                      ) {
+                        workerStarted.release();
+                        await resumeWorker.promise;
+                        if (failOnce) {
+                          failOnce = false;
+                          throw new Error('controlled worker transaction failure');
+                        }
+                      }
+                      return tx.query<Row>(sql, values);
+                    },
+                  }),
+                );
+              } finally {
+                if (worker && pausing) workerFinished = true;
+              }
+            },
+          };
+          const scope = await setup('2560', '2560', randomUUID(), measured, 8);
+          const intents: FastIntent[] = [];
+          for (let i = 0; i < 32; i++)
+            intents.push(await reserve(scope.journal, intentFixture(scope.tenantId, scope.owner)));
+          await Promise.all(
+            intents.slice(0, 8).map((intent) => scope.journal.appendReceipt(receiptFixture(intent, '1'))),
+          );
+          await scope.journal.runOnce();
+          let other: { tenantId: string; owner: string; journal: PostgresFastGatewayJournal } | undefined;
+          if (kind === 'other_wallet') other = await setup('1000');
+          if (kind === 'other_owner') {
+            await migrator.transaction((tx) =>
+              billing.postVerifiedFunding(tx, {
+                tenantId: scope.tenantId,
+                currency: 'USD',
+                amountMinorUnits: '1000',
+                sourceOrderRef: randomUUID(),
+                idempotencyKey: randomUUID(),
+              }),
+            );
+            const owner = randomUUID();
+            const journal = new PostgresFastGatewayJournal(gateway, {
+              allocationOwner: owner,
+              allocationTrancheMinorUnits: '1000',
+              allocationStripes: 1,
+            });
+            await journal.replenish(scope.tenantId, 'USD');
+            other = { tenantId: scope.tenantId, owner, journal };
+          }
+          if (other) {
+            const intent = await reserve(other.journal, intentFixture(other.tenantId, other.owner));
+            await other.journal.appendReceipt(receiptFixture(intent));
+          }
+          if (kind === 'failed') await scope.journal.appendReceipt(receiptFixture(intents[8], '1'));
+          const replenish = scope.journal.replenish.bind(scope.journal);
+          scope.journal.replenish = (...args) => {
+            if (watching) {
+              assert.equal(
+                workerFinished,
+                kind === 'failed',
+                'unrelated work must not block this wallet; only matched failed work is awaited',
+              );
+              refills++;
+            }
+            return replenish(...args);
+          };
+          pausing = true;
+          scope.journal.start();
+          await workerStarted.promise;
+          watching = true;
+          const pending = scope.journal.reserveIntent(intentFixture(scope.tenantId, scope.owner));
+          try {
+            if (kind === 'failed') {
+              await replay.promise;
+              await new Promise<void>((resolve) => setImmediate(resolve));
+              assert.equal(refills, 0, 'the matched worker is awaited before its failure');
+              resumeWorker.release();
+            }
+            assert.equal(
+              (await pending).kind,
+              'created',
+              'an irrelevant/failed poll must not consume fragmentation recovery',
+            );
+            assert.equal(statements, 2, 'fallback is in the same recovery stage, not another speculative CAS');
+            assert.equal(refills, 1);
+            const current = await facts(scope.tenantId);
+            assert.equal(current.balance, kind === 'other_owner' ? '3552' : '2552');
+            assert.equal(current.backing, kind === 'other_owner' ? '3552' : '2552');
+            assert.equal(current.available, kind === 'other_owner' ? '1472' : '552');
+            assert.equal(current.intents, kind === 'other_owner' ? '34' : '33');
+            assert.equal(current.completed, '8');
+            if (other && kind === 'other_wallet') assert.equal((await facts(other.tenantId)).balance, '1000');
+            if (kind !== 'failed') {
+              assert.equal(workerFinished, false, 'the request succeeds before the unrelated worker completes');
+              await new Promise((resolve) => setTimeout(resolve, 110));
+              assert.equal(workerFinished, false, 'even an unrelated worker held past the recovery budget is harmless');
+            }
+          } finally {
+            resumeWorker.release();
+            watching = false;
+            await pending.catch(() => undefined);
+            await scope.journal.close();
+            await other?.journal.close();
+          }
+          assert.equal((await facts(scope.tenantId)).backing, kind === 'failed' ? '1920' : '2000');
+        });
+      }
+    },
+  );
+  await t.test(
+    'a matched worker completing during the failed CAS or replay lookup remains observable recovery progress',
+    { timeout: 15000 },
+    async (t) => {
+      for (const boundary of ['reserve_ack', 'replay_lookup', 'whole_batch_during_reserve'] as const) {
+        await t.test(boundary, async () => {
+          function latch() {
+            let release!: () => void;
+            const promise = new Promise<void>((resolve) => {
+              release = resolve;
+            });
+            return { promise, release };
+          }
+          const workerReady = latch(),
+            resumeWorker = latch(),
+            committed = latch(),
+            stopped = latch(),
+            resumeCaller = latch();
+          let pausing = false,
+            watching = false,
+            attempts = 0,
+            refills = 0,
+            replayPaused = false;
+          const measured: SaasDatabase = {
+            ...gateway,
+            query: async <Row>(sql: string, values?: readonly unknown[]): Promise<SqlResult<Row>> => {
+              const result = await gateway.query<Row>(sql, values);
+              if (watching && sql.includes('fast-journal:reserve-intent')) {
+                if (++attempts === 1) {
+                  const row = result.rows[0] as { id: string | null; credit_recoverable: boolean };
+                  assert.equal(row.id, null);
+                  assert.equal(
+                    row.credit_recoverable,
+                    false,
+                    'no fragmented credit: only a genuine worker commit can progress',
+                  );
+                  if (boundary !== 'replay_lookup') {
+                    stopped.release();
+                    await resumeCaller.promise;
+                  }
+                }
+              }
+              if (
+                watching &&
+                !replayPaused &&
+                boundary === 'replay_lookup' &&
+                sql.startsWith('SELECT i.request_id, i.intent_digest')
+              ) {
+                replayPaused = true;
+                stopped.release();
+                await resumeCaller.promise;
+              }
+              return result;
+            },
+            transaction: async (work) => {
+              let worker = false;
+              const result = await gateway.transaction((tx) =>
+                work({
+                  query: async <Row>(sql: string, values?: readonly unknown[]): Promise<SqlResult<Row>> => {
+                    if (sql.includes('fast-journal:worker-claim')) worker = true;
+                    if (pausing && worker && sql === WALLET_FENCE_SQL) {
+                      workerReady.release();
+                      await resumeWorker.promise;
+                    }
+                    return tx.query<Row>(sql, values);
+                  },
+                }),
+              );
+              if (pausing && worker) committed.release();
+              return result;
+            },
+          };
+          const scope = await setup('2560', '2560', randomUUID(), measured, 8);
+          const intents: FastIntent[] = [];
+          for (let i = 0; i < 32; i++)
+            intents.push(await reserve(scope.journal, intentFixture(scope.tenantId, scope.owner)));
+          await Promise.all(
+            intents.slice(0, 16).map((intent) => scope.journal.appendReceipt(receiptFixture(intent, '1'))),
+          );
+          const replenish = scope.journal.replenish.bind(scope.journal);
+          scope.journal.replenish = (...args) => {
+            if (watching) refills++;
+            return replenish(...args);
+          };
+          pausing = true;
+          if (boundary !== 'whole_batch_during_reserve') {
+            scope.journal.start();
+            await workerReady.promise;
+          }
+          watching = true;
+          const pending = scope.journal.reserveIntent(intentFixture(scope.tenantId, scope.owner));
+          try {
+            await stopped.promise;
+            if (boundary === 'whole_batch_during_reserve') {
+              scope.journal.start();
+              await workerReady.promise;
+            }
+            resumeWorker.release();
+            await committed.promise;
+            await new Promise<void>((resolve) => setImmediate(resolve));
+            resumeCaller.release();
+            assert.equal(
+              (await pending).kind,
+              'created',
+              'the captured completed batch is not lost or replaced by a newer poll',
+            );
+            assert.equal(attempts, 2);
+            assert.equal(refills, 0);
+            const current = await facts(scope.tenantId);
+            assert.equal(current.intents, '33');
+            assert.equal(current.completed, '16');
+            assert.equal(current.balance, '2544');
+            assert.equal(current.backing, '2544');
+            assert.equal(current.available, '1184');
+          } finally {
+            resumeWorker.release();
+            resumeCaller.release();
+            watching = false;
+            await pending.catch(() => undefined);
+            await scope.journal.close();
+          }
+          assert.equal((await facts(scope.tenantId)).backing, '1360');
+        });
+      }
+    },
+  );
+  await t.test(
     'recovery cancellation, original authority deadline and bounded wait never issue a late CAS or release unresolved money',
     async (t) => {
       for (const stop of ['cancel', 'authority', 'budget'] as const) {
