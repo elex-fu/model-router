@@ -103,6 +103,10 @@ export type FastGatewaySnapshotMetric =
 export interface FastGatewaySnapshotCacheOptions {
   readonly ttlMs?: number;
   readonly negativeTtlMs?: number;
+  /** Admission handoff headroom, never an extension of the original authority lease. */
+  readonly minimumValidityMs?: number;
+  /** Begin one cold refresh before handoff headroom is exhausted. */
+  readonly refreshAheadMs?: number;
   readonly maxEntries?: number;
   readonly maxPending?: number;
   readonly loadTimeoutMs?: number;
@@ -117,6 +121,9 @@ export interface FastGatewaySnapshotCacheOptions {
 }
 
 type Entry = {
+  readonly cacheKey: string;
+  readonly rejectionSequence: bigint;
+  readonly denied?: boolean;
   readonly value: FastGatewaySnapshot | null;
   readonly until: number;
   readonly wallUntil: number;
@@ -426,8 +433,15 @@ function freeze<T>(value: T): T {
 export class CachedFastGatewaySnapshots implements FastGatewaySnapshotProvider {
   private readonly entries = new Map<string, Entry>();
   private readonly pending = new Map<string, Promise<Entry>>();
+  // Keep known-deny barriers for one maximum lease lifetime, including held
+  // objects no longer in L1. A later source validation can mint a new lease;
+  // a stale L2 value cannot. This map is bounded independently of request rate.
+  private readonly rejections = new Map<string, { sequence: bigint; until: number }>();
+  private rejectionSequence = 0n;
   private readonly ttl: number;
   private readonly negativeTtl: number;
+  private readonly minimumValidity: number;
+  private readonly refreshAhead: number;
   private readonly maxEntries: number;
   private readonly maxPending: number;
   private readonly timeout: number;
@@ -443,6 +457,8 @@ export class CachedFastGatewaySnapshots implements FastGatewaySnapshotProvider {
   ) {
     this.ttl = options.ttlMs ?? 5000;
     this.negativeTtl = options.negativeTtlMs ?? 500;
+    this.minimumValidity = options.minimumValidityMs ?? 0;
+    this.refreshAhead = options.refreshAheadMs ?? this.minimumValidity;
     this.maxEntries = options.maxEntries ?? 4096;
     this.maxPending = options.maxPending ?? 64;
     this.timeout = options.loadTimeoutMs ?? 3000;
@@ -463,6 +479,11 @@ export class CachedFastGatewaySnapshots implements FastGatewaySnapshotProvider {
       ![this.ttl, this.negativeTtl, this.maxEntries, this.maxPending, this.timeout, this.maxBytes].every(positive) ||
       this.ttl > MAX_TTL_MS ||
       this.negativeTtl > this.ttl ||
+      !Number.isSafeInteger(this.minimumValidity) ||
+      this.minimumValidity < 0 ||
+      !Number.isSafeInteger(this.refreshAhead) ||
+      this.refreshAhead < this.minimumValidity ||
+      this.refreshAhead >= this.ttl ||
       (options.store && options.encryptionKey?.byteLength !== 32) ||
       (options.namespace !== undefined && !/^[a-zA-Z0-9:_-]{1,128}$/.test(options.namespace))
     )
@@ -504,19 +525,32 @@ export class CachedFastGatewaySnapshots implements FastGatewaySnapshotProvider {
     if (this.unavailable) fail('SNAPSHOT_UNAVAILABLE');
     const cacheKey = fastGatewaySnapshotCacheKey(input, this.options.namespace);
     let entry = this.entries.get(cacheKey);
-    if (entry && this.live(entry)) {
+    if (entry && this.usable(entry)) {
       this.entries.delete(cacheKey);
       this.entries.set(cacheKey, entry);
       this.metric(entry.value ? 'l1_hit' : 'negative_hit');
+      if (entry.value && this.remaining(entry) <= this.refreshAhead) {
+        // No stale lease is renewed; the old object retains its original deadline.
+        void this.startLoad(cacheKey, input, true).catch(() => {});
+      }
       return this.use(entry, input);
     }
     this.entries.delete(cacheKey);
+    const work = this.startLoad(cacheKey, input, entry !== undefined);
+    entry = await this.wait(work);
+    return this.use(entry, input);
+  }
+  private startLoad(cacheKey: string, input: FastGatewaySnapshotInput, bypassL2: boolean): Promise<Entry> {
     let work = this.pending.get(cacheKey);
     if (work) this.metric('coalesced');
     else {
-      if (this.pending.size >= this.maxPending) fail('SNAPSHOT_BUSY');
-      const epoch = this.epoch;
-      work = this.load(cacheKey, input, epoch);
+      if (this.pending.size >= this.maxPending) return Promise.reject(new FastGatewaySnapshotError('SNAPSHOT_BUSY'));
+      try {
+        const scope = this.retainScope(cacheKey);
+        work = this.load(cacheKey, input, this.epoch, bypassL2 || scope.sequence > 0n);
+      } catch (error) {
+        return Promise.reject(error);
+      }
       this.pending.set(cacheKey, work);
       void work
         .finally(() => {
@@ -524,8 +558,41 @@ export class CachedFastGatewaySnapshots implements FastGatewaySnapshotProvider {
         })
         .catch(() => {});
     }
-    entry = await this.wait(work);
-    return this.use(entry, input);
+    return work;
+  }
+  private rejection(cacheKey: string): { sequence: bigint; until: number } | undefined {
+    const rejection = this.rejections.get(cacheKey);
+    if (rejection && rejection.until <= this.mono()) {
+      this.rejections.delete(cacheKey);
+      return undefined;
+    }
+    return rejection;
+  }
+  private retainScope(cacheKey: string): { sequence: bigint; until: number } {
+    let scope = this.rejection(cacheKey);
+    if (!scope) {
+      if (this.rejections.size >= this.maxEntries + this.maxPending) {
+        for (const key of this.rejections.keys()) this.rejection(key);
+        if (this.rejections.size >= this.maxEntries + this.maxPending) fail('SNAPSHOT_BUSY');
+      }
+      scope = { sequence: 0n, until: 0 };
+      this.rejections.set(cacheKey, scope);
+    }
+    // Retain through all possible issued leases, even if L1 evicts the scope.
+    // This only bounds bookkeeping: it never changes an entry's hard expiry.
+    scope.until = Math.max(scope.until, this.mono() + this.timeout + this.ttl);
+    return scope;
+  }
+  private rejectScope(cacheKey: string): void {
+    const scope = this.retainScope(cacheKey);
+    scope.sequence = ++this.rejectionSequence;
+    this.entries.delete(cacheKey);
+  }
+  private remaining(entry: Entry): number {
+    return Math.min(entry.until - this.mono(), entry.wallUntil - this.wall());
+  }
+  private usable(entry: Entry): boolean {
+    return this.live(entry) && (entry.value === null || this.remaining(entry) > this.minimumValidity);
   }
   private metric(value: FastGatewaySnapshotMetric): void {
     try {
@@ -536,11 +603,16 @@ export class CachedFastGatewaySnapshots implements FastGatewaySnapshotProvider {
   }
   private live(entry: Entry): boolean {
     return (
-      !this.unavailable && entry.epoch === this.epoch && entry.until > this.mono() && entry.wallUntil > this.wall()
+      !this.unavailable &&
+      entry.epoch === this.epoch &&
+      entry.until > this.mono() &&
+      entry.wallUntil > this.wall() &&
+      (this.rejection(entry.cacheKey)?.sequence ?? 0n) <= entry.rejectionSequence
     );
   }
   private use(entry: Entry, input: FastGatewaySnapshotInput): FastGatewaySnapshot | null {
-    if (!this.live(entry)) fail('SNAPSHOT_UNAVAILABLE');
+    if (!this.usable(entry)) fail('SNAPSHOT_UNAVAILABLE');
+    if (entry.denied) fail('SNAPSHOT_DENIED');
     if (entry.value) {
       try {
         authorizeFastGatewaySnapshot(entry.value, input, this.wall());
@@ -564,11 +636,16 @@ export class CachedFastGatewaySnapshots implements FastGatewaySnapshotProvider {
       if (timer) clearTimeout(timer);
     }
   }
-  private async load(cacheKey: string, input: FastGatewaySnapshotInput, epoch: bigint): Promise<Entry> {
+  private async load(
+    cacheKey: string,
+    input: FastGatewaySnapshotInput,
+    epoch: bigint,
+    bypassL2 = false,
+  ): Promise<Entry> {
     const startMono = this.mono();
     const startWall = this.wall();
     try {
-      if (this.options.store) {
+      if (this.options.store && !bypassL2) {
         let bytes: Buffer | null;
         try {
           bytes = await this.options.store.get(cacheKey);
@@ -582,9 +659,10 @@ export class CachedFastGatewaySnapshots implements FastGatewaySnapshotProvider {
             stored.epoch === epoch &&
             stored.value &&
             stored.value.observedAtMs <= startWall &&
-            stored.value.validUntilMs > this.wall()
+            stored.value.validUntilMs - this.wall() > this.minimumValidity &&
+            stored.value.observedAtMs + this.ttl - this.wall() > this.minimumValidity
           ) {
-            const entry = this.makeEntry(stored.value, epoch, startWall, startMono);
+            const entry = this.makeEntry(stored.value, epoch, startWall, startMono, cacheKey);
             this.storeEntry(cacheKey, entry);
             this.metric('l2_hit');
             return entry;
@@ -592,11 +670,33 @@ export class CachedFastGatewaySnapshots implements FastGatewaySnapshotProvider {
         }
       }
       this.metric('cold_load');
-      const value = await this.source.resolve(input);
+      let value: FastGatewaySnapshot | null;
+      try {
+        value = await this.source.resolve(input);
+      } catch (error) {
+        // Only the source's explicit authority denial is revocation evidence.
+        // Timeouts/network/storage faults keep their existing bounded policy.
+        if (
+          error instanceof FastGatewaySnapshotError &&
+          error.code === 'SNAPSHOT_DENIED' &&
+          this.epoch === epoch &&
+          !this.unavailable
+        ) {
+          this.rejectScope(cacheKey);
+          const denied = { ...this.makeEntry(null, epoch, this.wall(), this.mono(), cacheKey), denied: true };
+          this.storeEntry(cacheKey, denied);
+          return denied;
+        }
+        throw error;
+      }
+      // Known unsupported authority fences held tickets even if this cold read
+      // ran past its wait budget. Never publish an expired result or fence a
+      // newer global epoch on behalf of the obsolete load.
+      if (value === null && this.epoch === epoch && !this.unavailable) this.rejectScope(cacheKey);
       if (this.mono() - startMono >= this.timeout || this.epoch !== epoch || this.unavailable)
         fail('SNAPSHOT_UNAVAILABLE');
       if (value && value.observedAtMs > this.wall()) fail('SNAPSHOT_UNAVAILABLE');
-      const entry = this.makeEntry(value, epoch, startWall, startMono);
+      const entry = this.makeEntry(value, epoch, startWall, startMono, cacheKey);
       if (entry.value && this.options.store) {
         const bytes = this.encode(entry.value, epoch, cacheKey);
         try {
@@ -606,7 +706,7 @@ export class CachedFastGatewaySnapshots implements FastGatewaySnapshotProvider {
           return fail('SNAPSHOT_UNAVAILABLE');
         }
       }
-      if (!this.live(entry)) fail('SNAPSHOT_UNAVAILABLE');
+      if (!this.usable(entry)) fail('SNAPSHOT_UNAVAILABLE');
       this.storeEntry(cacheKey, entry);
       return entry;
     } catch (error) {
@@ -615,16 +715,29 @@ export class CachedFastGatewaySnapshots implements FastGatewaySnapshotProvider {
       fail('SNAPSHOT_UNAVAILABLE');
     }
   }
-  private makeEntry(value: FastGatewaySnapshot | null, epoch: bigint, startWall: number, startMono: number): Entry {
+  private makeEntry(
+    value: FastGatewaySnapshot | null,
+    epoch: bigint,
+    startWall: number,
+    startMono: number,
+    cacheKey: string,
+  ): Entry {
+    const scope = { cacheKey, rejectionSequence: this.rejection(cacheKey)?.sequence ?? 0n };
     if (!value)
-      return { value: null, epoch, until: startMono + this.negativeTtl, wallUntil: startWall + this.negativeTtl };
+      return {
+        ...scope,
+        value: null,
+        epoch,
+        until: startMono + this.negativeTtl,
+        wallUntil: startWall + this.negativeTtl,
+      };
     const caps = value.policy?.absoluteExpiryMs;
     if (!Array.isArray(caps) || caps.some((n) => !positive(n))) fail('SNAPSHOT_UNAVAILABLE');
     const wallUntil = Math.min(value.validUntilMs, value.observedAtMs + this.ttl, ...caps);
     if (!Number.isSafeInteger(wallUntil) || wallUntil <= this.wall()) fail('SNAPSHOT_UNAVAILABLE');
     const frozen = freeze(structuredClone({ ...value, validUntilMs: wallUntil }));
     // Elapsed local time, including network/load latency, cannot be renewed by a wall-clock rollback.
-    const entry = { value: frozen, epoch, wallUntil, until: startMono + Math.max(0, wallUntil - startWall) };
+    const entry = { ...scope, value: frozen, epoch, wallUntil, until: startMono + Math.max(0, wallUntil - startWall) };
     localSnapshotLeases.set(frozen, () => {
       if (!this.live(entry)) fail('SNAPSHOT_UNAVAILABLE');
       return this.wall();

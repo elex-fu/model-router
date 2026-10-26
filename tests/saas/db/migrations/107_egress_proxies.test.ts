@@ -26,6 +26,8 @@ test('107 registers between the applied 106 head and the 108 forward', () => {
   assert.equal(
     registered.at(-1),
     143,
+    144,
+    145,
     'the append-only registry ends at fast gateway durable journal 143',
   );
   assert.equal(registered.indexOf(107), registered.lastIndexOf(107));

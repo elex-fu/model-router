@@ -122,6 +122,13 @@ export interface SaasWorkerGrantStatement {
 }
 
 export const MANIFEST_CONTROL_PLANE_COLUMN_GROUPS: readonly SaasControlPlaneColumnGroup[] = [
+  { table: 'saas_fast_gateway_resolutions', privilege: 'SELECT', columns: ['id', 'intent_id', 'tenant_id', 'request_id', 'kind', 'actor_user_id', 'actor_session_id', 'idempotency_key', 'request_digest', 'charge_minor_units', 'usage', 'usage_digest', 'evidence_reference', 'evidence_sha256', 'support_ticket_ref', 'reason', 'created_at'] },
+  { table: 'saas_fast_gateway_resolutions', privilege: 'INSERT', columns: ['id', 'intent_id', 'tenant_id', 'request_id', 'kind', 'actor_user_id', 'actor_session_id', 'idempotency_key', 'request_digest', 'charge_minor_units', 'usage', 'usage_digest', 'evidence_reference', 'evidence_sha256', 'support_ticket_ref', 'reason'] },
+  { table: 'saas_fast_gateway_intents', privilege: 'SELECT', columns: ['id', 'tenant_id', 'request_id', 'attempt_id', 'currency', 'max_cost_minor_units', 'price_snapshot', 'send_deadline', 'created_at'] },
+  { table: 'saas_fast_gateway_receipts', privilege: 'SELECT', columns: ['intent_id', 'outcome'] },
+  { table: 'saas_fast_billing_jobs', privilege: 'SELECT', columns: ['intent_id', 'state'] },
+  { table: 'saas_fast_billing_jobs', privilege: 'INSERT', columns: ['intent_id', 'state'] },
+  { table: 'saas_fast_billing_jobs', privilege: 'UPDATE', columns: ['state'] },
   { table: 'saas_fast_credit_allocations', privilege: 'SELECT', columns: ['tenant_id', 'currency', 'backing_minor_units'] },
   // Control-plane unknown-outcome non-execution resolution releases existing
   // group holds only; it cannot reserve, settle usage, or rewrite charge_settled.
@@ -4768,6 +4775,13 @@ export const MANIFEST_CONTROL_PLANE_COLUMN_GROUPS: readonly SaasControlPlaneColu
 ];
 
 export const MANIFEST_CONTROL_PLANE_COLUMN_SQL_ROWS: readonly SaasControlPlaneColumnSqlRow[] = [
+  { table: 'saas_fast_gateway_resolutions', privilege: 'SELECT', columns: ['id', 'intent_id', 'tenant_id', 'request_id', 'kind', 'actor_user_id', 'actor_session_id', 'idempotency_key', 'request_digest', 'charge_minor_units', 'usage', 'usage_digest', 'evidence_reference', 'evidence_sha256', 'support_ticket_ref', 'reason', 'created_at'] },
+  { table: 'saas_fast_gateway_resolutions', privilege: 'INSERT', columns: ['id', 'intent_id', 'tenant_id', 'request_id', 'kind', 'actor_user_id', 'actor_session_id', 'idempotency_key', 'request_digest', 'charge_minor_units', 'usage', 'usage_digest', 'evidence_reference', 'evidence_sha256', 'support_ticket_ref', 'reason'] },
+  { table: 'saas_fast_gateway_intents', privilege: 'SELECT', columns: ['id', 'tenant_id', 'request_id', 'attempt_id', 'currency', 'max_cost_minor_units', 'price_snapshot', 'send_deadline', 'created_at'] },
+  { table: 'saas_fast_gateway_receipts', privilege: 'SELECT', columns: ['intent_id', 'outcome'] },
+  { table: 'saas_fast_billing_jobs', privilege: 'SELECT', columns: ['intent_id', 'state'] },
+  { table: 'saas_fast_billing_jobs', privilege: 'INSERT', columns: ['intent_id', 'state'] },
+  { table: 'saas_fast_billing_jobs', privilege: 'UPDATE', columns: ['state'] },
   { table: 'saas_fast_credit_allocations', privilege: 'SELECT', columns: ['tenant_id', 'currency', 'backing_minor_units'] },
   // Control-plane unknown-outcome non-execution resolution releases existing
   // group holds only; it cannot reserve, settle usage, or rewrite charge_settled.
@@ -9324,6 +9338,7 @@ export const MANIFEST_CONTROL_PLANE_TABLE_SQL_ROWS: readonly SaasControlPlaneTab
 ];
 
 export const MANIFEST_GATEWAY_READ_TABLES: readonly SaasGatewayReadTableTsEntry[] = [
+  { table: 'saas_fast_gateway_resolutions' },
   { table: 'saas_fast_gateway_owners' },
   { table: 'saas_fast_credit_allocations' },
   { table: 'saas_fast_gateway_intents' },
@@ -9614,6 +9629,7 @@ export const MANIFEST_GATEWAY_READ_TABLES: readonly SaasGatewayReadTableTsEntry[
 ];
 
 export const MANIFEST_GATEWAY_READ_SQL_ROWS: readonly SaasGatewayReadSqlRow[] = [
+  { tables: ['saas_fast_gateway_resolutions'] },
   { tables: ['saas_fast_gateway_owners', 'saas_fast_credit_allocations', 'saas_fast_gateway_intents', 'saas_fast_gateway_receipts', 'saas_fast_billing_jobs'] },
   { tables: ['saas_responses_continuation_contexts'] },
   { tables: ['saas_redis_quota_metadata', 'saas_redis_quota_state'] },
@@ -9805,7 +9821,7 @@ const REDIS_QUOTA_GATEWAY_COLUMNS = [
 
 export const MANIFEST_GATEWAY_COLUMN_GROUPS: readonly SaasGatewayColumnTsGroup[] = [
   { table: 'saas_fast_gateway_owners', privilege: 'INSERT', columns: ['owner', 'epoch'], tsStyle: 'inline' },
-  { table: 'saas_fast_credit_allocations', privilege: 'INSERT', columns: ['id', 'tenant_id', 'wallet_id', 'currency', 'owner', 'epoch', 'state', 'backing_minor_units', 'available_minor_units', 'created_at'], tsStyle: 'inline' },
+  { table: 'saas_fast_credit_allocations', privilege: 'INSERT', columns: ['id', 'tenant_id', 'wallet_id', 'currency', 'owner', 'epoch', 'stripe', 'state', 'backing_minor_units', 'available_minor_units', 'created_at'], tsStyle: 'inline' },
   { table: 'saas_fast_gateway_intents', privilege: 'INSERT', columns: ['id', 'request_id', 'attempt_id', 'tenant_id', 'project_id', 'proxy_key_id', 'intent_digest', 'request_fingerprint', 'payload_sha256', 'account_id', 'currency', 'max_cost_minor_units', 'price_snapshot', 'authority_snapshot', 'allocation_id', 'allocation_epoch', 'send_deadline', 'created_at'], tsStyle: 'inline' },
   { table: 'saas_fast_gateway_receipts', privilege: 'INSERT', columns: ['intent_id', 'tenant_id', 'request_id', 'outcome', 'charge_minor_units', 'usage', 'usage_digest', 'receipt_digest', 'http_status', 'created_at'], tsStyle: 'inline' },
   { table: 'saas_fast_billing_jobs', privilege: 'INSERT', columns: ['intent_id', 'state', 'attempts', 'last_error', 'ledger_transaction_id', 'completed_at', 'created_at'], tsStyle: 'inline' },
@@ -10985,6 +11001,7 @@ export const MANIFEST_GATEWAY_COLUMN_SQL_ENTRIES: readonly SaasGatewayColumnSqlE
   { table: 'saas_fast_credit_allocations', column: 'currency', privilege: 'INSERT' },
   { table: 'saas_fast_credit_allocations', column: 'owner', privilege: 'INSERT' },
   { table: 'saas_fast_credit_allocations', column: 'epoch', privilege: 'INSERT' },
+  { table: 'saas_fast_credit_allocations', column: 'stripe', privilege: 'INSERT' },
   { table: 'saas_fast_credit_allocations', column: 'state', privilege: 'INSERT' },
   { table: 'saas_fast_credit_allocations', column: 'backing_minor_units', privilege: 'INSERT' },
   { table: 'saas_fast_credit_allocations', column: 'available_minor_units', privilege: 'INSERT' },

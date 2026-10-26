@@ -1,0 +1,108 @@
+name: Fast gateway required gates
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fast-gateway-required:
+    name: Native fast gateway required (PG ${{ matrix.postgres-version }}, Redis)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    container:
+      image: node:22.16.0-bookworm
+      options: --user root
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres-version: ["15", "18"]
+    # This job owns a fresh database and Redis service. Never consume or preseed
+    # the historical shared commercial-HTTP fixture from the other workflow.
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres-version }}
+        env:
+          POSTGRES_DB: model_router_saas_ci
+          POSTGRES_USER: postgres
+          POSTGRES_HOST_AUTH_METHOD: trust
+        options: >-
+          --health-cmd "pg_isready -U postgres -d model_router_saas_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7.4-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install portable fixture tools
+        run: |
+          apt-get update
+          apt-get install --yes --no-install-recommends postgresql-client openssl redis-server
+          rm -rf /var/lib/apt/lists/*
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Check required fast gate wiring
+        run: node --import tsx --test tests/ci/fast-gateway-required-gates.test.ts
+      - name: Strictly typecheck all fast roots and native fixtures
+        timeout-minutes: 3
+        run: >-
+          ./node_modules/.bin/tsc --noEmit
+          --target ES2022 --module NodeNext --moduleResolution NodeNext
+          --lib ES2023 --strict --esModuleInterop --skipLibCheck --types node
+          src/types/busboy.d.ts
+          tests/saas/gateway/fast/executor.test.ts
+          tests/saas/gateway/fast/journal.test.ts
+          tests/saas/gateway/fast/journal.postgres.integration.test.ts
+          tests/saas/gateway/fast/journal-crash-child.ts
+          tests/saas/gateway/fast/redis-admission.test.ts
+          tests/saas/gateway/fast/redis-admission.local.integration.test.ts
+          tests/saas/gateway/fast/redis-snapshot-store.test.ts
+          tests/saas/gateway/fast/postgres-snapshot-loader.test.ts
+          tests/saas/gateway/fast/runtime-snapshot.test.ts
+          tests/saas/gateway/fast/snapshots.test.ts
+          tests/saas/gateway/fast/terminal-gate.test.ts
+          tests/saas/gateway/fast/ticket-transport.test.ts
+          tests/saas/gateway/fast/resolution-http.test.ts
+          tests/saas/gateway/fast/native-http-runtime-fixture.ts
+          tests/saas/gateway/fast/native-http-seed-fixture.ts
+          tests/saas/gateway/fast/native-http.postgres.integration.test.ts
+          tests/ci/fast-gateway-required-gates.test.ts
+      - name: Provision full migrations and restricted application roles
+        run: bash tests/saas/db/managed-postgres-runtime-privileges.integration.sh
+      - name: Run required real PostgreSQL fast journal and crash gates
+        env:
+          NODE_ENV: test
+          MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED: "1"
+          MODEL_ROUTER_SAAS_GATEWAY_E2E_MIGRATOR_URL: postgresql://model_router_saas_migrator@postgres:5432/model_router_saas_ci
+          MODEL_ROUTER_SAAS_GATEWAY_E2E_CONTROL_PLANE_URL: postgresql://model_router_saas_control_plane@postgres:5432/model_router_saas_ci
+          MODEL_ROUTER_SAAS_GATEWAY_E2E_GATEWAY_URL: postgresql://model_router_saas_gateway@postgres:5432/model_router_saas_ci
+        run: node --import tsx --test tests/saas/gateway/fast/journal.postgres.integration.test.ts
+      # Destructive Redis restart tests own a separate loopback child, not the
+      # native HTTP service. No FLUSHALL, process killing, or shared state reset.
+      - name: Run required real Redis admission restart and drain gates
+        env:
+          NODE_ENV: test
+          MODEL_ROUTER_FAST_ADMISSION_REDIS_TEST: "1"
+          MODEL_ROUTER_TEST_REDIS_BIN: /usr/bin/redis-server
+        run: node --import tsx --test tests/saas/gateway/fast/redis-admission.local.integration.test.ts
+      - name: Run required cold native paid JSON and SSE financial drain gate
+        env:
+          NODE_ENV: test
+          MODEL_ROUTER_NATIVE_FAST_HTTP_REQUIRED: "1"
+          MODEL_ROUTER_NATIVE_FAST_HTTP_REDIS_URL: redis://redis:6379
+          MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED: "1"
+          MODEL_ROUTER_SAAS_GATEWAY_E2E_MIGRATOR_URL: postgresql://model_router_saas_migrator@postgres:5432/model_router_saas_ci
+          MODEL_ROUTER_SAAS_GATEWAY_E2E_CONTROL_PLANE_URL: postgresql://model_router_saas_control_plane@postgres:5432/model_router_saas_ci
+          MODEL_ROUTER_SAAS_GATEWAY_E2E_GATEWAY_URL: postgresql://model_router_saas_gateway@postgres:5432/model_router_saas_ci
+        run: node --import tsx --test tests/saas/gateway/fast/native-http.postgres.integration.test.ts
+      # Secrets exist only in an owned mode-0700 temporary fixture directory and
+      # child environment; cleanup runs on success and failure. Never upload it.

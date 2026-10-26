@@ -50,3 +50,7 @@ Focused tests cover paid JSON/SSE reserve and exact usage; mixed-case SSE media 
 ## Read-side integration boundary
 
 Fast usage is durable in intents/receipts/jobs, not fabricated legacy request/attempt/usage rows. Existing dashboard/export readers need an explicit fast-journal projection or union before broad feature enablement. Native acceptance counts both formats separately and reconciles their exact ledger effects. This first checkpoint does not claim legacy usage pages already show fast traffic.
+
+## Optional pinned connection reuse
+
+`MODEL_ROUTER_FAST_CONNECTION_REUSE=1` (or `fastGateway.reuseConnections: true`) enables the isolated transport A/B. It is off by default pending native acceptance. Each request still validates its HTTPS URL, fresh DNS answer and approved pinned address. One borrower exclusively owns each dispatcher until upstream body EOF; cancellation, fetch failure and invalid/redirect responses destroy it. Completed direct-HTTPS dispatchers can be reused only for the same hostname/SNI, port, pinned address and address family. Each pool owns one immutable base TLS/CA/ALPN factory; proxy and TLS-fingerprint paths are excluded. Idle entries expire after 30 seconds; live entries are bounded (default256, tied to an explicit HTTP cap when set), with a bounded retirement queue and LRU eviction. Pool shutdown drains/closes its dispatchers. Whole-window measurements must include all refresh/worker activity; dispatcher reuse is the intended optimization, not omitted SQL attribution.

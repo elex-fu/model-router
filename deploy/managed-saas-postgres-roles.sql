@@ -716,6 +716,13 @@ BEGIN
     SELECT manifest.table_name, manifest.privilege_type,
            pg_catalog.string_to_array(manifest.column_names, ' ') AS column_names
     FROM (VALUES
+      ('saas_fast_gateway_resolutions', 'SELECT', 'id intent_id tenant_id request_id kind actor_user_id actor_session_id idempotency_key request_digest charge_minor_units usage usage_digest evidence_reference evidence_sha256 support_ticket_ref reason created_at'),
+      ('saas_fast_gateway_resolutions', 'INSERT', 'id intent_id tenant_id request_id kind actor_user_id actor_session_id idempotency_key request_digest charge_minor_units usage usage_digest evidence_reference evidence_sha256 support_ticket_ref reason'),
+      ('saas_fast_gateway_intents', 'SELECT', 'id tenant_id request_id attempt_id currency max_cost_minor_units price_snapshot send_deadline created_at'),
+      ('saas_fast_gateway_receipts', 'SELECT', 'intent_id outcome'),
+      ('saas_fast_billing_jobs', 'SELECT', 'intent_id state'),
+      ('saas_fast_billing_jobs', 'INSERT', 'intent_id state'),
+      ('saas_fast_billing_jobs', 'UPDATE', 'state'),
       ('saas_fast_credit_allocations', 'SELECT', 'tenant_id currency backing_minor_units'),
       ('saas_billing_group_spend_reservations', 'SELECT', 'tenant_id request_id billing_group_id window_kind window_start amount_minor_units charge_currency state'),
       ('saas_billing_group_spend_reservations', 'UPDATE', 'state settled_amount_minor_units updated_at'),
@@ -1258,6 +1265,7 @@ BEGIN
   FOR v_table IN
     SELECT read_relation.table_name
     FROM (VALUES
+      ('saas_fast_gateway_resolutions'),
       ('saas_fast_gateway_owners'), ('saas_fast_credit_allocations'), ('saas_fast_gateway_intents'), ('saas_fast_gateway_receipts'), ('saas_fast_billing_jobs'),
       ('saas_responses_continuation_contexts'),
       ('saas_redis_quota_metadata'), ('saas_redis_quota_state'),
@@ -1356,6 +1364,7 @@ BEGIN
       ('saas_fast_credit_allocations', 'currency', 'INSERT'),
       ('saas_fast_credit_allocations', 'owner', 'INSERT'),
       ('saas_fast_credit_allocations', 'epoch', 'INSERT'),
+      ('saas_fast_credit_allocations', 'stripe', 'INSERT'),
       ('saas_fast_credit_allocations', 'state', 'INSERT'),
       ('saas_fast_credit_allocations', 'backing_minor_units', 'INSERT'),
       ('saas_fast_credit_allocations', 'available_minor_units', 'INSERT'),

@@ -50,7 +50,7 @@ process.once(
       allocationTrancheMinorUnits: '100',
     });
     if (raw.intent) {
-      await journal.replenish(raw.intent.tenantId, 'USD');
+      await journal.replenish(raw.intent.tenantId, 'USD', raw.intent.maxCostMinorUnits);
       await journal.reserveIntent(raw.intent);
     } else if (raw.receipt) await journal.appendReceipt(raw.receipt);
     else await journal.runOnce();

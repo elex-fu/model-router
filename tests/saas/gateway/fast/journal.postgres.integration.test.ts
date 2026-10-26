@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { fork } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { resolve } from 'node:path';
 import { test } from 'node:test';
@@ -13,6 +13,7 @@ import {
   fastJournalCanonicalJson,
   PostgresFastGatewayJournal,
 } from '../../../../src/saas/gateway/fast/journal.js';
+import { FastGatewayResolutionService } from '../../../../src/saas/gateway/fast/resolution.js';
 import { anyRoleConfigured, REQUIRED_FLAG, roleUrls } from '../../metering/normal-success-postgres-fixture.js';
 import { intentFixture, priceFixture, receiptFixture } from './journal-fixture.js';
 
@@ -24,13 +25,15 @@ test('fast money journal real PostgreSQL: atomic reserve, durable completion, ex
   const urls = roleUrls();
   const migrator = createSaasDatabase({ connectionString: urls[0], max: 8 });
   const gateway = createSaasDatabase({ connectionString: urls[2], max: 16 });
+  const control = createSaasDatabase({ connectionString: urls[1], max: 4 });
   t.after(async () => {
+    await control.close();
     await gateway.close();
     await migrator.close();
   });
   await gateway.verifySchema();
   const billing = new PlatformWalletLedgerService();
-  async function setup(balance = '100', tranche = balance, owner = randomUUID(), db = gateway) {
+  async function setup(balance = '100', tranche = balance, owner = randomUUID(), db = gateway, stripes = 1) {
     const tenantId = randomUUID();
     await migrator.query("INSERT INTO saas_tenants(id,name,slug) VALUES ($1,'fast-journal-test',$2)", [
       tenantId,
@@ -48,6 +51,7 @@ test('fast money journal real PostgreSQL: atomic reserve, durable completion, ex
     const journal = new PostgresFastGatewayJournal(db, {
       allocationOwner: owner,
       allocationTrancheMinorUnits: tranche,
+      allocationStripes: stripes,
     });
     await journal.replenish(tenantId, 'USD');
     return { tenantId, owner, journal };
@@ -548,6 +552,363 @@ test('fast money journal real PostgreSQL: atomic reserve, durable completion, ex
       );
       await worker.close();
       await journal.close();
+    },
+  );
+  await t.test(
+    'only exact trusted definitely-unsent receipts release active or retired credit; provider failures stay backed',
+    async () => {
+      for (const retired of [false, true]) {
+        const { tenantId, owner, journal } = await setup();
+        const intent = await reserve(journal, intentFixture(tenantId, owner));
+        if (retired) await journal.retireAllocations();
+        const receipt = {
+          ...receiptFixture(intent),
+          outcome: 'failed' as const,
+          chargeMinorUnits: '0',
+          httpStatus: null,
+          usage: {},
+        };
+        await journal.appendReceipt(receipt);
+        await journal.appendReceipt(receipt);
+        await journal.runOnce();
+        await journal.runOnce();
+        const current = await facts(tenantId);
+        assert.equal(current.balance, '100');
+        assert.equal(current.charges, '0');
+        assert.equal(current.completed, '1');
+        assert.equal(current.backing, retired ? '0' : '100');
+        assert.equal(current.available, retired ? '0' : '100');
+        await journal.close();
+      }
+      const { tenantId, owner, journal } = await setup();
+      const intent = await reserve(journal, intentFixture(tenantId, owner));
+      await journal.appendReceipt({
+        ...receiptFixture(intent),
+        outcome: 'failed',
+        chargeMinorUnits: '0',
+        httpStatus: 500,
+        usage: {},
+      });
+      await journal.close();
+      assert.equal((await facts(tenantId)).backing, '80');
+    },
+  );
+  await t.test(
+    'eight stripes conserve one tranche under uniform, adversarial skew and near-tranche rebalancing',
+    async () => {
+      for (const skewed of [false, true]) {
+        const scope = await setup('2560', '2560', randomUUID(), gateway, 8);
+        const requests = Array.from({ length: 32 }, () => {
+          let input = intentFixture(scope.tenantId, scope.owner);
+          if (skewed)
+            while (createHash('sha256').update(input.requestId).digest().readUInt32BE(0) % 8 !== 0)
+              input = { ...input, requestId: randomUUID() };
+          return input;
+        });
+        const results = await Promise.all(requests.map((input) => scope.journal.reserveIntent(input)));
+        assert.equal(
+          results.filter((result) => result.kind === 'created').length,
+          32,
+          'all global capacity remains usable despite hash skew',
+        );
+        assert.equal((await facts(scope.tenantId)).backing, '2560');
+        assert.equal((await facts(scope.tenantId)).available, '0');
+        assert.equal((await scope.journal.reserveIntent(intentFixture(scope.tenantId, scope.owner))).kind, 'denied');
+        const distribution = await gateway.query<{ stripes: string }>(
+          'SELECT count(DISTINCT allocation_id)::text AS stripes FROM saas_fast_gateway_intents WHERE tenant_id=$1',
+          [scope.tenantId],
+        );
+        assert.equal(distribution.rows[0]?.stripes, '8');
+        await Promise.all(
+          results.map((result) =>
+            result.kind === 'created' ? scope.journal.appendReceipt(receiptFixture(result.intent)) : Promise.resolve(),
+          ),
+        );
+        await scope.journal.drain();
+        assert.equal((await facts(scope.tenantId)).balance, '1920');
+        await scope.journal.close();
+      }
+      const small = await setup('100', '100', randomUUID(), gateway, 8);
+      const input = intentFixture(small.tenantId, small.owner);
+      assert.equal(
+        (await small.journal.reserveIntent(input)).kind,
+        'denied',
+        'unknown-M prewarm is only a safe cold denial',
+      );
+      await small.journal.replenish(small.tenantId, 'USD', input.maxCostMinorUnits);
+      const intent = await reserve(small.journal, input);
+      assert.equal((await facts(small.tenantId)).backing, '100');
+      assert.equal((await facts(small.tenantId)).available, '20');
+      await small.journal.appendReceipt(receiptFixture(intent));
+      await small.journal.drain();
+      await small.journal.close();
+    },
+  );
+  await t.test(
+    'two striped owners admit c32 varying maxima with delayed receipts at normal and sustained tranche budgets',
+    async () => {
+      for (const tranche of ['1000000', '1000000000']) {
+        const initial = (BigInt(tranche) * 2n).toString();
+        const a = await setup(initial, tranche, randomUUID(), gateway, 8);
+        const otherOwner = randomUUID();
+        const b = new PostgresFastGatewayJournal(gateway, {
+          allocationOwner: otherOwner,
+          allocationTrancheMinorUnits: tranche,
+        });
+        await b.replenish(a.tenantId, 'USD', '30720');
+        const requests = [a.journal, b].flatMap((journal, index) =>
+          Array.from({ length: 32 }, (_, i) => ({
+            journal,
+            input: intentFixture(
+              a.tenantId,
+              index === 0 ? a.owner : otherOwner,
+              priceFixture(['10000', '20480', '30720'][i % 3]),
+            ),
+          })),
+        );
+        const results = await Promise.all(
+          requests.map(async (request) => ({ ...request, result: await request.journal.reserveIntent(request.input) })),
+        );
+        assert.equal(
+          results.filter(({ result }) => result.kind === 'created').length,
+          64,
+          'ample globally-backed c32 per owner must not have false denials',
+        );
+        const maximum = requests.reduce((sum, { input }) => sum + BigInt(input.maxCostMinorUnits), 0n);
+        assert.equal((await facts(a.tenantId)).backing, initial);
+        assert.equal((await facts(a.tenantId)).available, (BigInt(initial) - maximum).toString());
+        assert.equal((await a.journal.reserveIntent(requests[0].input)).kind, 'existing');
+        await Promise.all([a.journal.replenish(a.tenantId, 'USD'), b.replenish(a.tenantId, 'USD')]);
+        assert.equal(
+          (await facts(a.tenantId)).backing,
+          initial,
+          'refill/rebalance cannot multiply total tranche or release unresolved money',
+        );
+        assert.equal((await facts(a.tenantId)).available, (BigInt(initial) - maximum).toString());
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        await Promise.all(
+          results.map(({ journal, result }) =>
+            result.kind === 'created' ? journal.appendReceipt(receiptFixture(result.intent)) : Promise.resolve(),
+          ),
+        );
+        await Promise.all([a.journal.runOnce(), b.runOnce()]);
+        assert.equal((await facts(a.tenantId)).balance, (BigInt(initial) - 1280n).toString());
+        assert.equal((await facts(a.tenantId)).charges, '64');
+        await Promise.all([a.journal.close(), b.close()]);
+        assert.equal((await facts(a.tenantId)).backing, '0');
+      }
+    },
+  );
+  await t.test(
+    'audited control-plane resolutions recover unknown, failed and missing receipts without changing original evidence',
+    async () => {
+      const actorUserId = randomUUID(),
+        actorSessionId = randomUUID(),
+        credentialId = randomUUID();
+      await migrator.transaction(async (tx) => {
+        await tx.query('INSERT INTO saas_users(id,email) VALUES($1,$2)', [actorUserId, `${actorUserId}@example.test`]);
+        await tx.query("INSERT INTO saas_platform_role_assignments(user_id,role) VALUES($1,'operations')", [
+          actorUserId,
+        ]);
+        await tx.query(
+          "INSERT INTO saas_mfa_credentials(id,user_id,kind,encrypted_secret,verified_at) VALUES($1,$2,'totp',decode('7b7d','hex'),clock_timestamp())",
+          [credentialId, actorUserId],
+        );
+        await tx.query(
+          "INSERT INTO saas_platform_sessions(id,user_id,credential_id,token_hash,csrf_token_hash,expires_at) VALUES($1,$2,$3,$4,$5,clock_timestamp()+interval '1 hour')",
+          [
+            actorSessionId,
+            actorUserId,
+            credentialId,
+            createHash('sha256').update(actorSessionId).digest('hex'),
+            'c'.repeat(64),
+          ],
+        );
+      });
+      const service = new FastGatewayResolutionService(control);
+      const resolution = (tenantId: string, intentId: string) => ({
+        tenantId,
+        intentId,
+        actorUserId,
+        actorSessionId,
+        idempotencyKey: randomUUID(),
+        kind: 'non_execution' as const,
+        chargeMinorUnits: '0',
+        usage: {},
+        evidenceReference: 'provider-case:verified-not-executed',
+        evidenceSha256: 'e'.repeat(64),
+        supportTicketRef: 'support:synthetic-case',
+        reason: 'Provider verified no execution; release the retained hard maximum.',
+      });
+      async function held(mode: 'unknown' | 'failed' | 'missing') {
+        const scope = await setup();
+        const intent = await reserve(scope.journal, {
+          ...intentFixture(scope.tenantId, scope.owner),
+          sendDeadlineMs: Date.now() + 100,
+        });
+        if (mode !== 'missing')
+          await scope.journal.appendReceipt({
+            ...receiptFixture(intent),
+            outcome: mode,
+            chargeMinorUnits: mode === 'unknown' ? null : '0',
+            httpStatus: mode === 'failed' ? 500 : null,
+            usage: {},
+          });
+        await scope.journal.retireAllocations();
+        await new Promise((resolve) => setTimeout(resolve, 120));
+        return { ...scope, intent };
+      }
+      for (const mode of ['unknown', 'failed', 'missing'] as const) {
+        const scope = await held(mode);
+        const input = resolution(scope.tenantId, scope.intent.id);
+        const [a, b] = await Promise.all([service.resolve(input), service.resolve(input)]);
+        assert.equal(a.resolutionId, b.resolutionId);
+        assert.equal(Number(a.replayed) + Number(b.replayed), 1);
+        await scope.journal.runOnce();
+        assert.equal((await service.resolve(input)).state, 'completed');
+        assert.deepEqual(await facts(scope.tenantId), {
+          balance: '100',
+          backing: '0',
+          available: '0',
+          intents: '1',
+          charges: '0',
+          completed: '1',
+        });
+        const original = await gateway.query<{ outcome: string }>(
+          'SELECT outcome FROM saas_fast_gateway_receipts WHERE intent_id=$1',
+          [scope.intent.id],
+        );
+        assert.equal(original.rows[0]?.outcome, mode === 'missing' ? undefined : mode);
+        if (mode === 'missing') {
+          // Retain genuine late provider evidence without replacing the audited
+          // resolution or posting a second financial outcome.
+          await scope.journal.appendReceipt(receiptFixture(scope.intent));
+          await scope.journal.runOnce();
+          assert.equal((await facts(scope.tenantId)).charges, '0');
+          assert.equal(
+            (
+              await gateway.query<{ outcome: string }>(
+                'SELECT outcome FROM saas_fast_gateway_receipts WHERE intent_id=$1',
+                [scope.intent.id],
+              )
+            ).rows[0]?.outcome,
+            'succeeded',
+          );
+        }
+        await assert.rejects(
+          migrator.query("UPDATE saas_fast_gateway_resolutions SET reason='rewrite' WHERE id=$1", [a.resolutionId]),
+          { code: '55000' },
+        );
+        await assert.rejects(
+          control.query("UPDATE saas_fast_gateway_receipts SET outcome='succeeded' WHERE intent_id=$1", [
+            scope.intent.id,
+          ]),
+          { code: '42501' },
+        );
+        await scope.journal.close();
+      }
+      const billed = await held('unknown');
+      const receipt = receiptFixture(billed.intent);
+      const input = {
+        ...resolution(billed.tenantId, billed.intent.id),
+        kind: 'verified_usage' as const,
+        chargeMinorUnits: receipt.chargeMinorUnits ?? '0',
+        usage: receipt.usage,
+        evidenceReference: 'provider-case:verified-exact-usage',
+      };
+      let loseAck = true;
+      const uncertain: SaasDatabase = {
+        ...control,
+        transaction: async (work) => {
+          const result = await control.transaction(work);
+          if (loseAck) {
+            loseAck = false;
+            throw new Error('lost resolution COMMIT ACK');
+          }
+          return result;
+        },
+      };
+      await assert.rejects(new FastGatewayResolutionService(uncertain).resolve(input), /lost resolution COMMIT ACK/);
+      assert.equal((await service.resolve(input)).replayed, true);
+      await billed.journal.runOnce();
+      await billed.journal.runOnce();
+      assert.equal((await facts(billed.tenantId)).balance, '80');
+      assert.equal((await facts(billed.tenantId)).charges, '1');
+      assert.equal(
+        (await service.getCase({ tenantId: billed.tenantId, intentId: billed.intent.id }))?.state,
+        'completed',
+      );
+      await assert.rejects(service.resolve({ ...input, chargeMinorUnits: '21' }), { code: 'CONFLICT' });
+      await billed.journal.close();
+
+      const expiring = await held('unknown');
+      let release!: () => void;
+      let locked!: () => void;
+      const lockReady = new Promise<void>((resolve) => {
+        locked = resolve;
+      });
+      const releaseLock = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const blocker = migrator.transaction(async (tx) => {
+        await tx.query('SELECT state FROM saas_fast_billing_jobs WHERE intent_id=$1 FOR UPDATE', [expiring.intent.id]);
+        locked();
+        await releaseLock;
+      });
+      await lockReady;
+      await migrator.query(
+        "UPDATE saas_platform_sessions SET expires_at=clock_timestamp()+interval '600 milliseconds' WHERE id=$1",
+        [actorSessionId],
+      );
+      let waiting!: () => void;
+      const lockWait = new Promise<void>((resolve) => {
+        waiting = resolve;
+      });
+      const delayed: SaasDatabase = {
+        ...control,
+        transaction: (work) =>
+          control.transaction((tx) =>
+            work({
+              query: async <Row>(sql: string, values?: readonly unknown[]): Promise<SqlResult<Row>> => {
+                if (sql.startsWith('SELECT state FROM saas_fast_billing_jobs')) waiting();
+                return tx.query<Row>(sql, values);
+              },
+            }),
+          ),
+      };
+      const expired = assert.rejects(
+        new FastGatewayResolutionService(delayed).resolve(resolution(expiring.tenantId, expiring.intent.id)),
+        { code: 'FORBIDDEN' },
+      );
+      await lockWait;
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      release();
+      await blocker;
+      await expired;
+      assert.equal((await facts(expiring.tenantId)).backing, '80');
+      assert.equal(
+        (await service.getCase({ tenantId: expiring.tenantId, intentId: expiring.intent.id }))?.resolutionId,
+        null,
+      );
+      await migrator.query(
+        "UPDATE saas_platform_sessions SET expires_at=clock_timestamp()+interval '1 hour' WHERE id=$1",
+        [actorSessionId],
+      );
+      await expiring.journal.close();
+
+      const unauthorized = await held('unknown');
+      await migrator.query('UPDATE saas_platform_sessions SET revoked_at=clock_timestamp() WHERE id=$1', [
+        actorSessionId,
+      ]);
+      await assert.rejects(service.resolve(resolution(unauthorized.tenantId, unauthorized.intent.id)), {
+        code: 'FORBIDDEN',
+      });
+      assert.equal((await facts(unauthorized.tenantId)).backing, '80');
+      const acl = await gateway.query<{ allowed: boolean }>(
+        "SELECT has_column_privilege(current_user,'saas_fast_gateway_resolutions','id','INSERT') AS allowed",
+      );
+      assert.equal(acl.rows[0]?.allowed, false, 'gateway may read resolutions but cannot create operator evidence');
+      await unauthorized.journal.close();
     },
   );
 });

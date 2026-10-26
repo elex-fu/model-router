@@ -120,6 +120,8 @@ test('061 is one isolated forward-only candidate, unregistered at stage1', () =>
       141,
       142,
       143,
+      144,
+      145,
     ],
   );
   assert.equal(SAAS_MIGRATIONS[60], USAGE_CORRECTIONS_SAAS_MIGRATION);

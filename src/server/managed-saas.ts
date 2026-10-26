@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { FastGatewayResolutionService } from '../saas/gateway/fast/resolution.js';
+import { createFastOutcomePlatformHttpHandler } from '../saas/gateway/fast/resolution-http.js';
 import type { Socket } from 'node:net';
 import { closeManagedSaasResources, drainManagedSaasShutdown, ManagedSaasRequestTracker } from './managed-saas-shutdown.js';
 import { createReadStream, existsSync, realpathSync, statSync } from 'node:fs';
@@ -3256,7 +3258,7 @@ export async function startManagedSaasServer(
         billingGroupSpend: createBillingGroupSpendResolution(),
         ...(workerOptions === undefined ? {} : { worker: workerOptions }),
       });
-      const unknownOutcomePlatformHandler = createUnknownOutcomePlatformHttpHandler({
+      const strictUnknownOutcomePlatformHandler = createUnknownOutcomePlatformHttpHandler({
         access: platformAccessService,
         operations: {
           listCases: ({ tenantId, limit }) => recoveryWorkflow.operatorResolution.list(tenantId, limit),
@@ -3266,6 +3268,14 @@ export async function startManagedSaasServer(
         publicOrigin: deploymentListener(deployment, 'platform').origin,
         authService: platformAuthService,
       });
+      const fastOutcomePlatformHandler = createFastOutcomePlatformHttpHandler({
+        access: platformAccessService,
+        operations: new FastGatewayResolutionService(database),
+        publicOrigin: deploymentListener(deployment, 'platform').origin,
+        authService: platformAuthService,
+      });
+      const unknownOutcomePlatformHandler: UnknownOutcomePlatformHttpHandler = async (req, res) =>
+        (await fastOutcomePlatformHandler(req, res)) || strictUnknownOutcomePlatformHandler(req, res);
       const usageCorrectionService = new UsageCorrectionService(database, {
         ledger: new PlatformWalletLedgerService(),
         keyBudget: createKeyBudgetResolution(),

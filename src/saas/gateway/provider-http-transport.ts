@@ -1297,6 +1297,13 @@ export class ProviderHttpTransport implements PreparedEvidenceTransport {
       }
       if (!callbackUsed || !result) fail('CREDENTIAL_UNAVAILABLE', 'credential resolver did not inject a credential');
       return result;
+    } catch (error) {
+      // A failed send/header validation must never return a pooled connector to
+      // idle. Body failures already destroy through managedResponseBody.
+      controller.abort();
+      await disposeConnector(asError(error));
+      cleanup();
+      throw error;
     } finally {
       if (!cleanupTransferred) {
         await disposeConnector();

@@ -654,3 +654,313 @@ test('held snapshots recheck epoch, outage and monotonic expiry immediately befo
   clock.wall = 100_001;
   assert.throws(() => authorizeFastGatewaySnapshot(recovered, input, clock.wall), errorCode('SNAPSHOT_UNAVAILABLE'));
 });
+
+test('refresh-ahead coalesces 64 near-boundary admissions without extending issued authority', async () => {
+  const { input, snapshot } = fixture();
+  let wall = 100_000,
+    mono = 0,
+    loads = 0;
+  let finishRefresh: (() => void) | undefined;
+  const barrier = new Promise<void>((resolve) => {
+    finishRefresh = resolve;
+  });
+  const cache = new CachedFastGatewaySnapshots(
+    {
+      resolve: async () => {
+        loads++;
+        if (loads > 1) await barrier;
+        return { ...snapshot, observedAtMs: wall, validUntilMs: wall + 5000 };
+      },
+    },
+    { wallNow: () => wall, monotonicNow: () => mono, minimumValidityMs: 1000, refreshAheadMs: 1500 },
+  );
+  const issued = await cache.resolve(input);
+  assert.ok(issued);
+  wall += 3600;
+  mono += 3600;
+  assert.equal(await cache.resolve(input), issued);
+  assert.equal(loads, 2, 'one refresh starts while old lease still has safe handoff time');
+  wall += 500;
+  mono += 500;
+  let returned = 0;
+  const waiting = Array.from({ length: 64 }, () =>
+    cache.resolve(input).then((value) => {
+      returned++;
+      return value;
+    }),
+  );
+  await Promise.resolve();
+  assert.equal(returned, 0);
+  assert.equal(loads, 2);
+  assert.ok(finishRefresh);
+  finishRefresh();
+  const fresh = await Promise.all(waiting);
+  assert.equal(loads, 2);
+  assert.ok(fresh.every((value) => value === fresh[0]));
+  assert.notEqual(fresh[0], issued);
+  assert.equal(issued.validUntilMs, 105_000);
+  wall = 105_001;
+  mono = 5001;
+  assert.throws(() => authorizeFastGatewaySnapshot(issued, input, wall), errorCode('SNAPSHOT_UNAVAILABLE'));
+  authorizeFastGatewaySnapshot(fresh[0] as FastGatewaySnapshot, input, wall);
+});
+
+test('near-expiry encrypted L2 is not promoted as a new admission lease', async () => {
+  const { input, snapshot } = fixture();
+  let wall = 100_000,
+    mono = 0,
+    loads = 0;
+  const l2 = store();
+  const options = {
+    store: l2,
+    encryptionKey: randomBytes(32),
+    wallNow: () => wall,
+    monotonicNow: () => mono,
+    minimumValidityMs: 1000,
+    refreshAheadMs: 1500,
+  };
+  const source = {
+    resolve: async () => {
+      loads++;
+      return { ...snapshot, observedAtMs: wall, validUntilMs: wall + 5000 };
+    },
+  };
+  const old = await new CachedFastGatewaySnapshots(source, options).resolve(input);
+  wall += 4200;
+  mono += 4200;
+  const next = await new CachedFastGatewaySnapshots(source, options).resolve(input);
+  assert.equal(loads, 2);
+  assert.notEqual(next?.observedAtMs, old?.observedAtMs);
+  assert.equal(old?.validUntilMs, 105000);
+  assert.equal(next?.validUntilMs, 109200);
+});
+
+test('failed refresh never extends old lease or hands out insufficient validity', async () => {
+  const { input, snapshot } = fixture();
+  let wall = 100000,
+    mono = 0,
+    loads = 0;
+  const cache = new CachedFastGatewaySnapshots(
+    {
+      resolve: async () => {
+        if (++loads > 1) throw new Error('authority unavailable');
+        return snapshot;
+      },
+    },
+    { wallNow: () => wall, monotonicNow: () => mono, minimumValidityMs: 1000, refreshAheadMs: 1500 },
+  );
+  const issued = await cache.resolve(input);
+  assert.ok(issued);
+  wall += 4100;
+  mono += 4100;
+  await assert.rejects(() => cache.resolve(input), errorCode('SNAPSHOT_UNAVAILABLE'));
+  assert.equal(issued.validUntilMs, 105000);
+  wall = 105001;
+  mono = 5001;
+  assert.throws(() => authorizeFastGatewaySnapshot(issued, input, wall), errorCode('SNAPSHOT_UNAVAILABLE'));
+});
+
+for (const result of ['deny', 'unsupported', 'transient'] as const) {
+  test(`refresh-ahead ${result} updates only the intended scope and never renews issued leases`, async () => {
+    const first = fixture();
+    const other = fixture('tenant-b');
+    const clock = clocks();
+    let loads = 0;
+    const cache = new CachedFastGatewaySnapshots(
+      {
+        async resolve(input) {
+          if (input.authenticatedCaller.authorization.tenantId === 'tenant-b') return other.snapshot;
+          if (++loads === 1) return first.snapshot;
+          if (result === 'unsupported') return null;
+          if (result === 'deny') throw new FastGatewaySnapshotError('SNAPSHOT_DENIED');
+          throw new Error('transient source failure');
+        },
+      },
+      { wallNow: () => clock.wall, monotonicNow: () => clock.mono, minimumValidityMs: 1000, refreshAheadMs: 1500 },
+    );
+    const held = await cache.resolve(first.input);
+    const unrelated = await cache.resolve(other.input);
+    assert.ok(held);
+    assert.ok(unrelated);
+    clock.wall += 3600;
+    clock.mono += 3600;
+    await cache.resolve(first.input);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(held.validUntilMs, 105000);
+    authorizeFastGatewaySnapshot(unrelated, other.input, clock.wall);
+    if (result === 'transient') authorizeFastGatewaySnapshot(held, first.input, clock.wall);
+    else {
+      assert.throws(
+        () => authorizeFastGatewaySnapshot(held, first.input, clock.wall),
+        errorCode('SNAPSHOT_UNAVAILABLE'),
+      );
+      if (result === 'deny') await assert.rejects(cache.resolve(first.input), errorCode('SNAPSHOT_DENIED'));
+      else assert.equal(await cache.resolve(first.input), null);
+      assert.equal(loads, 2);
+    }
+  });
+}
+
+test('known deny fences held objects after L1 eviction and cannot resurrect from old encrypted L2', async () => {
+  const first = fixture();
+  const other = fixture('tenant-b');
+  const clock = clocks();
+  const l2 = store();
+  let denied = false;
+  let loads = 0;
+  const cache = new CachedFastGatewaySnapshots(
+    {
+      async resolve(input) {
+        loads++;
+        if (input.authenticatedCaller.authorization.tenantId === 'tenant-b') return other.snapshot;
+        if (denied) throw new FastGatewaySnapshotError('SNAPSHOT_DENIED');
+        return first.snapshot;
+      },
+    },
+    {
+      maxEntries: 1,
+      maxPending: 1,
+      minimumValidityMs: 1000,
+      refreshAheadMs: 1500,
+      wallNow: () => clock.wall,
+      monotonicNow: () => clock.mono,
+      store: l2,
+      encryptionKey: randomBytes(32),
+    },
+  );
+  const held = await cache.resolve(first.input);
+  assert.ok(held);
+  await cache.resolve(other.input);
+  denied = true;
+  // Make the old L2 fall below handoff margin, forcing an actual source denial.
+  clock.wall += 4100;
+  clock.mono += 4100;
+  await assert.rejects(cache.resolve(first.input), errorCode('SNAPSHOT_DENIED'));
+  assert.throws(() => authorizeFastGatewaySnapshot(held, first.input, clock.wall), errorCode('SNAPSHOT_UNAVAILABLE'));
+  const before = l2.reads;
+  clock.wall += 501;
+  clock.mono += 501;
+  await assert.rejects(cache.resolve(first.input), errorCode('SNAPSHOT_DENIED'));
+  assert.equal(l2.reads, before, 'known rejection bypasses stale L2, including after negative TTL');
+  assert.equal(loads, 4);
+});
+
+test('refresh-ahead completion cannot fill a newer epoch or poison it with an old denial', async () => {
+  const { input, snapshot } = fixture();
+  const clock = clocks();
+  let loads = 0;
+  let finish: (() => void) | undefined;
+  const barrier = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  const cache = new CachedFastGatewaySnapshots(
+    {
+      async resolve() {
+        if (++loads === 2) {
+          await barrier;
+          throw new FastGatewaySnapshotError('SNAPSHOT_DENIED');
+        }
+        return { ...snapshot, observedAtMs: clock.wall, validUntilMs: clock.wall + 5000 };
+      },
+    },
+    { minimumValidityMs: 1000, refreshAheadMs: 1500, wallNow: () => clock.wall, monotonicNow: () => clock.mono },
+  );
+  const held = await cache.resolve(input);
+  assert.ok(held);
+  clock.wall += 3600;
+  clock.mono += 3600;
+  await cache.resolve(input);
+  cache.invalidate('1');
+  finish?.();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.throws(() => authorizeFastGatewaySnapshot(held, input, clock.wall), errorCode('SNAPSHOT_UNAVAILABLE'));
+  assert.ok(await cache.resolve(input));
+  assert.equal(loads, 3);
+});
+
+test('retained scope barriers are bounded without revoking unrelated live tickets', async () => {
+  const clock = clocks();
+  const cache = new CachedFastGatewaySnapshots(
+    {
+      async resolve(input) {
+        return fixture(input.authenticatedCaller.authorization.tenantId, clock.wall).snapshot;
+      },
+    },
+    { maxEntries: 1, maxPending: 1, wallNow: () => clock.wall, monotonicNow: () => clock.mono },
+  );
+  const first = fixture();
+  const held = await cache.resolve(first.input);
+  assert.ok(held);
+  await cache.resolve(fixture('tenant-b').input);
+  await assert.rejects(cache.resolve(fixture('tenant-c').input), errorCode('SNAPSHOT_BUSY'));
+  authorizeFastGatewaySnapshot(held, first.input, clock.wall);
+  clock.wall += 8001;
+  clock.mono += 8001;
+  assert.ok(await cache.resolve(fixture('tenant-c').input));
+});
+
+test('late explicit unsupported refresh fences held authority without publishing its timed-out result', async () => {
+  const { input, snapshot } = fixture();
+  const clock = clocks();
+  let loads = 0;
+  let finish: (() => void) | undefined;
+  const barrier = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  const cache = new CachedFastGatewaySnapshots(
+    {
+      async resolve() {
+        if (++loads === 1) return snapshot;
+        await barrier;
+        return null;
+      },
+    },
+    {
+      loadTimeoutMs: 100,
+      minimumValidityMs: 1000,
+      refreshAheadMs: 1500,
+      wallNow: () => clock.wall,
+      monotonicNow: () => clock.mono,
+    },
+  );
+  const held = await cache.resolve(input);
+  assert.ok(held);
+  clock.wall += 3600;
+  clock.mono += 3600;
+  await cache.resolve(input);
+  clock.wall += 200;
+  clock.mono += 200;
+  finish?.();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.throws(() => authorizeFastGatewaySnapshot(held, input, clock.wall), errorCode('SNAPSHOT_UNAVAILABLE'));
+  assert.equal(held.validUntilMs, 105000);
+});
+
+test('later fresh allow does not revive an already revoked issued object', async () => {
+  const { input, snapshot } = fixture();
+  const clock = clocks();
+  let loads = 0;
+  const cache = new CachedFastGatewaySnapshots(
+    {
+      async resolve() {
+        if (++loads === 2) throw new FastGatewaySnapshotError('SNAPSHOT_DENIED');
+        return { ...snapshot, observedAtMs: clock.wall, validUntilMs: clock.wall + 5000 };
+      },
+    },
+    { minimumValidityMs: 1000, refreshAheadMs: 1500, wallNow: () => clock.wall, monotonicNow: () => clock.mono },
+  );
+  const held = await cache.resolve(input);
+  assert.ok(held);
+  clock.wall += 3600;
+  clock.mono += 3600;
+  await cache.resolve(input);
+  await new Promise((resolve) => setImmediate(resolve));
+  clock.wall += 501;
+  clock.mono += 501;
+  const current = await cache.resolve(input);
+  assert.ok(current);
+  authorizeFastGatewaySnapshot(current, input, clock.wall);
+  assert.throws(() => authorizeFastGatewaySnapshot(held, input, clock.wall), errorCode('SNAPSHOT_UNAVAILABLE'));
+  assert.equal(held.validUntilMs, 105000);
+  assert.equal(loads, 3);
+});

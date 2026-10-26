@@ -1,3 +1,5 @@
+import { FastPinnedConnectorPool } from '../saas/gateway/fast/pinned-connector-pool.js';
+import { createPinnedProviderHttpConnector, createPinnedProviderHttpTestConnectorFactory } from '../saas/gateway/provider-http-address.js';
 import { FastGatewayExecutor, type FastGatewayExecutorPort } from '../saas/gateway/fast/executor.js';
 import { createFastGatewayJournal } from '../saas/gateway/fast/journal.js';
 import { createPostgresFastGatewaySnapshotLoader } from '../saas/gateway/fast/postgres-snapshot-loader.js';
@@ -1000,6 +1002,8 @@ export interface ManagedSaasFastGatewayOptions {
   readonly redisDrained?: boolean;
   /** Optional AES-256 deployment key enables encrypted shared L2; no plaintext credential values. */
   readonly snapshotEncryptionKey?: Uint8Array;
+  /** Opt-in isolated A/B until pooled pinned transport acceptance passes. */
+  readonly reuseConnections?: boolean;
 }
 
 export interface ManagedSaasGatewayProductionOptions {
@@ -2071,6 +2075,7 @@ function fastGatewayConfiguration(
     allocationOwner,
     allocationTrancheMinorUnits: process.env.MODEL_ROUTER_FAST_CREDIT_TRANCHE_MINOR_UNITS ?? '1000000',
     redisDrained: process.env.MODEL_ROUTER_FAST_REDIS_DRAINED === '1',
+    reuseConnections: process.env.MODEL_ROUTER_FAST_CONNECTION_REUSE === '1',
     ...(process.env.MODEL_ROUTER_FAST_SNAPSHOT_KEY_BASE64
       ? { snapshotEncryptionKey: Buffer.from(process.env.MODEL_ROUTER_FAST_SNAPSHOT_KEY_BASE64, 'base64') }
       : {}),
@@ -2671,17 +2676,24 @@ export function createManagedSaasGatewayProductionComposition(
         runtimeSnapshotSource,
         fastConfig.snapshotEncryptionKey
           ? {
+              minimumValidityMs: 1000,
+              refreshAheadMs: 1500,
               encryptionKey: fastConfig.snapshotEncryptionKey,
               namespace: fastConfig.namespace,
               store: createRedisFastGatewaySnapshotCacheStore(admission.cacheCommands),
             }
-          : {},
+          : { minimumValidityMs: 1000, refreshAheadMs: 1500 },
       );
       const journal = createFastGatewayJournal(database, {
         allocationOwner: fastConfig.allocationOwner,
         allocationTrancheMinorUnits: fastConfig.allocationTrancheMinorUnits,
       });
+      const connectorPool = fastConfig.reuseConnections ? new FastPinnedConnectorPool({
+        createConnector: options.providerHttpTestAddressCapability ? createPinnedProviderHttpTestConnectorFactory(options.providerHttpTestAddressCapability) : createPinnedProviderHttpConnector,
+        maximumEntries: Math.min(4096, Math.max(64, options.maxHttpInFlight ?? 256)),
+      }) : undefined;
       closeFastResources = async () => {
+        await connectorPool?.close();
         await journal.close();
         await admission.close();
       };
@@ -2701,6 +2713,7 @@ export function createManagedSaasGatewayProductionComposition(
         allocationOwner: fastConfig.allocationOwner,
         timeoutMs: options.timeoutMs,
         transport: {
+          ...(connectorPool ? { createConnector: connectorPool.createConnector } : {}),
           fetch: options.fetch,
           timeoutMs: options.timeoutMs,
           resolveDispatchProfile: createProviderDispatchProfileResolver(options),

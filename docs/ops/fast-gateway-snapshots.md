@@ -104,3 +104,22 @@ bounded values and safe fixed errors. Do not use the old fail-open runtime cache
 adapter. Cache encryption-key rotation requires a distinct namespace or expiry
 of old entries; invalid ciphertext fails closed rather than becoming a cache
 miss. No secret material belongs in configuration files or logs.
+
+## Refresh handoff and known rejections
+
+The managed fast runtime starts a single-flight refresh at 1.5 seconds remaining
+and stops handing out old positive snapshots at one second remaining. Refreshes
+bypass old L2 entries and never change an issued object's original deadline.
+Compilation may reload/recompile once before Redis admission, including when the
+old snapshot expired during compilation; cancellation never triggers admission
+or a replay of an acquired lease.
+
+An explicit cold-source `SNAPSHOT_DENIED` or unsupported `null` fences every
+previously issued fast object in that exact hashed scope, even after L1 eviction.
+A later fresh allow cannot revive the old objects. Retained per-scope sequences
+are bounded by `maxEntries + maxPending`, retained through the cold timeout plus
+maximum lease lifetime, and expire only after all affected leases must expire.
+New scopes fail with `SNAPSHOT_BUSY` at saturation; unrelated warm objects remain
+usable. Known-rejected scopes bypass stale L2. Explicit denials are negatively
+cached for the normal short negative TTL; null still means pre-intent strict
+fallback. Network, storage and timeout errors are not relabeled as revocation.

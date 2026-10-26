@@ -44,6 +44,28 @@ export interface FastReceiptInput {
   readonly usageDigest: string;
   readonly httpStatus: number | null;
 }
+/**
+ * Trusted transport contract: this exact tuple is legal ONLY when sendFast has
+ * never been entered. DNS, socket, timeout and every post-send failure are
+ * unknown; completed non-2xx responses retain their actual HTTP status.
+ */
+export function isFastDefinitelyUnsentReceipt(input: {
+  readonly outcome: string;
+  readonly chargeMinorUnits: string | null;
+  readonly usage: Readonly<Record<string, string | null>>;
+  readonly httpStatus: number | null;
+}): boolean {
+  return (
+    input.outcome === 'failed' &&
+    input.chargeMinorUnits === '0' &&
+    input.httpStatus === null &&
+    input.usage !== null &&
+    typeof input.usage === 'object' &&
+    !Array.isArray(input.usage) &&
+    Object.keys(input.usage).length === 0
+  );
+}
+
 export interface FastGatewayJournal {
   reserveIntent(input: FastReserveIntentInput): Promise<FastReserveResult>;
   appendReceipt(input: FastReceiptInput): Promise<void>;
@@ -52,9 +74,12 @@ export interface FastJournalOptions {
   readonly allocationOwner: string;
   /** An explicit maximum escrow tranche, not an overdraft or a request estimate. */
   readonly allocationTrancheMinorUnits: string;
+  /** Total tranche is shared by these stripes, never multiplied. Default 8. */
+  readonly allocationStripes?: number;
   readonly workerPollMs?: number;
   readonly workerBatchSize?: number;
   readonly onBackgroundError?: (code: string) => void;
+  readonly onCreditUnavailable?: (reason: 'credit_busy' | 'credit_not_ready') => void;
 }
 
 /** Canonical JSON preserves bigint exactly and rejects non-JSON authority facts. */
@@ -88,15 +113,25 @@ function one(rowCount: number | null): void {
   if (rowCount !== 1) throw new Error('FAST_JOURNAL_STATE_CONFLICT');
 }
 
-/** No ON CONFLICT: a duplicate MUST roll back the dependent credit decrement. */
+/** No ON CONFLICT: a duplicate MUST roll back the dependent credit decrement.
+ * Candidate discovery is intentionally unlocked. The guarded UPDATE locks only
+ * one allocation, avoiding lock cycles from rotated FOR UPDATE scans after EPQ.
+ * A concurrently depleted candidate may conservatively deny, never overspend.
+ */
 const RESERVE_SQL = `/* fast-journal:reserve-intent */
 WITH current_owner AS MATERIALIZED (
   SELECT owner, epoch FROM saas_fast_gateway_owners WHERE owner = $13 AND epoch = $14 FOR SHARE
+), candidate AS MATERIALIZED (
+  SELECT a.id FROM saas_fast_credit_allocations a JOIN current_owner o ON o.owner=a.owner AND o.epoch=a.epoch
+   WHERE a.tenant_id=$4 AND a.currency=$9 AND a.owner=$13 AND a.epoch=$14
+     AND a.state='active' AND a.available_minor_units >= $10::bigint
+   ORDER BY ((a.stripe::integer - $18::integer + 8) % 8)
+   LIMIT 1
 ), credit AS (
   UPDATE saas_fast_credit_allocations a
      SET available_minor_units = available_minor_units - $10::bigint
-    FROM current_owner o
-   WHERE a.tenant_id = $4 AND a.currency = $9 AND a.owner = $13 AND a.epoch = $14
+    FROM current_owner o, candidate c
+   WHERE a.id=c.id AND a.tenant_id = $4 AND a.currency = $9 AND a.owner = $13 AND a.epoch = $14
      AND a.state = 'active' AND a.available_minor_units >= $10::bigint
      AND o.owner = a.owner AND o.epoch = a.epoch
   RETURNING a.id, a.epoch
@@ -112,7 +147,8 @@ WITH current_owner AS MATERIALIZED (
          NULL::uuid, NULL::uuid, $15::timestamptz, $17::text FROM current_owner WHERE $9::text IS NULL
   RETURNING id
 )
-SELECT id FROM inserted`;
+SELECT id,false AS credit_busy FROM inserted
+UNION ALL SELECT NULL::uuid,EXISTS(SELECT 1 FROM candidate) AS credit_busy WHERE NOT EXISTS(SELECT 1 FROM inserted)`;
 
 interface AllocationRow {
   id: string;
@@ -128,6 +164,8 @@ interface AllocationRow {
 export class PostgresFastGatewayJournal implements FastGatewayJournal {
   private readonly epoch = randomUUID();
   private readonly tranche: bigint;
+  private readonly stripes: number;
+  private readonly observedMaximum = new Map<string, { maximum: bigint; nextStripe: number }>();
   private readonly ready: Promise<void>;
   private readonly pendingReplenishments = new Map<string, Promise<void>>();
   private timer?: NodeJS.Timeout;
@@ -144,6 +182,9 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
   ) {
     if (!options.allocationOwner.trim()) throw new Error('FAST_JOURNAL_INVALID_OWNER');
     this.tranche = parseMinorUnits(options.allocationTrancheMinorUnits);
+    this.stripes = options.allocationStripes ?? 8;
+    if (!Number.isSafeInteger(this.stripes) || this.stripes < 1 || this.stripes > 8)
+      throw new Error('FAST_JOURNAL_INVALID_STRIPES');
     this.ready = database
       .query(
         `INSERT INTO saas_fast_gateway_owners(owner, epoch) VALUES ($1, $2)
@@ -153,6 +194,11 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
       .then(() => undefined);
     // A failed startup cannot become an unhandled rejection before the first call.
     void this.ready.catch(() => options.onBackgroundError?.('FAST_JOURNAL_STARTUP_FAILED'));
+  }
+
+  async checkReady(): Promise<void> {
+    await this.ready;
+    if (this.closed) throw new Error('FAST_JOURNAL_CLOSED');
   }
 
   /** RAM notifications are latency hints only: persisted jobs are always polled. */
@@ -235,6 +281,7 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
       )
         throw new Error('FAST_JOURNAL_INVALID_MAXIMUM');
       if (max > this.tranche) return { kind: 'denied', reason: 'tranche_too_small' };
+      this.observeMaximum(input.tenantId, input.currency, max);
     }
     await this.ready;
     const id = randomUUID();
@@ -254,8 +301,9 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
       priceSnapshot: input.priceSnapshot,
       authoritySnapshot: input.authoritySnapshot,
     });
+    let unavailable: 'credit_busy' | 'credit_not_ready' = 'credit_not_ready';
     try {
-      const result = await this.database.query<{ id: string }>(RESERVE_SQL, [
+      const result = await this.database.query<{ id: string | null; credit_busy: boolean }>(RESERVE_SQL, [
         id,
         input.requestId,
         input.attemptId,
@@ -273,6 +321,7 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
         new Date(input.sendDeadlineMs).toISOString(),
         input.accountId,
         identity,
+        this.nextStripe(input.tenantId, input.currency),
       ]);
       if (result.rows.length === 1 && result.rows[0]?.id === id) {
         return {
@@ -286,7 +335,8 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
           },
         };
       }
-      if (result.rows.length !== 0) throw new Error('FAST_JOURNAL_UNCERTAIN_RESERVE');
+      if (result.rows.length !== 1 || result.rows[0]?.id !== null) throw new Error('FAST_JOURNAL_UNCERTAIN_RESERVE');
+      if (result.rows[0].credit_busy) unavailable = 'credit_busy';
     } catch (error) {
       // All non-unique errors, including lost commit ACK, remain uncertain. Never
       // retry a write or return a sending authority from a subsequent lookup.
@@ -297,7 +347,12 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
     const existing = await this.findExisting(input, identity);
     if (existing) return existing;
     if (input.currency !== null) this.scheduleReplenishment(input.tenantId, input.currency);
-    return { kind: 'denied', reason: 'credit_not_ready' };
+    try {
+      this.options.onCreditUnavailable?.(unavailable);
+    } catch {
+      /* telemetry cannot affect money authority */
+    }
+    return { kind: 'denied', reason: unavailable };
   }
 
   private async findExisting(input: FastReserveIntentInput, identity: string): Promise<FastReserveResult | null> {
@@ -333,6 +388,7 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
       input.usageDigest,
       receiptDigest,
       input.httpStatus,
+      input.outcome === 'succeeded' || isFastDefinitelyUnsentReceipt(input) ? 'pending' : 'blocked',
     ];
     const append = async (): Promise<void> => {
       try {
@@ -342,8 +398,11 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
              INSERT INTO saas_fast_gateway_receipts
                (intent_id, tenant_id, request_id, outcome, charge_minor_units, usage, usage_digest, receipt_digest, http_status)
              VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9) RETURNING intent_id
-           ) INSERT INTO saas_fast_billing_jobs(intent_id, state)
-             SELECT intent_id, CASE WHEN $4 = 'succeeded' THEN 'pending' ELSE 'blocked' END FROM receipt`,
+           ), queued AS (
+             INSERT INTO saas_fast_billing_jobs(intent_id, state)
+             SELECT intent_id, $10::text FROM receipt
+             ON CONFLICT(intent_id) DO NOTHING
+           ) SELECT intent_id FROM receipt`,
           values,
         );
         one(result.rowCount);
@@ -377,8 +436,32 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
       .finally(() => this.pendingReplenishments.delete(key));
   }
 
+  // Bounded process-local scheduling hints, never money authority. Eviction
+  // changes contention/fragmentation only; durable allocation CAS still decides.
+  private observeMaximum(tenantId: string, currency: string, maximum: bigint): void {
+    const key = `${tenantId}:${currency}`;
+    let entry = this.observedMaximum.get(key);
+    if (!entry) {
+      if (this.observedMaximum.size >= 1024) {
+        const oldest = this.observedMaximum.keys().next().value;
+        if (oldest !== undefined) this.observedMaximum.delete(oldest);
+      }
+      entry = { maximum, nextStripe: 0 };
+      this.observedMaximum.set(key, entry);
+    } else if (maximum > entry.maximum) entry.maximum = maximum;
+  }
+  private nextStripe(tenantId: string, currency: string | null): number {
+    if (currency === null) return 0;
+    const entry = this.observedMaximum.get(`${tenantId}:${currency}`);
+    if (!entry) return 0;
+    const stripe = entry.nextStripe;
+    entry.nextStripe = (stripe + 1) % this.stripes;
+    return stripe;
+  }
+
   /** Slow control path. The same fence used by strict billing and refunds is mandatory. */
-  async replenish(tenantId: string, currency: string): Promise<void> {
+  async replenish(tenantId: string, currency: string, minimumReserveMinorUnits = '0'): Promise<void> {
+    this.observeMaximum(tenantId, currency, parseMinorUnits(minimumReserveMinorUnits, { allowZero: true }));
     await this.ready;
     normalizeCurrency(currency);
     await this.database.transaction(async (tx) => {
@@ -409,18 +492,50 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
         [tenantId, currency, this.options.allocationOwner, this.epoch],
       );
       const wallet = facts.rows[0];
-      if (!wallet || wallet.frozen || BigInt(wallet.available) <= 0n) return;
+      if (!wallet || wallet.frozen) return;
+      // Wallet fence excludes other refills/settlers. Sorted row locks also
+      // exclude concurrent intent CAS before moving ONLY unused credit.
+      const allocations = await tx.query<AllocationRow & { stripe: number }>(
+        "SELECT * FROM saas_fast_credit_allocations WHERE tenant_id=$1 AND currency=$2 AND owner=$3 AND epoch=$4 AND state='active' ORDER BY id FOR UPDATE",
+        [tenantId, currency, this.options.allocationOwner, this.epoch],
+      );
       const needed = this.tranche - BigInt(wallet.own_backing);
-      if (needed <= 0n) return;
-      const amount = BigInt(wallet.available) < needed ? BigInt(wallet.available) : needed;
+      const free = BigInt(wallet.available);
+      const additional = needed > 0n && free > 0n ? (free < needed ? free : needed) : 0n;
+      const available = allocations.rows.reduce((sum, row) => sum + BigInt(row.available_minor_units), additional);
+      if (available === 0n) return;
+      const maximum = this.observedMaximum.get(`${tenantId}:${currency}`)?.maximum ?? 0n;
+      // Four-M headroom per stripe when affordable; near-tranche requests use
+      // one stripe. Unknown prewarm can fragment; first safe denial schedules
+      // this cost-aware rebalance without spending or retrying any intent.
+      const affordable = maximum > 0n ? available / (maximum * 4n) : BigInt(this.stripes);
+      const count = Math.max(1, Math.min(this.stripes, Number(affordable > 8n ? 8n : affordable)));
+      const byStripe = new Map(allocations.rows.map((row) => [row.stripe, row]));
+      const rows = Array.from(
+        { length: Math.max(count, ...allocations.rows.map((row) => row.stripe + 1)) },
+        (_, stripe) => {
+          const previous = byStripe.get(stripe);
+          const unresolved = previous
+            ? BigInt(previous.backing_minor_units) - BigInt(previous.available_minor_units)
+            : 0n;
+          const share =
+            stripe < count ? available / BigInt(count) + (BigInt(stripe) < available % BigInt(count) ? 1n : 0n) : 0n;
+          return {
+            id: previous?.id ?? randomUUID(),
+            stripe,
+            backing: (unresolved + share).toString(),
+            available: share.toString(),
+          };
+        },
+      );
       await tx.query(
         `INSERT INTO saas_fast_credit_allocations
-        (id,tenant_id,wallet_id,currency,owner,epoch,state,backing_minor_units,available_minor_units)
-        VALUES ($1,$2,$3,$4,$5,$6,'active',$7,$7)
-        ON CONFLICT (tenant_id,currency,owner,epoch) WHERE state='active'
-        DO UPDATE SET backing_minor_units=saas_fast_credit_allocations.backing_minor_units+$7,
-                      available_minor_units=saas_fast_credit_allocations.available_minor_units+$7`,
-        [randomUUID(), tenantId, wallet.id, currency, this.options.allocationOwner, this.epoch, amount.toString()],
+        (id,tenant_id,wallet_id,currency,owner,epoch,stripe,state,backing_minor_units,available_minor_units)
+        SELECT x.id,$1,$2,$3,$4,$5,x.stripe,'active',x.backing,x.available
+        FROM jsonb_to_recordset($6::jsonb) AS x(id uuid,stripe smallint,backing bigint,available bigint)
+        ON CONFLICT (tenant_id,currency,owner,epoch,stripe) WHERE state='active'
+        DO UPDATE SET backing_minor_units=EXCLUDED.backing_minor_units,available_minor_units=EXCLUDED.available_minor_units`,
+        [tenantId, wallet.id, currency, this.options.allocationOwner, this.epoch, fastJournalCanonicalJson(rows)],
       );
     });
   }
@@ -464,8 +579,12 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
 
   private async settleBatch(tx: SqlExecutor, intentIds: readonly string[]): Promise<void> {
     const result = await tx.query<SettlementRow>(
-      `SELECT i.*, r.charge_minor_units, r.usage, r.usage_digest, r.outcome
-       FROM saas_fast_gateway_intents i JOIN saas_fast_gateway_receipts r ON r.intent_id=i.id
+      `SELECT i.*,COALESCE(x.charge_minor_units,r.charge_minor_units) AS charge_minor_units,
+         COALESCE(x.usage,r.usage) AS usage,COALESCE(x.usage_digest,r.usage_digest) AS usage_digest,
+         CASE WHEN x.kind='non_execution' THEN 'not_executed' WHEN x.kind='verified_usage' THEN 'succeeded' ELSE r.outcome END AS outcome,
+         r.http_status,x.id AS resolution_id,x.kind AS resolution_kind
+       FROM saas_fast_gateway_intents i LEFT JOIN saas_fast_gateway_receipts r ON r.intent_id=i.id
+       LEFT JOIN saas_fast_gateway_resolutions x ON x.intent_id=i.id
        WHERE i.id=ANY($1::uuid[]) ORDER BY i.tenant_id,i.currency,i.id`,
       [intentIds],
     );
@@ -474,9 +593,17 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
     const valid: Array<{ row: SettlementRow; charge: bigint; ledgerId: string | null }> = [];
     for (const row of result.rows) {
       try {
-        const charge = calculateFastReceiptCharge(row.price_snapshot, row.usage);
+        const unsent =
+          row.resolution_kind === 'non_execution' ||
+          isFastDefinitelyUnsentReceipt({
+            outcome: row.outcome,
+            chargeMinorUnits: row.charge_minor_units,
+            usage: row.usage,
+            httpStatus: row.http_status,
+          });
+        const charge = unsent ? 0n : calculateFastReceiptCharge(row.price_snapshot, row.usage);
         if (
-          row.outcome !== 'succeeded' ||
+          (!unsent && row.outcome !== 'succeeded') ||
           row.charge_minor_units === null ||
           charge !== BigInt(row.charge_minor_units) ||
           charge > BigInt(row.max_cost_minor_units)
@@ -539,7 +666,10 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
             tenant_id: row.tenant_id,
             currency: allocation.currency,
             charge: charge.toString(),
-            usage_digest: row.usage_digest,
+            usage_ref:
+              row.resolution_id === null
+                ? `fast-receipt:${row.id}:${row.usage_digest}`
+                : `fast-resolution:${row.resolution_id}:${row.usage_digest}`,
             wallet_id: allocation.wallet_id,
             debit_id: randomUUID(),
             credit_id: randomUUID(),
@@ -621,6 +751,9 @@ interface SettlementRow {
   usage: Readonly<Record<string, string | null>>;
   usage_digest: string;
   outcome: string;
+  http_status: number | null;
+  resolution_id: string | null;
+  resolution_kind: string | null;
 }
 
 /** Frozen customer price; no current-price lookup can change a receipt's bill. */
@@ -699,7 +832,7 @@ interface LedgerBatchRow {
   readonly tenant_id: string;
   readonly currency: string;
   readonly charge: string;
-  readonly usage_digest: string;
+  readonly usage_ref: string;
   readonly wallet_id: string;
   readonly debit_id: string;
   readonly credit_id: string;
@@ -711,13 +844,13 @@ async function postLedgerBatch(tx: SqlExecutor, rows: readonly LedgerBatchRow[])
     `/* fast-journal:worker-ledger */
     WITH data AS MATERIALIZED (
       SELECT * FROM jsonb_to_recordset($1::jsonb) AS d(ledger_id uuid,intent_id uuid,tenant_id uuid,currency text,
-        charge bigint,usage_digest text,wallet_id uuid,debit_id uuid,credit_id uuid)
+        charge bigint,usage_ref text,wallet_id uuid,debit_id uuid,credit_id uuid)
     ), posting AS (
       INSERT INTO saas_ledger_transactions(id,tenant_id,currency,idempotency_namespace,business_key,source_type,
         amount_minor_units,metadata_ref,price_snapshot_ref,usage_evidence_ref)
       SELECT ledger_id,tenant_id,currency,'fast-journal-v1',intent_id::text,'billing_settlement',charge,
         'fast-intent:' || intent_id::text,'fast-price:' || intent_id::text,
-        'fast-receipt:' || intent_id::text || ':' || usage_digest FROM data RETURNING id
+        usage_ref FROM data RETURNING id
     ) INSERT INTO saas_ledger_entries(id,transaction_id,tenant_id,currency,direction,amount_minor_units,account_type,account_ref,wallet_id)
       SELECT e.id,p.id,d.tenant_id,d.currency,e.direction,d.charge,e.account_type,e.account_ref,e.wallet_id
       FROM data d JOIN posting p ON p.id=d.ledger_id CROSS JOIN LATERAL (VALUES

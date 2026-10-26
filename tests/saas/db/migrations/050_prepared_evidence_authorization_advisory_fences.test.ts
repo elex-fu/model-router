@@ -240,6 +240,8 @@ test('migration 050 is registered in append order and remains forward-only', () 
       141,
       142,
       143,
+      144,
+      145,
     ],
   );
   assert.doesNotMatch(migration.sql, /\bGRANT\s+(?:SELECT|INSERT|UPDATE|DELETE)\s+ON\b/i);

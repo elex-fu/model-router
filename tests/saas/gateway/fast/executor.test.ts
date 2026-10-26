@@ -8,6 +8,7 @@ import {
   type FastIntentInput,
   type FastReceiptInput,
 } from '../../../../src/saas/gateway/fast/executor.js';
+import { CachedFastGatewaySnapshots } from '../../../../src/saas/gateway/fast/snapshots.js';
 import type { PreparedEvidenceClientStream } from '../../../../src/saas/gateway/prepared-evidence-dispatch-service.js';
 import { fastExecutorFixture } from './executor-fixture.js';
 
@@ -277,4 +278,113 @@ test('executor send-ticket registry and credential context are runtime-private',
   const s = setup();
   for (const key of ['options', 'tickets', 'credentials', 'transport', '#tickets', '#credentials', '#transport'])
     assert.equal(Reflect.get(s.executor, key), undefined);
+});
+
+test('near-expiry pre-admission handoff reloads and recompiles before acquiring one Redis lease', async () => {
+  const s = setup();
+  let snapshots = 0,
+    compiles = 0;
+  const executor = new FastGatewayExecutor({
+    ...s.options,
+    snapshots: {
+      resolve: async () => {
+        snapshots++;
+        return { ...s.snapshot, validUntilMs: Date.now() + (snapshots === 1 ? 400 : 5000) };
+      },
+    },
+    payload: (candidate) => ({
+      compile: async (input) => {
+        compiles++;
+        return s.options.payload(candidate).compile(input);
+      },
+    }),
+  });
+  assert.equal(await executor.execute(s.input), true);
+  assert.equal(snapshots, 2);
+  assert.equal(compiles, 2);
+  assert.equal(s.calls.filter((x) => x === 'admit').length, 1);
+  assert.equal(s.intents.length, 1);
+  assert.equal(s.calls.filter((x) => x === 'fetch').length, 1);
+});
+
+test('fully expired compile result reloads before Redis but cancellation never retries or admits', async (t) => {
+  let now = Date.now();
+  t.mock.method(Date, 'now', () => now);
+  const s = setup();
+  let snapshots = 0;
+  let compiles = 0;
+  const executor = new FastGatewayExecutor({
+    ...s.options,
+    snapshots: {
+      resolve: async () => {
+        snapshots++;
+        return { ...s.snapshot, observedAtMs: now, validUntilMs: now + 5000 };
+      },
+    },
+    payload: (candidate) => ({
+      compile: async (input) => {
+        if (++compiles === 1) now += 5001;
+        return s.options.payload(candidate).compile(input);
+      },
+    }),
+  });
+  assert.equal(await executor.execute(s.input), true);
+  assert.equal(snapshots, 2);
+  assert.equal(compiles, 2);
+  assert.equal(s.calls.filter((x) => x === 'admit').length, 1);
+  assert.equal(s.intents.length, 1);
+  const aborted = setup();
+  let abortedResolutions = 0;
+  const cancelled = new FastGatewayExecutor({
+    ...aborted.options,
+    snapshots: {
+      resolve: async () => {
+        abortedResolutions++;
+        return aborted.snapshot;
+      },
+    },
+    payload: (candidate) => ({
+      compile: async (input) => {
+        aborted.controller.abort();
+        now += 5001;
+        return aborted.options.payload(candidate).compile(input);
+      },
+    }),
+  });
+  await assert.rejects(cancelled.execute(aborted.input));
+  assert.equal(abortedResolutions, 1);
+  assert.equal(aborted.intents.length, 0);
+  assert.equal(aborted.calls.includes('admit'), false);
+});
+
+test('one cancelled snapshot waiter cannot cancel a surviving executor or shared cold load', async () => {
+  const aborted = setup();
+  const surviving = setup();
+  const barrier = deferred<void>();
+  let loads = 0;
+  const snapshots = new CachedFastGatewaySnapshots(
+    {
+      resolve: async () => {
+        loads++;
+        await barrier.promise;
+        return aborted.snapshot;
+      },
+    },
+    { minimumValidityMs: 1000, refreshAheadMs: 1500 },
+  );
+  const first = new FastGatewayExecutor({ ...aborted.options, snapshots }).execute(aborted.input);
+  const firstDenied = assert.rejects(first);
+  const second = new FastGatewayExecutor({ ...surviving.options, snapshots }).execute({
+    ...surviving.input,
+    requestId: 'request-b',
+  });
+  aborted.controller.abort();
+  barrier.resolve();
+  await firstDenied;
+  assert.equal(await second, true);
+  assert.equal(loads, 1);
+  assert.equal(aborted.calls.includes('admit'), false);
+  assert.equal(aborted.intents.length, 0);
+  assert.equal(surviving.calls.filter((x) => x === 'admit').length, 1);
+  assert.equal(surviving.intents.length, 1);
 });

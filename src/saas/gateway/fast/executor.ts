@@ -225,6 +225,10 @@ export class FastGatewayExecutor implements FastGatewayExecutorPort {
   }
 
   async execute(input: FastGatewayExecuteInput): Promise<boolean> {
+    return this.#executeWithRefresh(input, 0);
+  }
+
+  async #executeWithRefresh(input: FastGatewayExecuteInput, refreshAttempts: number): Promise<boolean> {
     const unsupported = fallbackReason(input);
     if (unsupported) {
       input.selected?.('strict', unsupported);
@@ -323,6 +327,14 @@ export class FastGatewayExecutor implements FastGatewayExecutorPort {
           maxOutputTokens: maxOutput.toString(),
         }
       : null;
+    if (input.client.signal.aborted) throw new FastGatewayExecutionError(503, 'FAST_AUTHORITY_EXPIRED');
+    const remainingValidity = () => Math.min(deadline - performance.now(), snapshot.validUntilMs - Date.now());
+    if (remainingValidity() < 500) {
+      // Compilation may have queued after snapshot resolution. Reload/recompile
+      // only before Redis owns this request id; never release/reacquire a lease.
+      if (refreshAttempts === 0) return this.#executeWithRefresh(input, 1);
+      throw new FastGatewayExecutionError(503, 'FAST_AUTHORITY_EXPIRED');
+    }
     assertFresh();
     const admitted = await this.#options.admission.acquire({
       requestId: input.requestId,
@@ -366,6 +378,7 @@ export class FastGatewayExecutor implements FastGatewayExecutorPort {
     const attemptId = randomUUID();
     try {
       assertFresh();
+      if (remainingValidity() < 250) throw new FastGatewayExecutionError(503, 'FAST_AUTHORITY_EXPIRED');
       const payloadSha256 = hash(payload.payloadBytes);
       const reserved = await this.#options.journal.reserveIntent({
         requestId: input.requestId,
