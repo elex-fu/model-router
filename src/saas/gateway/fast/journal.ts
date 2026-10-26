@@ -164,6 +164,7 @@ WHERE NOT EXISTS(SELECT 1 FROM inserted)`;
 
 interface AllocationRow {
   id: string;
+  owner: string;
   tenant_id: string;
   currency: string;
   wallet_id: string;
@@ -476,9 +477,40 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
         return { kind: 'denied', reason: 'send_deadline' };
       if (input.currency === null) break;
       if (performance.now() >= recoveryDeadline) break;
+      // Preserve the original captured batch, but do not miss a matching batch
+      // that first became identifiable while the replay lookup was in flight.
+      if (!creditWorker && this.running) {
+        const progress = this.batchRestorations.get(this.running);
+        if (progress?.planned.has(`${input.tenantId}:${input.currency}`)) {
+          creditWorker = this.running;
+          creditProgress = progress;
+        }
+      }
       if (unavailable === 'credit_busy') {
         if (retriedBusy) break;
         retriedBusy = true;
+        // Spending the sole reselection before a known credit return simply
+        // races the same depleted window twice. Wait only for captured, matching
+        // work; no matching batch retains the original immediate reselection.
+        if (creditWorker && !(creditHint && creditHint.restoreGeneration !== beforeRestore)) {
+          let prepared: FastCreditWaitResult | undefined;
+          try {
+            prepared = await waitForFastCreditWork(
+              creditWorker.then(() => undefined),
+              input,
+              recoveryDeadline,
+            );
+          } catch {
+            // Failed/unknown worker COMMIT is not observed credit progress.
+          }
+          if (prepared === 'cancelled' || prepared === 'authority_expired')
+            return { kind: 'denied', reason: 'send_deadline' };
+          if (prepared === 'budget_exhausted') break;
+          // Waiting is only scheduling: a failed/zero-restore batch does not
+          // revoke the original safe reselection after this acknowledged no-write.
+          // Do not claim progress or rerun that worker; the fresh CAS must pay
+          // from whichever independently available allocation it can guard.
+        }
       } else {
         const worker = creditWorker;
         const restorations = creditProgress?.restored;
@@ -887,6 +919,7 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
     if (!valid.length) return;
     const paid = valid.filter((item) => item.row.currency !== null);
     const credits = new Map<string, CreditBatchRow>();
+    const ownCreditAllocations = new Set<string>();
     if (paid.length) {
       // Global deterministic wallet order avoids opposite-batch deadlocks. Claims
       // are disjoint and never reacquired after a wallet fence is held.
@@ -918,6 +951,7 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
           allocation.epoch !== row.allocation_epoch
         )
           throw new Error('FAST_JOURNAL_ALLOCATION_MISMATCH');
+        if (allocation.owner === this.options.allocationOwner) ownCreditAllocations.add(allocation.id);
         const maximum = BigInt(row.max_cost_minor_units);
         const credit = credits.get(allocation.id) ?? {
           id: allocation.id,
@@ -1030,7 +1064,12 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
         // Another owner/epoch or retirement cannot restore this gateway's
         // admissible credit. Even this positive restore is only a hint until
         // the enclosing transaction promise acknowledges COMMIT successfully.
-        if (credit.epoch === this.epoch && credit.state === 'active' && credit.restore > 0n)
+        if (
+          ownCreditAllocations.has(credit.id) &&
+          credit.epoch === this.epoch &&
+          credit.state === 'active' &&
+          credit.restore > 0n
+        )
           progress.restored.add(`${credit.tenant_id}:${credit.currency}`);
       }
     }
