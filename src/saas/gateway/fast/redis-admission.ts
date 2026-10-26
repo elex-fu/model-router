@@ -58,6 +58,8 @@ export interface FastAdmissionFeedback {
   readonly cooldownMs?: number;
   /** A model-specific throttle must not suppress the entire account. */
   readonly modelOnly?: boolean;
+  /** Exact input+output total, only after a durable validated successful usage receipt. */
+  readonly actualTokenUnits?: number;
 }
 export interface FastGatewayAdmission {
   acquire(input: FastAdmissionInput): Promise<FastAdmissionResult>;
@@ -88,6 +90,11 @@ end
 local wait=ARGV[3]=='drained' and 0 or tonumber(ARGV[2])
 redis.call('SET',KEYS[1],cjson.encode({runId=ARGV[1],horizon=tonumber(ARGV[2]),readyAt=now+wait}))
 return cjson.encode({ok=true,readyInMs=wait})`;
+const CHECK_READY = `${CLOCK}
+local raw=redis.call('GET',KEYS[1])
+if not raw then return cjson.encode({ok=false}) end
+local meta=cjson.decode(raw)
+return cjson.encode({ok=meta.runId==ARGV[1] and meta.horizon==tonumber(ARGV[2]) and type(meta.readyAt)=='number' and meta.readyAt<=now})`;
 const PREFIX = `${CLOCK}
 local p=cjson.decode(ARGV[1])
 local rawMeta=redis.call('GET',KEYS[1])
@@ -141,7 +148,7 @@ for i,limit in ipairs(p.limits) do
   rates[i]=rate
 end
 -- Dispatch may begin just before renewBy and then consume the full upstream TTL.
-record={token=p.token,binding=p.binding,state='active',untilMs=now+p.renew+p.ttl+p.grace,renewBy=now+p.renew}
+record={token=p.token,binding=p.binding,state='active',untilMs=now+p.renew+p.ttl+p.grace,renewBy=now+p.renew,bucket=tostring(math.floor(now/1000)),tokenUnits=p.tokenUnits}
 local encoded=cjson.encode(record)
 for i,limit in ipairs(p.limits) do
   if limit.rpm>0 or limit.tpm>0 then
@@ -183,6 +190,37 @@ return reply(record)`;
 const RELEASE = `${PREFIX}
 if not matches(record) then return cjson.encode({ok=false,reason='unavailable'}) end
 if record.state=='released' then return cjson.encode({ok=true}) end
+local writes={}; local expiries={}
+-- Only a validated, durable successful receipt can reconcile the original
+-- reservation. Old-version receipts without immutable bucket facts retain it.
+if p.feedback and p.feedback.actualTokenUnits~=nil then
+  local actual=p.feedback.actualTokenUnits
+  if p.feedback.outcome~='success' or type(actual)~='number' or actual<0 or actual>p.tokenUnits or actual~=math.floor(actual) then
+    return redis.error_reply('FAST_ADMISSION_USAGE')
+  end
+  if record.bucket and record.tokenUnits==p.tokenUnits then
+    local refund=record.tokenUnits-actual
+    for i,limit in ipairs(p.limits) do
+      if refund>0 and (limit.rpm>0 or limit.tpm>0) then
+        local key=KEYS[4+i*2]
+        local rawRate=redis.call('GET',key)
+        if rawRate then
+          local rate=cjson.decode(rawRate)
+          local counts=rate.buckets[record.bucket]
+          -- Never subtract from a newer bucket when the admission bucket expired.
+          if counts and tonumber(record.bucket)*1000+1000>now-60000 then
+            if type(counts[1])~='number' or counts[1]<1 or type(counts[2])~='number' or counts[2]<refund then
+              return redis.error_reply('FAST_ADMISSION_STATE')
+            end
+            counts[2]=counts[2]-refund
+            table.insert(writes,key); table.insert(writes,cjson.encode(rate))
+            table.insert(expiries,key)
+          end
+        end
+      end
+    end
+  end
+end
 -- Feedback is monotone: a late success cannot erase another request's cooldown.
 if p.feedback and p.feedback.outcome~='success' and p.feedback.cooldownMs>0 then
   local index=p.feedback.modelOnly and 4 or 3
@@ -195,7 +233,18 @@ for i,limit in ipairs(p.limits) do
   if limit.concurrency>0 then redis.call('ZREM',KEYS[3+i*2],p.member) end
 end
 record.state='released'
-redis.call('SET',KEYS[2],cjson.encode(record),'PX',p.retention)
+if #writes==0 then
+  redis.call('SET',KEYS[2],cjson.encode(record),'PX',p.retention)
+else
+  -- Lua errors do not roll back prior commands. Counter reconciliation and the
+  -- once-only tombstone MUST be one atomic Redis command, not successive SETs.
+  table.insert(writes,KEYS[2]); table.insert(writes,cjson.encode(record))
+  redis.call('MSET',unpack(writes))
+  -- MSET clears TTL. A later expiry failure may retain keys, but the tombstone
+  -- already prevents a retry from decrementing any token counter again.
+  for _,key in ipairs(expiries) do redis.call('PEXPIREAT',key,math.ceil(now+61000)) end
+  redis.call('PEXPIREAT',KEYS[2],math.ceil(now+p.retention))
+end
 return cjson.encode({ok=true})`;
 
 type Decision = {
@@ -278,6 +327,19 @@ export class RedisFastGatewayAdmission implements FastGatewayAdmission {
     if (!result.ok || !integer(result.readyInMs ?? -1, 0, this.horizon))
       throw new Error('Fast admission initialization unavailable');
     return { readyInMs: result.readyInMs as number };
+  }
+  /** Health lane only. Never creates, resets or repairs authority state. */
+  async checkReady(): Promise<boolean> {
+    try {
+      return decode(
+        await this.options.redis.eval(CHECK_READY, {
+          keys: [`${this.prefix}:generation`],
+          arguments: [this.options.runId, String(this.horizon)],
+        }),
+      ).ok;
+    } catch {
+      return false;
+    }
   }
   async acquire(input: FastAdmissionInput): Promise<FastAdmissionResult> {
     try {
@@ -394,7 +456,9 @@ export class RedisFastGatewayAdmission implements FastGatewayAdmission {
             feedback &&
             (!['success', 'failure', 'rate_limited'].includes(feedback.outcome) ||
               !integer(feedback.cooldownMs ?? 0, 0, 3_600_000) ||
-              (feedback.modelOnly && !input.model))
+              (feedback.modelOnly && !input.model) ||
+              (feedback.actualTokenUnits !== undefined &&
+                (feedback.outcome !== 'success' || !integer(feedback.actualTokenUnits, 0, input.tokenUnits))))
           )
             return Promise.reject(new Error('Invalid fast admission feedback'));
           released = true;

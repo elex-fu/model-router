@@ -396,6 +396,7 @@ export class FastGatewayExecutor implements FastGatewayExecutorPort {
     const lease = admitted.lease;
     let intentId: string | undefined;
     let terminalReceipt = false;
+    let actualTokenUnits: number | undefined;
     let upstreamStarted = false;
     let upstreamComplete = false;
     let responseStatus: number | undefined;
@@ -555,7 +556,7 @@ export class FastGatewayExecutor implements FastGatewayExecutorPort {
       }
       upstreamComplete = true;
       const succeeded = status >= 200 && status < 300;
-      const usage = succeeded ? normalizedUsage(response) : {};
+      const usage: Record<string, string | null> = succeeded ? normalizedUsage(response) : {};
       let charge = 0n;
       if (succeeded && price) {
         const calculated = calculateFastReceiptCharge(priceSnapshot, usage);
@@ -576,6 +577,12 @@ export class FastGatewayExecutor implements FastGatewayExecutorPort {
         }),
       );
       terminalReceipt = true;
+      // Rate windows track actual completed tokens plus conservative inflight
+      // reservations. Financial M is unchanged; no refund on missing/failed ACK.
+      if (succeeded && usage.inputTotal != null && usage.outputTotal != null) {
+        const total = BigInt(usage.inputTotal) + BigInt(usage.outputTotal);
+        if (total >= 0n && total <= maxInput + maxOutput) actualTokenUnits = Number(total);
+      }
       await gate.finish();
       return true;
     } catch (error) {
@@ -606,6 +613,7 @@ export class FastGatewayExecutor implements FastGatewayExecutorPort {
               ? undefined
               : {
                   outcome: responseStatus === 429 ? 'rate_limited' : responseStatus >= 500 ? 'failure' : 'success',
+                  ...(actualTokenUnits === undefined ? {} : { actualTokenUnits }),
                   ...(responseStatus === 429
                     ? { cooldownMs: 1000, modelOnly: true }
                     : responseStatus >= 500

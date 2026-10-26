@@ -3,6 +3,7 @@ import { fork } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { resolve } from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { test } from 'node:test';
 import { PlatformWalletLedgerService } from '../../../../src/saas/billing/service.js';
 import { createSaasDatabase } from '../../../../src/saas/db/index.js';
@@ -14,6 +15,7 @@ import {
   PostgresFastGatewayJournal,
 } from '../../../../src/saas/gateway/fast/journal.js';
 import { FastGatewayResolutionService } from '../../../../src/saas/gateway/fast/resolution.js';
+import { PaymentRefundService } from '../../../../src/saas/payments/refunds.js';
 import { anyRoleConfigured, REQUIRED_FLAG, roleUrls } from '../../metering/normal-success-postgres-fixture.js';
 import { intentFixture, priceFixture, receiptFixture } from './journal-fixture.js';
 
@@ -821,6 +823,62 @@ test('fast money journal real PostgreSQL: atomic reserve, durable completion, ex
     },
   );
   await t.test(
+    'background refill pressure is monotonic bounded while urgent cold target expansion bypasses cooldown',
+    async () => {
+      let refillReads = 0,
+        allocationWrites = 0;
+      const measured: SaasDatabase = {
+        ...gateway,
+        transaction: (work) =>
+          gateway.transaction((tx) =>
+            work({
+              query: <Row>(sql: string, values?: readonly unknown[]): Promise<SqlResult<Row>> => {
+                if (sql.includes('SELECT w.id, (w.posted_balance_minor_units')) refillReads++;
+                if (sql.startsWith('INSERT INTO saas_fast_credit_allocations')) allocationWrites++;
+                return tx.query<Row>(sql, values);
+              },
+            }),
+          ),
+      };
+      const scope = await setup('100', '100', randomUUID(), measured, 1);
+      const intent = await reserve(scope.journal, intentFixture(scope.tenantId, scope.owner));
+      refillReads = 0;
+      allocationWrites = 0;
+      const start = performance.now();
+      for (let i = 0; i < 40; i++)
+        assert.equal((await scope.journal.reserveIntent(intentFixture(scope.tenantId, scope.owner))).kind, 'denied');
+      await scope.journal.drain();
+      assert.ok(
+        refillReads <= 1 + Math.floor((performance.now() - start) / 250),
+        'at most one background refill per monotonic250ms window',
+      );
+      assert.equal(allocationWrites, 0, 'unchanged allocation projections do not emit gratuitous UPDATE/WAL');
+      await scope.journal.appendReceipt(receiptFixture(intent));
+      await scope.journal.close();
+
+      const auto = await setup('10000', 'unused', randomUUID(), gateway, 8, false, true);
+      const request = (concurrency: number) => ({
+        ...intentFixture(auto.tenantId, auto.owner),
+        allocationTargetConcurrency: concurrency,
+      });
+      const first = await auto.journal.reserveIntent(request(1)),
+        second = await auto.journal.reserveIntent(request(1));
+      assert.equal(first.kind, 'created');
+      assert.equal(second.kind, 'created');
+      assert.equal((await auto.journal.reserveIntent(request(1))).kind, 'denied');
+      const expanded = await auto.journal.reserveIntent(request(32));
+      assert.equal(expanded.kind, 'created', 'known larger trusted target forces cold preparation despite cooldown');
+      assert.equal((await facts(auto.tenantId)).backing, '5120');
+      await Promise.all(
+        [first, second, expanded].map((result) =>
+          result.kind === 'created' ? auto.journal.appendReceipt(receiptFixture(result.intent)) : Promise.resolve(),
+        ),
+      );
+      await auto.journal.close();
+      assert.equal((await facts(auto.tenantId)).balance, '9940');
+    },
+  );
+  await t.test(
     'unset cap auto-funds two trusted concurrency waves at builtin M without overriding explicit caps or legacy backing',
     async () => {
       const maximum = '524480';
@@ -934,6 +992,121 @@ test('fast money journal real PostgreSQL: atomic reserve, durable completion, ex
       await another.close();
       if (bounded.kind === 'created') await limited.journal.appendReceipt(receiptFixture(bounded.intent));
       await limited.journal.close();
+    },
+  );
+  await t.test(
+    'real control-role refunds cannot consume active or retired fast backing and pending freezes block other owners',
+    async () => {
+      const scope = await setup();
+      const actorId = randomUUID(),
+        orderId = randomUUID(),
+        providerRefundId = randomUUID();
+      await migrator.query('INSERT INTO saas_users(id,email) VALUES($1,$2)', [actorId, `${actorId}@example.test`]);
+      const funding = (
+        await migrator.query<{ id: string; source_order_ref: string }>(
+          "SELECT id,source_order_ref FROM saas_ledger_transactions WHERE tenant_id=$1 AND source_type='wallet_funding'",
+          [scope.tenantId],
+        )
+      ).rows[0];
+      await migrator.query(
+        `INSERT INTO saas_payment_orders
+      (id,tenant_id,order_type,provider_key,merchant_id,client_request_id,local_order_ref,funding_reference,
+       amount_minor_units,currency,state,provider_order_id,funding_transaction_id,paid_at,fulfilled_at)
+      VALUES($1,$2,'wallet_topup','journal-test-provider','journal-test-merchant',$3,$4,$5,100,'USD','fulfilled',$6,$7,clock_timestamp(),clock_timestamp())`,
+        [orderId, scope.tenantId, randomUUID(), randomUUID(), funding.source_order_ref, randomUUID(), funding.id],
+      );
+      let submissions = 0;
+      // Synthetic provider + authorized boundary only; every monetary statement,
+      // freeze and ledger posting uses the real restricted control-plane role.
+      const refunds = new PaymentRefundService(
+        control,
+        {
+          providerKey: 'journal-test-provider',
+          merchantId: 'journal-test-merchant',
+          submitRefund: async (input) => {
+            submissions++;
+            return { ...input, providerRefundId, status: 'pending' as const };
+          },
+          queryRefund: async (input) => ({ ...input, providerRefundId, status: 'succeeded' as const }),
+        },
+        {
+          providerKey: 'journal-test-provider',
+          merchantId: 'journal-test-merchant',
+          reconcileDelayMs: 0,
+          operations: {
+            authorize: async () => ({ authorizationRef: 'synthetic-authorized-test' }),
+            recordAudit: async () => {},
+          },
+        },
+      );
+      const request = (amountMinorUnits: string) => ({
+        actorId,
+        tenantId: scope.tenantId,
+        orderId,
+        clientRequestId: randomUUID(),
+        amountMinorUnits,
+        reasonCode: 'TEST_REFUND',
+      });
+      await assert.rejects(refunds.requestWalletTopUpRefund(request('1')), { code: 'REFUND_AMOUNT_EXCEEDS_AVAILABLE' });
+      const intent = await reserve(scope.journal, intentFixture(scope.tenantId, scope.owner));
+      await scope.journal.retireAllocations();
+      assert.equal((await facts(scope.tenantId)).backing, '80');
+      await assert.rejects(refunds.requestWalletTopUpRefund(request('21')), {
+        code: 'REFUND_AMOUNT_EXCEEDS_AVAILABLE',
+      });
+      assert.equal(submissions, 0, 'no synthetic provider call occurs before durable monetary admission');
+      const refundInput = request('20');
+      const refund = await refunds.requestWalletTopUpRefund(refundInput);
+      assert.equal(refund.status, 'pending');
+      assert.equal(submissions, 1);
+      const frozen = await gateway.query<{ amount_minor_units: string }>(
+        'SELECT amount_minor_units FROM saas_refund_wallet_freezes WHERE tenant_id=$1',
+        [scope.tenantId],
+      );
+      assert.equal(frozen.rows[0]?.amount_minor_units, '20');
+      const otherOwner = randomUUID(),
+        other = new PostgresFastGatewayJournal(gateway, {
+          allocationOwner: otherOwner,
+          allocationTrancheMinorUnits: '100',
+        });
+      const otherInput = intentFixture(scope.tenantId, otherOwner, priceFixture('40'));
+      assert.equal((await other.reserveIntent(otherInput)).kind, 'denied');
+      assert.equal((await facts(scope.tenantId)).backing, '80', 'refill cannot allocate frozen refund money');
+      await scope.journal.appendReceipt(receiptFixture(intent));
+      await scope.journal.runOnce();
+      assert.equal((await facts(scope.tenantId)).balance, '80');
+      await other.replenish(scope.tenantId, 'USD', '40');
+      assert.equal((await facts(scope.tenantId)).backing, '60', 'only wallet minus pendingrefundfreeze is refillable');
+      const second = await reserve(other, otherInput);
+      await other.appendReceipt(receiptFixture(second, '10'));
+      await other.runOnce();
+      assert.equal((await facts(scope.tenantId)).balance, '70');
+      const batch = await refunds.processPendingRefunds();
+      assert.equal(batch.succeeded, 1);
+      assert.equal((await refunds.requestWalletTopUpRefund(refundInput)).status, 'succeeded');
+      assert.equal(submissions, 1, 'refund replay cannot resubmit or debit twice');
+      await scope.journal.close();
+      await other.close();
+      assert.equal((await facts(scope.tenantId)).balance, '50');
+      assert.equal((await facts(scope.tenantId)).backing, '0');
+      assert.equal(
+        (
+          await gateway.query<{ count: string }>(
+            'SELECT count(*)::text AS count FROM saas_refund_wallet_freezes WHERE tenant_id=$1',
+            [scope.tenantId],
+          )
+        ).rows[0]?.count,
+        '0',
+      );
+      assert.equal(
+        (
+          await migrator.query<{ count: string }>(
+            "SELECT count(*)::text AS count FROM saas_ledger_transactions WHERE tenant_id=$1 AND source_type='wallet_refund'",
+            [scope.tenantId],
+          )
+        ).rows[0]?.count,
+        '1',
+      );
     },
   );
   await t.test(

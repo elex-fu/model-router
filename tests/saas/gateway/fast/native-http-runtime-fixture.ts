@@ -1,6 +1,7 @@
-// Test-only local TLS target and deterministic conservative estimator; all fast ports
+// Test-only local TLS target, with real built-in estimator or explicitly named fixed control; all fast ports
 // are created by the real CLI composition. Authority callbacks retain real SQL reads.
 import { fetch as undiciFetch } from 'undici';
+import { createBuiltinUsageUpperBoundEstimator } from '../../../../src/saas/runtime/builtin-usage-bounds.js';
 import type {
   ManagedSaasGatewayRuntimeDependencies,
   ManagedSaasGatewayRuntimeModuleHandle,
@@ -18,6 +19,7 @@ export interface NativeFastHttpRoute {
   accountIds: string[];
 }
 export interface NativeFastHttpConfig {
+  estimator: 'builtin' | 'fixed-4096';
   privateKeyFile: string;
   publicKeyFile: string;
   mockPort: number;
@@ -92,20 +94,23 @@ export async function createManagedSaasGatewayRuntime(
         };
       },
       providerPayload: {
-        estimator: {
-          version: 'r9-local-mock-upper-bound/v1',
-          estimate: () => ({
-            inputTotalUpperBound: 4096,
-            inputUncachedUpperBound: 4096,
-            cacheReadUpperBound: 0,
-            cacheWriteUpperBound: 0,
-            cacheWrite5mUpperBound: 0,
-            cacheWrite1hUpperBound: 0,
-            outputTotalUpperBound: 4096,
-            reasoningOutputUpperBound: 0,
-            feasibleInputBuckets: ['input'],
-          }),
-        },
+        estimator:
+          config.estimator === 'builtin'
+            ? createBuiltinUsageUpperBoundEstimator({ maxInputTokens: 262144, maxOutputTokens: 131072 })
+            : {
+                version: 'r9-local-mock-upper-bound/v1',
+                estimate: () => ({
+                  inputTotalUpperBound: 4096,
+                  inputUncachedUpperBound: 4096,
+                  cacheReadUpperBound: 0,
+                  cacheWriteUpperBound: 0,
+                  cacheWrite5mUpperBound: 0,
+                  cacheWrite1hUpperBound: 0,
+                  outputTotalUpperBound: 4096,
+                  reasoningOutputUpperBound: 0,
+                  feasibleInputBuckets: ['input'],
+                }),
+              },
         modelCompatibility: async (input) => {
           const result = await options.database.query<{
             support_level: string;

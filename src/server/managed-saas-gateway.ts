@@ -3,6 +3,7 @@ import { createPinnedProviderHttpConnector, createPinnedProviderHttpTestConnecto
 import { FastGatewayExecutor, type FastGatewayExecutorPort } from '../saas/gateway/fast/executor.js';
 import { createFastGatewayJournal } from '../saas/gateway/fast/journal.js';
 import { createPostgresFastGatewaySnapshotLoader } from '../saas/gateway/fast/postgres-snapshot-loader.js';
+import { createFastGatewayReadiness } from '../saas/gateway/fast/readiness.js';
 import { openRedisFastGatewayAdmission } from '../saas/gateway/fast/redis-admission.js';
 import { createRedisFastGatewaySnapshotCacheStore } from '../saas/gateway/fast/redis-snapshot-store.js';
 import {
@@ -2668,7 +2669,9 @@ export function createManagedSaasGatewayProductionComposition(
   let fastClose: (() => Promise<void>) | undefined;
   let closeFastResources: (() => Promise<void>) | undefined;
   let fastGateway: FastGatewayExecutorPort | undefined;
+  let fastReadiness: (() => Promise<boolean>) | undefined;
   if (fastConfig) {
+    fastReadiness = async () => false;
     if (fastConfig.mode !== 'reserved-max') throw new ManagedSaasGatewayCompositionError('INVALID_CONFIGURATION');
     const snapshotSource = createPostgresFastGatewaySnapshotLoader({
       database,
@@ -2718,11 +2721,14 @@ export function createManagedSaasGatewayProductionComposition(
           : { allocationTrancheMinorUnits: fastConfig.allocationTrancheMinorUnits }),
         ...(fastConfig.allocationStripes === undefined ? {} : { allocationStripes: fastConfig.allocationStripes }),
       });
+      fastReadiness = createFastGatewayReadiness({ admission, journal, snapshots });
       const connectorPool = fastConfig.reuseConnections ? new FastPinnedConnectorPool({
         createConnector: options.providerHttpTestAddressCapability ? createPinnedProviderHttpTestConnectorFactory(options.providerHttpTestAddressCapability) : createPinnedProviderHttpConnector,
         maximumEntries: Math.min(4096, Math.max(64, options.maxHttpInFlight ?? 256)),
       }) : undefined;
       closeFastResources = async () => {
+        snapshots.markUnavailable();
+        fastReadiness = async () => false;
         await connectorPool?.close();
         await journal.close();
         await admission.close();
@@ -2911,6 +2917,7 @@ export function createManagedSaasGatewayProductionComposition(
           migrationHead,
           dependencies: {
             'provider-credential-kms': kmsReady,
+            ...(fastReadiness ? { 'fast-data-plane': (await fastReadiness()) ? 'ok' as const : 'error' as const } : {}),
             ...(capabilityFactsReady ? { 'provider-capability-facts': capabilityFactsReady } : {}),
           },
           ...(providerCapabilities ? { providerCapabilities } : {}),

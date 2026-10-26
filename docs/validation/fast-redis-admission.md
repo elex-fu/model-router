@@ -24,8 +24,15 @@ as a capacity check. `assertValid` is a conservative monotonic local fence and a
 no Redis command; elapsed command latency is subtracted from its validity.
 `renew` performs one EVAL. `release(feedback?)` performs one EVAL and can atomically
 apply a monotone account/model cooldown. A late success does not erase another
-request's failure, and success never writes PostgreSQL health state. Rates are
-not refunded on release: an admitted attempt remains counted even if cancelled.
+request's failure, and success never writes PostgreSQL health state. RPM is never
+refunded: an admitted attempt remains counted even if cancelled. After a durable
+validated successful usage receipt, `actualTokenUnits` reconciles only unused TPM
+reservation in that lease's original request-start bucket. Missing/failed receipts
+retain the bound; a missing old bucket never subtracts from a newer window. Rate
+JSON plus the released tombstone use one atomic same-slot MSET, with PEXPIREAT
+restoring TTL afterward. Both commands need Redis ACL permission. A post-MSET TTL
+failure can retain state longer but cannot refund twice on retry. No additional
+roundtrip or PostgreSQL query is introduced.
 
 The gateway must:
 

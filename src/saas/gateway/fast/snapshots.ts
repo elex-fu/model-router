@@ -509,6 +509,10 @@ export class CachedFastGatewaySnapshots implements FastGatewaySnapshotProvider {
     this.unavailable = true;
     this.entries.clear();
   }
+  /** Health lane observation only; a successful probe cannot recover this latch. */
+  isAvailable(): boolean {
+    return !this.unavailable;
+  }
   /** Recovery requires an externally verified durable epoch; never self-recover from a GET. */
   recover(changeEpoch: bigint | string): void {
     let recovered: bigint;

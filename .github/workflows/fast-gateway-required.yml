@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   fast-gateway-required:
-    name: Native fast gateway required (PG ${{ matrix.postgres-version }}, Redis)
+    name: Native fast gateway required (PG ${{ matrix.postgres-version }}, Redis, ${{ matrix.native-scenario }})
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     container:
@@ -20,6 +20,7 @@ jobs:
       fail-fast: false
       matrix:
         postgres-version: ["15", "18"]
+        native-scenario: ["builtin-default", "fixed4096-control", "builtin-explicit1m-pressure"]
     # This job owns a fresh database and Redis service. Never consume or preseed
     # the historical shared commercial-HTTP fixture from the other workflow.
     services:
@@ -94,10 +95,11 @@ jobs:
           MODEL_ROUTER_FAST_ADMISSION_REDIS_TEST: "1"
           MODEL_ROUTER_TEST_REDIS_BIN: /usr/bin/redis-server
         run: node --import tsx --test tests/saas/gateway/fast/redis-admission.local.integration.test.ts
-      - name: Run required cold native paid JSON and SSE financial drain gate
+      - name: Run required native estimator and credit scenario with paid JSON and SSE
         env:
           NODE_ENV: test
           MODEL_ROUTER_NATIVE_FAST_HTTP_REQUIRED: "1"
+          MODEL_ROUTER_NATIVE_FAST_HTTP_SCENARIO: ${{ matrix.native-scenario }}
           MODEL_ROUTER_NATIVE_FAST_HTTP_REDIS_URL: redis://redis:6379
           MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED: "1"
           MODEL_ROUTER_SAAS_GATEWAY_E2E_MIGRATOR_URL: postgresql://model_router_saas_migrator@postgres:5432/model_router_saas_ci

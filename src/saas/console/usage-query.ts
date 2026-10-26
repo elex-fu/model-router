@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { SqlExecutor } from '../db/types.js';
 import type { GatewayProtocol, SupplyMode } from '../gateway/contracts.js';
+import { consoleUsageSourceCtes } from './usage-read-source.js';
 
 const DEFAULT_PAGE_SIZE = 50;
 const MAX_PAGE_SIZE = 100;
@@ -310,6 +311,13 @@ function storageDate(value: unknown): string {
   return new Date(Date.parse(value)).toISOString();
 }
 
+// Display dates remain milliseconds for compatibility, but the keyset cursor
+// must retain PostgreSQL microseconds or same-millisecond rows can be skipped.
+function cursorDate(value: unknown): string {
+  const normalized = inputDate(value);
+  return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/.test(value) ? value : normalized;
+}
+
 function enumInput<T extends string>(value: unknown, allowed: ReadonlySet<T>): T {
   if (typeof value !== 'string' || !allowed.has(value as T)) invalid();
   return value as T;
@@ -418,7 +426,7 @@ function normalizeRequestCursor(value: unknown, filterHash: string): RequestCurs
   if (candidate.kind !== 'requests' || candidate.version !== 1 || candidate.filterHash !== filterHash) {
     invalid();
   }
-  const createdAt = inputDate(candidate.createdAt);
+  const createdAt = cursorDate(candidate.createdAt);
   const id = inputText(candidate.id);
   return { kind: 'requests', version: 1, filterHash, createdAt, id };
 }
@@ -567,6 +575,8 @@ function addRequestFilters(
 function requestProjection(alias: string): string {
   return `
     ${alias}.id AS id,
+    ${alias}.source_conflict AS source_conflict,
+    to_char(${alias}.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_created_at,
     ${alias}.project_id AS project_id,
     ${alias}.public_model AS model,
     ${alias}.protocol AS protocol,
@@ -625,6 +635,7 @@ function protocol(value: unknown): ConsoleProtocol {
 }
 
 function mapRequest(row: Row): ConsoleRequest {
+  if (row.source_conflict === true) storage();
   const supplyMode = enumStorage(row.supply_mode, SUPPLY_MODES);
   const status = enumStorage(row.status, REQUEST_STATUSES);
   const financialStatus = enumStorage(row.financial_status, FINANCIAL_STATUSES);
@@ -698,6 +709,7 @@ function mapUsageEvent(row: Row): ConsoleUsageEvent {
 }
 
 function mapSummary(row: Row, range: NormalizedRange): ConsoleUsageSummary {
+  if (row.source_conflict === true) storage();
   return {
     from: range.from,
     to: range.to,
@@ -729,6 +741,7 @@ function mapSummaryBucket(row: Row, range: NormalizedRange): ConsoleUsageSummary
 
 function summaryProjection(): string {
   return `
+    COALESCE(bool_or(r.source_conflict), false) AS source_conflict,
     COUNT(DISTINCT e.request_id)::text AS request_count,
     COUNT(e.id)::text AS event_count,
     COALESCE(SUM(COALESCE(e.input_total, 0)), 0)::text AS input_total,
@@ -803,8 +816,9 @@ export class SaasConsoleUsageQueryService {
       predicates.push(`(r.created_at, r.id) < (${createdAtParam}, ${idParam})`);
     }
     const limitParam = params.add(normalized.limit + 1);
-    const sql = `SELECT ${requestProjection('r')}
-      FROM saas_requests AS r
+    const sql = `WITH ${consoleUsageSourceCtes()}
+      SELECT ${requestProjection('r')}
+      FROM console_requests AS r
       WHERE ${predicates.join('\n        AND ')}
       ORDER BY r.created_at DESC, r.id DESC
       LIMIT ${limitParam}`;
@@ -818,7 +832,7 @@ export class SaasConsoleUsageQueryService {
             kind: 'requests',
             version: 1,
             filterHash: hashFilters('requests', normalized),
-            createdAt: last.createdAt,
+            createdAt: cursorDate(resultRows[normalized.limit - 1]?.cursor_created_at ?? last.createdAt),
             id: last.id,
           })
         : null;
@@ -862,7 +876,7 @@ export class SaasConsoleUsageQueryService {
     const baseParams = new ParameterBuilder([normalized.userId, normalized.tenantId, normalized.requestId]);
     const basePredicates = [
       `r.tenant_id = $2`,
-      `r.id = $3`,
+      `(r.id = $3 OR r.intent_id = $3)`,
       tenantMembershipPredicate('r'),
       projectMembershipPredicate('r'),
     ];
@@ -871,18 +885,24 @@ export class SaasConsoleUsageQueryService {
       basePredicates.push(`r.project_id = ${projectParam}`);
     }
     const baseRows = await this.rows(
-      `SELECT ${requestProjection('r')}
-       FROM saas_requests AS r
+      `WITH ${consoleUsageSourceCtes()}
+       SELECT ${requestProjection('r')}, r.intent_id
+       FROM console_requests AS r
        WHERE ${basePredicates.join('\n         AND ')}
-       LIMIT 1`,
+       LIMIT 2`,
       baseParams.values,
     );
+    // A request-id/intent-id collision must not silently select another request.
+    if (baseRows.length > 1) storage();
     const baseRow = baseRows[0];
     if (!baseRow) return null;
 
-    const childParams = [normalized.userId, normalized.tenantId, normalized.requestId];
-    const attempts = await this.rows(
-      `SELECT ${attemptProjection()}
+    const childParams = [normalized.userId, normalized.tenantId, storageText(baseRow.id)];
+    // The compact journal has no attempt timeline; do not fabricate one.
+    const attempts = baseRow.intent_id
+      ? []
+      : await this.rows(
+          `SELECT ${attemptProjection()}
        FROM saas_attempts AS a
        JOIN saas_requests AS r
          ON r.tenant_id = a.tenant_id
@@ -892,12 +912,13 @@ export class SaasConsoleUsageQueryService {
          AND ${tenantMembershipPredicate('r')}
          AND ${projectMembershipPredicate('r')}
        ORDER BY a.ordinal ASC`,
-      childParams,
-    );
+          childParams,
+        );
     const usageEvents = await this.rows(
-      `SELECT ${usageProjection()}
-       FROM saas_usage_events AS e
-       JOIN saas_requests AS r
+      `WITH ${consoleUsageSourceCtes(true)}
+       SELECT ${usageProjection()}
+       FROM console_usage_events AS e
+       JOIN console_requests AS r
          ON r.tenant_id = e.tenant_id
         AND r.id = e.request_id
        WHERE e.tenant_id = $2
@@ -946,12 +967,12 @@ export class SaasConsoleUsageQueryService {
       `e.created_at >= ${eventFromParam}`,
       `e.created_at < ${eventToParam}`,
     ];
-    const sql = `${authorizedScopeCte(projectParam)}
+    const sql = `${authorizedScopeCte(projectParam)}, ${consoleUsageSourceCtes(true)}
       SELECT ${summaryProjection()}
       FROM authorized_scope AS auth
-      LEFT JOIN saas_requests AS r
+      LEFT JOIN console_requests AS r
         ON ${predicates.join('\n       AND ')}
-      LEFT JOIN saas_usage_events AS e
+      LEFT JOIN console_usage_events AS e
         ON ${eventPredicates.join('\n       AND ')}
       GROUP BY auth.user_id`;
     const rows = await this.rows(sql, params.values);
@@ -994,12 +1015,12 @@ export class SaasConsoleUsageQueryService {
       );
     }
     const limitParam = params.add(normalized.limit + 1);
-    const sql = `${authorizedScopeCte(projectParam)}
+    const sql = `${authorizedScopeCte(projectParam)}, ${consoleUsageSourceCtes(true)}
       SELECT ${summaryBucketProjection()}
       FROM authorized_scope AS auth
-      JOIN saas_requests AS r
+      JOIN console_requests AS r
         ON r.tenant_id = $2
-      JOIN saas_usage_events AS e
+      JOIN console_usage_events AS e
         ON e.tenant_id = r.tenant_id
        AND e.request_id = r.id
       WHERE ${predicates.join('\n        AND ')}

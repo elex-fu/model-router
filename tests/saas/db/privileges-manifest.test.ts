@@ -130,3 +130,21 @@ test('manifest gateway auxiliary facts match the runtime-privileges constants', 
   );
   assert.equal(sequence[1], MANIFEST_GATEWAY_AUXILIARY.usageSequence);
 });
+
+
+test('fast console compatibility adds only bounded control-plane reads, never journal mutation authority', () => {
+  for (const view of [MANIFEST_CONTROL_PLANE_COLUMN_GROUPS, MANIFEST_CONTROL_PLANE_COLUMN_SQL_ROWS]) {
+    for (const table of ['saas_fast_gateway_intents', 'saas_fast_gateway_receipts']) {
+      const groups = view.filter((group) => group.table === table);
+      assert.deepEqual(groups.map((group) => group.privilege), ['SELECT']);
+      assert.equal(groups[0]?.columns.includes('account_id'), false);
+      assert.equal(groups[0]?.columns.includes('payload_sha256'), false);
+      assert.equal(groups[0]?.columns.includes('request_fingerprint'), false);
+    }
+    const jobs = view.filter((group) => group.table === 'saas_fast_billing_jobs');
+    assert.deepEqual(jobs.find((group) => group.privilege === 'INSERT')?.columns, ['intent_id', 'state']);
+    assert.deepEqual(jobs.find((group) => group.privilege === 'UPDATE')?.columns, ['state']);
+    assert.ok(jobs.find((group) => group.privilege === 'SELECT')?.columns.includes('ledger_transaction_id'));
+    assert.ok(jobs.find((group) => group.privilege === 'SELECT')?.columns.includes('completed_at'));
+  }
+});

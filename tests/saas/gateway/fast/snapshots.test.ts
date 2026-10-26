@@ -551,10 +551,14 @@ test('known Redis failure closes warm cache until explicitly recovered at verifi
     { store: l2, encryptionKey: randomBytes(32), wallNow: () => 100_000 },
   );
   await cache.resolve(input);
+  assert.equal(cache.isAvailable(), true);
   cache.markUnavailable();
+  assert.equal(cache.isAvailable(), false);
   await assert.rejects(cache.resolve(input), errorCode('SNAPSHOT_UNAVAILABLE'));
   assert.equal(loads, 1);
+  assert.equal(cache.isAvailable(), false);
   cache.recover('1');
+  assert.equal(cache.isAvailable(), true);
   await cache.resolve(input);
   assert.equal(loads, 2);
   const failing = new CachedFastGatewaySnapshots(

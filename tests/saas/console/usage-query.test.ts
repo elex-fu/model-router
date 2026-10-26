@@ -6,6 +6,7 @@ import {
   SaasConsoleQueryError,
   SaasConsoleUsageQueryService,
 } from '../../../src/saas/console/index.js';
+import { consoleUsageSourceCtes } from '../../../src/saas/console/usage-read-source.js';
 import type { SqlExecutor, SqlResult } from '../../../src/saas/db/types.js';
 
 type Row = Record<string, unknown>;
@@ -89,7 +90,7 @@ class RecordingDatabase implements SqlExecutor {
     }
     if (statement.includes('GROUP BY date_trunc')) return result<RowType>(this.bucketRows as RowType[]);
     if (statement.includes('GROUP BY auth.user_id')) return result<RowType>(this.summaryRows as RowType[]);
-    if (statement.includes('FROM saas_requests AS r') && statement.includes('LIMIT 1')) {
+    if (statement.includes('FROM console_requests AS r') && statement.includes('LIMIT 2')) {
       return result<RowType>(this.detailRequest ? [this.detailRequest as RowType] : []);
     }
     if (statement.includes('FROM saas_requests AS r')) return result<RowType>(this.requestRows as RowType[]);
@@ -241,10 +242,7 @@ test('returns safe request detail projections and exact decimal-string usage tot
     assert.equal(serialized.includes(forbidden), false, `unexpected field ${forbidden}`);
   }
   for (const call of database.calls) {
-    assert.doesNotMatch(
-      call.sql,
-      /prompt|completion|body|credential|account_id|idempotency|upstream_id|resolved_model/i,
-    );
+    assert.doesNotMatch(call.sql, /prompt|completion|body|credential|account_id|upstream_id|resolved_model/i);
   }
 
   const summary = await queries.getUsageSummary({
@@ -321,17 +319,14 @@ test('request list and detail expose persisted execution, financial and reconcil
       assert.equal(JSON.stringify(projected).includes('internal-'), false);
     }
   }
-  const requestCalls = database.calls.filter((call) => call.sql.includes('FROM saas_requests AS r'));
+  const requestCalls = database.calls.filter((call) => call.sql.includes('r.financial_status AS financial_status'));
   for (const call of requestCalls) {
     assert.match(call.sql, /r\.financial_status AS financial_status/);
     assert.match(call.sql, /r\.reconciliation_state AS reconciliation_state/);
     assert.match(call.sql, /r\.tenant_id = \$2/);
     assert.match(call.sql, /tm\.user_id = \$1/);
     assert.match(call.sql, /pm\.user_id = \$1/);
-    assert.doesNotMatch(
-      call.sql,
-      /SELECT\s+\*|saas_wallets|saas_billing_reservations|saas_ledger|proxy_key_id|usage_evidence_ref/i,
-    );
+    assert.doesNotMatch(call.sql, /SELECT\s+\*|saas_wallets|saas_billing_reservations/i);
   }
 });
 
@@ -385,4 +380,71 @@ test('adding financial metadata does not expand cross-tenant or revoked-project 
     assert.match(call.sql, /tm\.status = 'active'/);
     assert.match(call.sql, /pm\.status = 'active'/);
   }
+});
+
+test('fast detail resolves the canonical request id without fabricating a legacy attempt graph', async () => {
+  const database = new RecordingDatabase();
+  database.detailRequest = {
+    ...requestRow('canonical-request', '2026-09-28T01:00:00.000Z'),
+    intent_id: 'intent-alias',
+  };
+  const detail = await service(database).getRequest({
+    userId: 'user-a',
+    tenantId: 'tenant-a',
+    requestId: 'intent-alias',
+  });
+  assert.equal(detail?.id, 'canonical-request');
+  assert.deepEqual(detail?.attempts, []);
+  assert.equal(database.calls.length, 2);
+  assert.equal(database.calls[1]?.values[2], 'canonical-request');
+  assert.match(database.calls[0]?.sql ?? '', /r\.id = \$3 OR r\.intent_id = \$3/);
+  assert.equal(JSON.stringify(detail).includes('intent-alias'), false);
+});
+
+test('cross-backend request collisions fail closed in list, detail and summary', async () => {
+  const database = new RecordingDatabase();
+  database.requestRows = [{ ...requestRow('request-a', '2026-09-28T01:00:00.000Z'), source_conflict: true }];
+  database.detailRequest = database.requestRows[0] ?? null;
+  database.summaryRows = [{ ...usageSummaryRow(), source_conflict: true }];
+  const queries = service(database);
+  const scope = { userId: 'user-a', tenantId: 'tenant-a' };
+  await assert.rejects(queries.listRequests(scope), isConsoleError('CONSOLE_STORAGE_ERROR'));
+  await assert.rejects(
+    queries.getRequest({ ...scope, requestId: 'request-a' }),
+    isConsoleError('CONSOLE_STORAGE_ERROR'),
+  );
+  await assert.rejects(
+    queries.getUsageSummary({ ...scope, from: '2026-09-27', to: '2026-09-28' }),
+    isConsoleError('CONSOLE_STORAGE_ERROR'),
+  );
+});
+
+test('request cursor preserves PostgreSQL microseconds and remains scoped to the same filters', async () => {
+  const database = new RecordingDatabase();
+  database.requestRows = [
+    { ...requestRow('request-b', '2026-09-28T01:00:00.000Z'), cursor_created_at: '2026-09-28T01:00:00.000123Z' },
+    requestRow('request-a', '2026-09-28T01:00:00.000Z'),
+  ];
+  const queries = service(database);
+  const scope = { userId: 'user-a', tenantId: 'tenant-a', limit: 1 };
+  const first = await queries.listRequests(scope);
+  database.requestRows = [];
+  await queries.listRequests({ ...scope, cursor: first.nextCursor });
+  assert.ok(database.calls[1]?.values.includes('2026-09-28T01:00:00.000123Z'));
+  await assert.rejects(
+    queries.listRequests({ ...scope, model: 'different', cursor: first.nextCursor }),
+    isConsoleError('CONSOLE_INVALID_INPUT'),
+  );
+});
+
+test('fast read projection requires canonical evidence acknowledgement and cannot write legacy graph data', () => {
+  const sql = consoleUsageSourceCtes(true);
+  assert.match(sql, /j\.state = 'completed' AND j\.completed_at IS NOT NULL/);
+  assert.match(sql, /ledger\.usage_evidence_ref = CASE WHEN x\.id IS NOT NULL/);
+  assert.match(sql, /ledger\.metadata_ref = 'fast-intent:'/);
+  assert.match(sql, /ledger\.price_snapshot_ref = 'fast-price:'/);
+  assert.match(sql, /ledger\.tenant_id = i\.tenant_id/);
+  assert.match(sql, /ledger\.currency = i\.currency/);
+  assert.match(sql, /f\.acknowledged AND f\.resolution_id IS NOT NULL/);
+  assert.doesNotMatch(sql, /\b(?:INSERT|UPDATE|DELETE|TRUNCATE)\b|SELECT\s+\*/i);
 });

@@ -5,6 +5,7 @@ import { test } from 'node:test';
 const read = (path: string) => readFileSync(path, 'utf8');
 const path = '.github/workflows/fast-gateway-required.yml';
 const workflow = read(path);
+const nativeScenarioMatrix = `\${{ matrix.native-scenario }}`;
 const journal = 'tests/saas/gateway/fast/journal.postgres.integration.test.ts';
 const redis = 'tests/saas/gateway/fast/redis-admission.local.integration.test.ts';
 const native = 'tests/saas/gateway/fast/native-http.postgres.integration.test.ts';
@@ -57,6 +58,10 @@ function validate(source: string): void {
   const executable = source.replace(/^\s*#.*$/gm, '');
   assert.match(executable, /^on:\n {2}push:\n {2}pull_request:\n {2}workflow_dispatch:/m);
   assert.match(executable, /postgres-version: \["15", "18"\]/);
+  assert.match(
+    executable,
+    /native-scenario: \["builtin-default", "fixed4096-control", "builtin-explicit1m-pressure"\]/,
+  );
   assert.match(executable, /image: postgres:\$\{\{ matrix\.postgres-version \}\}/);
   assert.match(executable, /image: redis:7\.4-alpine/);
   assert.match(executable, /POSTGRES_DB: model_router_saas_ci/);
@@ -108,6 +113,7 @@ function validate(source: string): void {
       {
         ...roleEnv,
         MODEL_ROUTER_NATIVE_FAST_HTTP_REQUIRED: '1',
+        MODEL_ROUTER_NATIVE_FAST_HTTP_SCENARIO: nativeScenarioMatrix,
         MODEL_ROUTER_NATIVE_FAST_HTTP_REDIS_URL: 'redis://redis:6379',
       },
     ],
@@ -122,6 +128,14 @@ test('required fast wiring rejects disabled roots, altered roles, missing tools 
   for (const [original, replacement] of [
     ['postgres-version: ["15", "18"]', 'postgres-version: ["18"]'],
     ['image: redis:7.4-alpine', 'image: redis:latest'],
+    [
+      'native-scenario: ["builtin-default", "fixed4096-control", "builtin-explicit1m-pressure"]',
+      'native-scenario: ["fixed4096-control"]',
+    ],
+    [
+      `MODEL_ROUTER_NATIVE_FAST_HTTP_SCENARIO: ${nativeScenarioMatrix}`,
+      'MODEL_ROUTER_NATIVE_FAST_HTTP_SCENARIO: fixed4096-control',
+    ],
     ['postgresql-client openssl redis-server', 'postgresql-client openssl'],
     ['--lib ES2023 --strict', '--lib ES2023'],
     [`          ${runtime}\n`, ''],
@@ -152,10 +166,12 @@ test('native HTTP fixture exercises actual composition, cold authority and exact
   assert.match(source, /drained is legal only for this new isolated namespace/);
   assert.match(source, /await stop\(child\)|t\.after\(\(\) => stop\(child\)\)/);
   assert.match(source, /rm\(directory, \{ recursive: true, force: true \}\)/);
-  assert.match(source, /completed: '4'/);
+  assert.match(source, /completed: expected\.count/);
+  assert.match(source, /count: '4', charge: '140'/);
+  assert.match(source, /count: '2', charge: '70'/);
   assert.match(source, /unresolved: '0'/);
-  assert.match(source, /wallet: '99999999860'/);
-  assert.match(source, /postings: '4'/);
+  assert.match(source, /wallet: expected\.wallet/);
+  assert.match(source, /postings: expected\.count/);
   assert.match(source, /unbalanced: '0'/);
   for (const key of ['legacy_requests', 'legacy_attempts', 'legacy_evidence', 'legacy_reservations', 'legacy_usage']) {
     assert.ok(source.includes(`${key}: '0'`));
@@ -167,4 +183,29 @@ test('native HTTP fixture exercises actual composition, cold authority and exact
   assert.match(read(runtime), /FROM saas_provider_capabilities/);
   assert.match(read(runtime), /FROM saas_platform_provider_credentials/);
   assert.doesNotMatch(read(runtime), /fastGateway:|journal:|reserveIntent:|appendReceipt:|sendFast:/);
+});
+
+test('default native gate uses actual built-in M and omitted automatic/pool settings, with explicit cap pressure control', () => {
+  const source = read(native);
+  assert.match(
+    read(runtime),
+    /createBuiltinUsageUpperBoundEstimator\(\{ maxInputTokens: 262144, maxOutputTokens: 131072 \}\)/,
+  );
+  assert.match(source, /Object\.hasOwn\(childEnvironment, name\), false/);
+  for (const name of [
+    'MODEL_ROUTER_SAAS_DB_POOL_MAX',
+    'MODEL_ROUTER_FAST_CREDIT_TRANCHE_MINOR_UNITS',
+    'MODEL_ROUTER_FAST_CREDIT_STRIPES',
+    'MODEL_ROUTER_FAST_CONNECTION_REUSE',
+  ])
+    assert.ok(source.includes(`'${name}'`));
+  assert.match(source, /FIRST funded attempt/);
+  assert.doesNotMatch(source, /coldCreditDenials|response\.status === 429/);
+  assert.match(source, /maximum = fixedControl \? '20480' : '524480'/);
+  assert.match(source, /trustedConcurrency = 64n/);
+  assert.match(source, /automaticTarget, 67133440n/);
+  assert.match(source, /tlsConnections, 1/);
+  assert.match(source, /denied\.status, 429/);
+  assert.match(source, /after\.intents, before\.intents/);
+  assert.match(source, /BigInt\(after\.backing\) <= 1_000_000n/);
 });

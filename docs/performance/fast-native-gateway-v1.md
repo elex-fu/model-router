@@ -66,3 +66,13 @@ When the tranche setting is **unset**, native mode passes a server-derived concu
 A client may omit its output limit only if the configured compiler injects a positive enforced bound. The final compiled payload is independently checked against the estimator before Redis or money reservation; a custom compiler that leaves the bound absent still uses strict mode.
 
 Credit errors distinguish insufficient/not-ready capacity (`429 FAST_CREDIT_NOT_READY`) from a concurrent reservation race (`503 FAST_CREDIT_BUSY`); an expired send deadline and a closed journal are separate 503 codes. These newer profiles must not be merged with older runs that exposed one generic credit error.
+
+## Readiness
+
+When fast mode is enabled, health readiness also checks the existing Redis generation/run identity, configured recovery horizon and server-clock quarantine, journal owner startup, and the snapshot cache availability latch. The health-only check never creates/reset slots or restores a closed snapshot cache, and adds no request-path query. Redis PING alone is insufficient. Readiness is not a promise every tenant has prepaid capacity or that every request is in the fast supported subset.
+
+## Rolling token quota semantics
+
+Fast TPM admission reserves the conservative input+output token bound for in-flight work. After a validated **successful durable usage receipt**, the existing Redis release call reconciles unused tokens in that lease's original second bucket to actual input+output totals. RPM is never refunded. Financial maximum cost and prepaid backing are unchanged. Unknown execution, missing usage or failed receipt acknowledgement retain the full token reservation until its rate window expires. A pruned original bucket cannot debit a newer bucket.
+
+All adjusted rate values and the released lease tombstone are committed in one same-slot atomic Redis `MSET`, so Lua runtime errors or lost acknowledgements cannot apply a token refund twice. The Redis ACL must permit `MSET` and `PEXPIREAT` as well as existing admission commands. A failure restoring TTL after MSET can retain state longer, but the tombstone prevents another refund; this is a cleanup/availability fault, not permission to reset quota state. No additional request roundtrip or PostgreSQL query is introduced.

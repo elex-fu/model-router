@@ -216,6 +216,122 @@ test('real Redis authoritative fast admission', { skip: !enabled, timeout: 30000
     assert.deepEqual(await service.acquire(input({ limits })), { allowed: false, reason: 'quota_exceeded' });
     admitted(await service.acquire(input({ limits, tokenUnits: 4 })));
   });
+  await t.test('durable actual usage reconciles TPM once but never refunds RPM or unknown usage', async () => {
+    const service = await f.open();
+    const limits = { tenant: { tpm: 100 }, account: { tpm: 100, concurrency: 2 } };
+    const first = admitted(await service.acquire(input({ tokenUnits: 90, limits })));
+    assert.equal((await service.acquire(input({ tokenUnits: 20, limits }))).allowed, false);
+    await first.release({ outcome: 'success', actualTokenUnits: 10 });
+    await first.release({ outcome: 'success', actualTokenUnits: 0 });
+    admitted(await service.acquire(input({ tokenUnits: 90, limits })));
+    assert.equal((await service.acquire(input({ tokenUnits: 1, limits }))).allowed, false);
+    const unknown = await f.open();
+    const unresolved = admitted(await unknown.acquire(input({ tokenUnits: 90, limits })));
+    await unresolved.release({ outcome: 'success' });
+    assert.equal((await unknown.acquire(input({ tokenUnits: 20, limits }))).allowed, false);
+    const rpm = await f.open();
+    const rpmLimits = { account: { rpm: 1, tpm: 100 } };
+    await admitted(await rpm.acquire(input({ tokenUnits: 90, limits: rpmLimits }))).release({
+      outcome: 'success',
+      actualTokenUnits: 0,
+    });
+    assert.equal((await rpm.acquire(input({ tokenUnits: 1, limits: rpmLimits }))).allowed, false);
+  });
+  await t.test('real server-clock rollover reconciles only the immutable admission bucket', async () => {
+    const namespace = randomUUID();
+    const service = await f.open(namespace);
+    const limits = { account: { tpm: 200 } };
+    const request = input({ tokenUnits: 90, ttlMs: 5000, limits });
+    const first = admitted(await service.acquire(request));
+    const foreign = await f.open(namespace);
+    assert.equal((await foreign.acquire(request)).allowed, false);
+    const tag = createHash('sha256')
+      .update(JSON.stringify([namespace]))
+      .digest('hex');
+    const [leaseKey] = await f.inspector.keys(`mr:fast:{${tag}}:lease:*`);
+    const original = JSON.parse((await f.inspector.get(leaseKey))!);
+    for (;;) {
+      const clock = (await f.inspector.sendCommand(['TIME'])) as string[];
+      if (Number(clock[0]) > Number(original.bucket)) break;
+      await delay(10);
+    }
+    admitted(await service.acquire(input({ tokenUnits: 90, ttlMs: 5000, limits })));
+    await first.release({ outcome: 'success', actualTokenUnits: 10 });
+    const [rateKey] = await f.inspector.keys(`mr:fast:{${tag}}:rate:*`);
+    const rate = JSON.parse((await f.inspector.get(rateKey))!);
+    assert.equal(rate.buckets[original.bucket][1], 10);
+    const newer = Object.entries(rate.buckets).filter(([bucket]) => bucket !== original.bucket);
+    assert.equal(newer.length, 1);
+    assert.equal((newer[0][1] as number[])[1], 90);
+    admitted(await service.acquire(input({ tokenUnits: 100, ttlMs: 5000, limits })));
+  });
+  await t.test('a pruned original bucket never refunds a newer bucket', async () => {
+    const namespace = randomUUID();
+    const service = await f.open(namespace);
+    const lease = admitted(await service.acquire(input({ tokenUnits: 90, limits: { account: { tpm: 100 } } })));
+    const tag = createHash('sha256')
+      .update(JSON.stringify([namespace]))
+      .digest('hex');
+    const [leaseKey] = await f.inspector.keys(`mr:fast:{${tag}}:lease:*`);
+    const receipt = JSON.parse((await f.inspector.get(leaseKey))!);
+    const [rateKey] = await f.inspector.keys(`mr:fast:{${tag}}:rate:*`);
+    const newerBucket = String(Number(receipt.bucket) + 1);
+    const replacement = { buckets: { [newerBucket]: [1, 30] } };
+    await f.inspector.set(rateKey, JSON.stringify(replacement), { PX: 61000 });
+    await lease.release({ outcome: 'success', actualTokenUnits: 1 });
+    assert.deepEqual(JSON.parse((await f.inspector.get(rateKey))!), replacement);
+  });
+  await t.test('atomic TPM reconciliation survives denied MSET and post-MSET expiry errors', async () => {
+    const runId = /^run_id:(\w+)\r?$/m.exec(await f.inspector.info('server'))?.[1];
+    assert.ok(runId);
+    for (const denied of ['mset', 'pexpireat']) {
+      const namespace = randomUUID();
+      await f.open(namespace);
+      const username = `quota-${randomUUID()}`;
+      const password = randomUUID();
+      await f.inspector.sendCommand(['ACL', 'SETUSER', username, 'reset', 'on', `>${password}`, '~mr:fast:*', '+@all']);
+      const client = createClient({ url: f.url, username, password, socket: { reconnectStrategy: false } });
+      client.on('error', () => {});
+      await client.connect();
+      try {
+        const service = createRedisFastGatewayAdmission({
+          redis: client,
+          namespace,
+          runId,
+          maxTtlMs: 5000,
+          abortGraceMs: 100,
+          renewIntervalMs: 50,
+        });
+        const lease = admitted(
+          await service.acquire(input({ tokenUnits: 90, limits: { tenant: { tpm: 100 }, account: { tpm: 100 } } })),
+        );
+        const tag = createHash('sha256')
+          .update(JSON.stringify([namespace]))
+          .digest('hex');
+        const keys = await f.inspector.keys(`mr:fast:{${tag}}:rate:*`);
+        assert.equal(keys.length, 2);
+        const totals = async () =>
+          Promise.all(
+            keys.map(async (key) =>
+              Object.values(JSON.parse((await f.inspector.get(key))!).buckets as Record<string, number[]>).reduce(
+                (total, counts) => total + counts[1],
+                0,
+              ),
+            ),
+          );
+        await f.inspector.sendCommand(['ACL', 'SETUSER', username, `-${denied}`]);
+        await assert.rejects(lease.release({ outcome: 'success', actualTokenUnits: 10 }), /release unavailable/);
+        assert.deepEqual(await totals(), denied === 'mset' ? [90, 90] : [10, 10]);
+        await f.inspector.sendCommand(['ACL', 'SETUSER', username, `+${denied}`]);
+        await lease.release({ outcome: 'success', actualTokenUnits: 10 });
+        await lease.release({ outcome: 'success', actualTokenUnits: 0 });
+        assert.deepEqual(await totals(), [10, 10]);
+      } finally {
+        client.destroy();
+        await f.inspector.sendCommand(['ACL', 'DELUSER', username]);
+      }
+    }
+  });
   await t.test('server-clock rolling rate window expires, including conservative partial-second overlap', async () => {
     const service = await f.open();
     const limits = { account: { rpm: 1, rateWindowMs: 10 } };
@@ -248,15 +364,18 @@ test('real Redis authoritative fast admission', { skip: !enabled, timeout: 30000
         renewIntervalMs: 100,
       });
       await service.initialize({ drained: true });
-      const request = input({ acquisitionToken: randomUUID(), limits: { account: { rpm: 2, concurrency: 1 } } });
+      const request = input({
+        acquisitionToken: randomUUID(),
+        limits: { account: { rpm: 2, tpm: 12, concurrency: 1 } },
+      });
       lose = true;
       assert.deepEqual(await service.acquire(request), { allowed: false, reason: 'unavailable' });
       const lease = admitted(await service.acquire(request));
       assert.equal((await service.acquire({ ...request, tokenUnits: 8 })).allowed, false);
       assert.equal((await service.acquire({ ...request, acquisitionToken: randomUUID() })).allowed, false);
       lose = true;
-      await assert.rejects(lease.release(), /release unavailable/);
-      await lease.release();
+      await assert.rejects(lease.release({ outcome: 'success', actualTokenUnits: 2 }), /release unavailable/);
+      await lease.release({ outcome: 'success', actualTokenUnits: 2 });
       assert.equal((await service.acquire(request)).allowed, false);
       admitted(await service.acquire({ ...request, requestId: randomUUID(), acquisitionToken: randomUUID() }));
     },
@@ -445,6 +564,38 @@ test('real Redis authoritative fast admission', { skip: !enabled, timeout: 30000
       assert.equal((await service.acquire({ ...request, requestId: randomUUID() })).allowed, false);
       await other.release();
     }
+  });
+  await t.test('readiness checks sentinel, identity and quarantine without writing authority', async () => {
+    const namespace = randomUUID();
+    const service = await f.open(namespace);
+    const tag = createHash('sha256')
+      .update(JSON.stringify([namespace]))
+      .digest('hex');
+    const key = `mr:fast:{${tag}}:generation`;
+    const original = await f.inspector.get(key);
+    assert.ok(original);
+    assert.equal(await service.checkReady(), true);
+    assert.equal(await f.inspector.get(key), original);
+    await f.inspector.del(key);
+    assert.equal(await service.checkReady(), false);
+    assert.equal(await f.inspector.exists(key), 0);
+    const meta = JSON.parse(original);
+    for (const changed of [
+      { ...meta, runId: 'other-process' },
+      { ...meta, horizon: 1 },
+      { ...meta, readyAt: Date.now() + 60_000 },
+    ]) {
+      const value = JSON.stringify(changed);
+      await f.inspector.set(key, value);
+      assert.equal(await service.checkReady(), false);
+      assert.equal(await f.inspector.get(key), value);
+    }
+    await f.inspector.set(key, original);
+    assert.equal(await service.checkReady(), true);
+    const quarantined = await f.open(randomUUID(), { drained: false });
+    assert.equal(await quarantined.checkReady(), false);
+    await service.close();
+    assert.equal(await service.checkReady(), false);
   });
   await t.test('managed opener rejects eviction policies', async () => {
     await f.inspector.configSet('maxmemory-policy', 'allkeys-lru');

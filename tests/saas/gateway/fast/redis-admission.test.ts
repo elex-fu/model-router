@@ -114,3 +114,30 @@ test('renewal failure invalidates locally without sending an implicit release', 
   assert.equal(await result.lease.assertValid(), false);
   assert.equal(calls, 2);
 });
+
+test('actual-token feedback is bounded by the original lease and successful receipt outcome', async () => {
+  let calls = 0;
+  const service = create({
+    eval: async (_script, options) => {
+      calls++;
+      const p = JSON.parse(options.arguments[0]);
+      return JSON.stringify({ ok: true, token: p.token, renewInMs: 100 });
+    },
+  });
+  const admitted = await service.acquire(request());
+  assert.equal(admitted.allowed, true);
+  if (!admitted.allowed) return;
+  for (const actualTokenUnits of [-1, 6, 1.5, Number.NaN]) {
+    await assert.rejects(
+      admitted.lease.release({ outcome: 'success', actualTokenUnits }),
+      /Invalid fast admission feedback/,
+    );
+  }
+  await assert.rejects(
+    admitted.lease.release({ outcome: 'failure', actualTokenUnits: 1 }),
+    /Invalid fast admission feedback/,
+  );
+  assert.equal(calls, 1);
+  await admitted.lease.release({ outcome: 'success', actualTokenUnits: 2 });
+  assert.equal(calls, 2);
+});

@@ -555,3 +555,39 @@ test('a transform cannot strip final streaming usage collection before a fast se
   assert.equal(s.intents.length, 0);
   assert.equal(s.calls.includes('admit'), false);
 });
+
+test('TPM reconciliation is attached only after a durable successful usage receipt', async () => {
+  for (const receiptFails of [false, true]) {
+    const s = setup({}, false, true);
+    const feedback: unknown[] = [];
+    const executor = new FastGatewayExecutor({
+      ...s.options,
+      admission: {
+        acquire: async (input) => {
+          const admitted = await s.options.admission.acquire(input);
+          if (!admitted.allowed) return admitted;
+          return {
+            ...admitted,
+            lease: {
+              ...admitted.lease,
+              release: async (value) => {
+                feedback.push(value);
+              },
+            },
+          };
+        },
+      },
+      journal: {
+        ...s.options.journal,
+        appendReceipt: async (receipt) => {
+          if (receiptFails) throw new Error('no durable ACK');
+          await s.options.journal.appendReceipt(receipt);
+        },
+      },
+    });
+    if (receiptFails) await assert.rejects(executor.execute(s.input));
+    else assert.equal(await executor.execute(s.input), true);
+    assert.equal((feedback[0] as { actualTokenUnits?: number }).actualTokenUnits, receiptFails ? undefined : 15);
+    assert.equal(s.intents[0].maxCostMinorUnits, '144');
+  }
+});

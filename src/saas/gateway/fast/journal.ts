@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 import { MAX_MINOR_UNITS, normalizeCurrency, parseMinorUnits } from '../../billing/money.js';
 import { saasAdvisoryKey, WALLET_FENCE_SQL } from '../../db/advisory-lock-keys.js';
 import type { SaasDatabase, SqlExecutor } from '../../db/types.js';
@@ -175,6 +176,7 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
       nextStripe: number;
       preparedMaximum: bigint | null;
       preparedTarget: bigint | null;
+      backgroundRefillAfter: number;
     }
   >();
   private readonly ready: Promise<void>;
@@ -205,7 +207,7 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
       )
       .then(() => undefined);
     // A failed startup cannot become an unhandled rejection before the first call.
-    void this.ready.catch(() => options.onBackgroundError?.('FAST_JOURNAL_STARTUP_FAILED'));
+    void this.ready.catch(() => this.reportBackgroundError('FAST_JOURNAL_STARTUP_FAILED'));
   }
 
   async checkReady(): Promise<void> {
@@ -238,7 +240,7 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
             next = count >= (this.options.workerBatchSize ?? 128) ? 0 : this.idleDelay;
           },
           () => {
-            this.options.onBackgroundError?.('FAST_JOURNAL_WORKER_FAILED');
+            this.reportBackgroundError('FAST_JOURNAL_WORKER_FAILED');
             next = Math.max(1000, base);
           },
         )
@@ -350,7 +352,7 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
         let timer: NodeJS.Timeout | undefined;
         try {
           const prepared = await Promise.race([
-            this.scheduleReplenishment(input.tenantId, input.currency).then(() => true),
+            this.scheduleReplenishment(input.tenantId, input.currency, true).then(() => true),
             new Promise<false>((resolve) => {
               timer = setTimeout(() => resolve(false), Math.max(0, input.sendDeadlineMs - Date.now()));
               timer.unref();
@@ -494,15 +496,27 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
     }
   }
 
-  private scheduleReplenishment(tenantId: string, currency: string): Promise<void> {
+  private scheduleReplenishment(tenantId: string, currency: string, force = false): Promise<void> {
     const key = `${tenantId}:${currency}`;
     const existing = this.pendingReplenishments.get(key);
     if (existing) return existing;
     if (this.closed) return Promise.resolve();
+    const hint = this.observedMaximum.get(key);
+    const now = performance.now();
+    if (!force && hint && now < hint.backgroundRefillAfter) return Promise.resolve();
+    if (hint) hint.backgroundRefillAfter = now + 250;
     const work = this.replenish(tenantId, currency).finally(() => this.pendingReplenishments.delete(key));
     this.pendingReplenishments.set(key, work);
-    void work.catch(() => this.options.onBackgroundError?.('FAST_JOURNAL_REPLENISH_FAILED'));
+    void work.catch(() => this.reportBackgroundError('FAST_JOURNAL_REPLENISH_FAILED'));
     return work;
+  }
+
+  private reportBackgroundError(code: string): void {
+    try {
+      this.options.onBackgroundError?.(code);
+    } catch {
+      /* diagnostics never become detached rejections */
+    }
   }
 
   // Bounded process-local scheduling hints, never money authority. Eviction
@@ -515,7 +529,7 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
         const oldest = this.observedMaximum.keys().next().value;
         if (oldest !== undefined) this.observedMaximum.delete(oldest);
       }
-      entry = { maximum, target, nextStripe: 0, preparedMaximum: null, preparedTarget: null };
+      entry = { maximum, target, nextStripe: 0, preparedMaximum: null, preparedTarget: null, backgroundRefillAfter: 0 };
       this.observedMaximum.set(key, entry);
     } else {
       if (maximum > entry.maximum) entry.maximum = maximum;
@@ -605,6 +619,14 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
           };
         },
       );
+      if (
+        rows.length === allocations.rows.length &&
+        rows.every((row) => {
+          const previous = byStripe.get(row.stripe);
+          return previous?.backing_minor_units === row.backing && previous.available_minor_units === row.available;
+        })
+      )
+        return;
       await tx.query(
         `INSERT INTO saas_fast_credit_allocations
         (id,tenant_id,wallet_id,currency,owner,epoch,stripe,state,backing_minor_units,available_minor_units)
