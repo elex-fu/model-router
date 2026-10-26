@@ -1,4 +1,5 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
+import type { PreparedRequestEvidenceRecord } from './prepared-request-evidence-service.js';
 import { currentRequestDiagnosticTrace } from './request-diagnostic-trace.js';
 import { isIP } from 'node:net';
 import type { Dispatcher, RequestInit as UndiciRequestInit } from 'undici';
@@ -213,7 +214,21 @@ export type ProviderHttpFixedRequestHeadersResolver = (
   | undefined
   | PromiseLike<Readonly<Record<string, string>> | null | undefined>;
 
+/** Only transport facts: neither a persisted evidence row nor a claim assertion. */
+export type ProviderHttpTransportBinding = Pick<PreparedRequestEvidenceRecord,
+  'evidenceId' | 'tenantId' | 'projectId' | 'requestId' | 'attemptId' | 'supplyMode' |
+  'accountOwnerKind' | 'publicModel' | 'protocol' | 'clientProtocol' | 'providerProtocol' |
+  'clientOperation' | 'providerOperation' | 'endpoint' | 'upstreamId' | 'providerId' |
+  'productId' | 'accountId' | 'credentialId' | 'credentialVersion' | 'payloadSha256' |
+  'resolvedModel' | 'payloadCompilerVersion'>;
+
+export type ProviderHttpBoundRequest = Omit<PreparedEvidenceTransportRequest, 'evidence'> & {
+  readonly evidence: ProviderHttpTransportBinding;
+};
+
 export interface ProviderHttpTransportOptions {
+  /** Separate opt-in authority; must consume an issuer-bound, one-use durable-intent ticket. */
+  readonly consumeFastTicket?: (ticket: unknown) => ProviderHttpBoundRequest;
   /** Fixed, bounded diagnostic phases; never receives dispatch or credential data. */
   readonly observe?: PreparedEvidenceDispatchObserver;
   /** Undici-compatible adapter that forwards the required dispatcher unchanged. */
@@ -309,6 +324,7 @@ interface NormalizedEndpointPolicy {
 }
 
 interface NormalizedOptions {
+  readonly consumeFastTicket?: (ticket: unknown) => ProviderHttpBoundRequest;
   readonly observe?: PreparedEvidenceDispatchObserver;
   readonly fetch: ProviderHttpFetch;
   readonly resolveDispatchProfile: ProviderHttpDispatchProfileResolver;
@@ -327,7 +343,7 @@ interface NormalizedOptions {
 }
 
 interface RequestContext {
-  readonly request: PreparedEvidenceTransportRequest;
+  readonly request: ProviderHttpBoundRequest;
   readonly responseBridge: OpenAIToAnthBridge | null;
   readonly dispatchIdentity: Pick<
     ProviderHttpCredentialResolveInput,
@@ -563,6 +579,7 @@ function normalizeOptions(options: ProviderHttpTransportOptions): NormalizedOpti
     }),
   );
   return {
+    ...(options.consumeFastTicket ? { consumeFastTicket: options.consumeFastTicket } : {}),
     ...(options.observe === undefined ? {} : { observe: options.observe }),
     fetch: options.fetch,
     resolveDispatchProfile: options.resolveDispatchProfile,
@@ -600,7 +617,7 @@ function assertAbortSignal(value: unknown): asserts value is AbortSignal {
   }
 }
 
-function assertRequestBinding(input: PreparedEvidenceTransportRequest, maxPayloadBytes: number): Buffer {
+function assertRequestBinding(input: ProviderHttpBoundRequest, maxPayloadBytes: number): Buffer {
   if (!input || typeof input !== 'object' || !input.evidence) fail('INVALID_INPUT', 'transport request is required');
   assertAbortSignal(input.signal);
   const fields: Array<readonly [string, unknown]> = [
@@ -616,11 +633,10 @@ function assertRequestBinding(input: PreparedEvidenceTransportRequest, maxPayloa
   }
   const evidence = input.evidence;
   if (
-    evidence.status !== 'claimed' ||
-    evidence.claimedAttemptId !== input.attemptId ||
     evidence.tenantId !== input.tenantId ||
     evidence.projectId !== input.projectId ||
     evidence.requestId !== input.requestId ||
+    evidence.attemptId !== input.attemptId ||
     (evidence.clientProtocol !== undefined && evidence.clientProtocol !== evidence.protocol) ||
     (input.clientOperation !== undefined &&
       evidence.clientOperation !== undefined &&
@@ -766,7 +782,7 @@ function responseHeaders(response: Response): Readonly<Record<string, string>> {
   return Object.freeze(headers);
 }
 
-function clientResponseBridge(request: PreparedEvidenceTransportRequest): OpenAIToAnthBridge | null {
+function clientResponseBridge(request: ProviderHttpBoundRequest): OpenAIToAnthBridge | null {
   const evidence = request.evidence;
   // Native compact items are opaque and must never pass through a chat bridge.
   if (evidence.providerOperation === 'responses.compact') return null;
@@ -988,7 +1004,7 @@ function managedResponseBody(body: ReadableStream<Uint8Array>, context: RequestC
 }
 
 function profileInput(
-  request: PreparedEvidenceTransportRequest,
+  request: ProviderHttpBoundRequest,
   signal: AbortSignal,
 ): ProviderHttpDispatchProfileResolveInput {
   return {
@@ -1010,7 +1026,7 @@ function profileInput(
 }
 
 function credentialInput(
-  request: PreparedEvidenceTransportRequest,
+  request: ProviderHttpBoundRequest,
   signal: AbortSignal,
   dispatchIdentity: RequestContext['dispatchIdentity'],
 ): ProviderHttpCredentialResolveInput {
@@ -1046,6 +1062,22 @@ export class ProviderHttpTransport implements PreparedEvidenceTransport {
   }
 
   async send(input: PreparedEvidenceTransportRequest): Promise<PreparedEvidenceTransportResponse> {
+    // The legacy entrypoint retains its exact claim requirement. Fast mode
+    // never fabricates a claimed PreparedRequestEvidenceRecord.
+    if (!input?.evidence || input.evidence.status !== 'claimed' ||
+        input.evidence.claimedAttemptId !== input.attemptId) {
+      fail('PAYLOAD_BINDING_MISMATCH', 'prepared evidence is not claimed by this attempt');
+    }
+    return this.sendBound(input);
+  }
+
+  async sendFast(ticket: unknown): Promise<PreparedEvidenceTransportResponse> {
+    if (!this.options.consumeFastTicket) fail('INVALID_INPUT', 'fast dispatch authority is unavailable');
+    const input = this.options.consumeFastTicket(ticket);
+    return this.sendBound(input);
+  }
+
+  private async sendBound(input: ProviderHttpBoundRequest): Promise<PreparedEvidenceTransportResponse> {
     const body = assertRequestBinding(input, this.options.maxPayloadBytes);
     // `protocol` is the canonical signed client fact. Its optional alias is
     // not persisted separately. Capture rendering before asynchronous I/O.
