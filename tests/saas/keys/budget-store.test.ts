@@ -101,8 +101,62 @@ class FakeBudgetDatabase implements SqlExecutor {
 
   async query<Row>(sql: string, values: readonly unknown[] = []): Promise<SqlResult<Row>> {
     this.statements.push(sql);
+    return this.execute<Row>(sql, values);
+  }
+
+  private async execute<Row>(sql: string, values: readonly unknown[] = []): Promise<SqlResult<Row>> {
     const statement = normalized(sql);
     const [a, b, c, d, e, f, g, h] = values;
+
+    if (statement.startsWith('with reserved_daily as (')) {
+      const daily = await this.execute<StoredCounter>('INSERT INTO saas_api_key_budget_counters', [
+        a,
+        b,
+        c,
+        'daily',
+        e,
+        f,
+        g,
+        h,
+      ]);
+      const lifetime = await this.execute<StoredCounter>('INSERT INTO saas_api_key_budget_counters', [
+        a,
+        b,
+        c,
+        'lifetime',
+        values[8],
+        f,
+        g,
+        h,
+      ]);
+      const storedCurrency = lifetime.rows[0]?.charge_currency;
+      const inserted =
+        h === null || storedCurrency === null || storedCurrency === h
+          ? (await this.execute('INSERT INTO saas_api_key_budget_reservations', values)).rowCount
+          : 0;
+      return result<Row>(
+        [...daily.rows, ...lifetime.rows].map((row) => ({ ...row, reservation_count: inserted }) as Row),
+      );
+    }
+
+    if (statement.startsWith('with adjusted_daily as (')) {
+      const daily = await this.execute('UPDATE saas_api_key_budget_counters', [a, b, 'daily', c, d, e, f, g]);
+      const lifetime =
+        daily.rowCount === 1
+          ? await this.execute('UPDATE saas_api_key_budget_counters', [a, b, 'lifetime', h, d, e, f, g])
+          : result([], 0);
+      const hasResolution = statement.includes('resolved_request as (');
+      const resolved =
+        lifetime.rowCount === 1 && hasResolution
+          ? await this.execute(
+              `UPDATE saas_api_key_budget_reservations SET state = '${statement.includes("state = 'settled'") ? 'settled' : 'released'}'`,
+              [a, values[8]],
+            )
+          : result([], 0);
+      return result<Row>([
+        { daily_count: daily.rowCount, lifetime_count: lifetime.rowCount, reservation_count: resolved.rowCount } as Row,
+      ]);
+    }
 
     if (statement.startsWith('select tenant_id, project_id, key_id, lineage_id, version,')) {
       const row = this.policies.find(
@@ -546,4 +600,80 @@ test('admission fails closed when configured charge caps have no resolvable curr
       }),
     'STORAGE_ERROR',
   );
+});
+
+test('budget mutations batch dependent windows without weakening exact counts or error priority', async () => {
+  const database = new FakeBudgetDatabase();
+  const facts = {
+    tenantId: 'tenant-1',
+    projectId: 'project-1',
+    lineageId: 'lineage-1',
+    requestId: 'request-1',
+    day: DAY,
+    tokenUnits: '9007199254740993',
+    chargeMinorUnits: '1',
+    chargeCurrency: 'USD',
+  };
+  await reserveKeyBudgetCounters(database, facts);
+  assert.equal(database.statements.length, 1, 'one reserve statement, not a latency assertion');
+  const sql = database.statements[0] ?? '';
+  assert.match(sql, /FROM reserved_daily\s+ON CONFLICT/);
+  assert.match(sql, /FROM reserved_lifetime\s+WHERE \$8::text IS NULL/);
+  assert.equal(database.counters[0]?.token_outstanding_reserved, facts.tokenUnits);
+  const { preservesPreparationTransactionFacts } = await import(
+    '../../../src/saas/gateway/preparation-fact-preserving-statements.js'
+  );
+  assert.equal(preservesPreparationTransactionFacts(sql), true);
+  assert.equal(preservesPreparationTransactionFacts(`${sql} `), false, 'allowlist remains exact');
+  await expectStoreError(
+    () => reserveKeyBudgetCounters(database, { ...facts, chargeCurrency: 'EUR' }),
+    'CURRENCY_MISMATCH',
+  );
+  assert.equal(database.reservations.length, 1, 'currency mismatch does not reach duplicate reservation insert');
+  database.statements.length = 0;
+  await settleKeyBudgetReservation(database, facts.tenantId, facts.requestId, '9007199254740992', '1');
+  assert.equal(database.statements.length, 2, 'fresh reservation lock then one dependent mutation');
+  assert.match(database.statements[0] ?? '', /FOR UPDATE$/);
+  assert.match(
+    database.statements[1] ?? '',
+    /FROM adjusted_daily\s+WHERE counter.tenant_id = adjusted_daily.tenant_id/,
+  );
+  assert.match(
+    database.statements[1] ?? '',
+    /FROM adjusted_lifetime\s+WHERE reservation.tenant_id = adjusted_lifetime.tenant_id/,
+  );
+});
+
+test('batched counter and terminal count anomalies retain fail-closed error codes', async () => {
+  for (const counts of [
+    { daily_count: 0, lifetime_count: 0, reservation_count: 0 },
+    { daily_count: 1, lifetime_count: 0, reservation_count: 0 },
+    { daily_count: 2, lifetime_count: 1, reservation_count: 1 },
+    { daily_count: 1, lifetime_count: 1, reservation_count: 0 },
+    { daily_count: 1, lifetime_count: 1, reservation_count: 2 },
+  ]) {
+    const executor: SqlExecutor = {
+      async query<Row>(sql: string) {
+        if (sql.startsWith('SELECT tenant_id'))
+          return result<Row>([
+            {
+              tenant_id: 'tenant-1',
+              project_id: 'project-1',
+              lineage_id: 'lineage-1',
+              request_id: 'request-1',
+              day: '2026-10-09',
+              token_units: '1',
+              charge_minor_units: '0',
+              charge_currency: null,
+              state: 'outstanding',
+            } as Row,
+          ]);
+        return result<Row>([counts as Row]);
+      },
+    };
+    await expectStoreError(
+      () => settleKeyBudgetReservation(executor, 'tenant-1', 'request-1', '1', '0'),
+      counts.daily_count !== 1 || counts.lifetime_count !== 1 ? 'STORAGE_ERROR' : 'RESERVATION_STATE_CONFLICT',
+    );
+  }
 });

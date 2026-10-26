@@ -402,40 +402,72 @@ export async function reserveKeyBudgetCounters(
   const chargeCurrency = chargeMinorUnits === '0' ? null : currency(facts.chargeCurrency);
   if (chargeMinorUnits !== '0' && chargeCurrency === null) fail('INVALID_INPUT');
 
-  const upsert = (windowKind: 'daily' | 'lifetime', day: string) =>
-    executor.query<UpsertedCounterRow>(
-      `INSERT INTO saas_api_key_budget_counters
+  // Data-modifying CTEs are not ordered by their position in WITH. Each
+  // mutation consumes its predecessor's RETURNING rows, preserving the
+  // daily -> lifetime -> reservation lock order in one wire round trip.
+  // The two counter rows are disjoint even on the lifetime sentinel date.
+  const result = await executor.query<UpsertedCounterRow & { reservation_count: number }>(
+    `WITH reserved_daily AS (
+       INSERT INTO saas_api_key_budget_counters
          (tenant_id, project_id, lineage_id, window_kind, day,
           token_outstanding_reserved, charge_outstanding_reserved, charge_currency)
-       VALUES ($1, $2, $3, $4, $5, $6::bigint, $7::bigint, $8)
+       VALUES ($1, $2, $3, 'daily', $5::date, $6::bigint, $7::bigint, $8)
        ON CONFLICT (tenant_id, lineage_id, window_kind, day) DO UPDATE SET
          token_outstanding_reserved = saas_api_key_budget_counters.token_outstanding_reserved + EXCLUDED.token_outstanding_reserved,
          charge_outstanding_reserved = saas_api_key_budget_counters.charge_outstanding_reserved + EXCLUDED.charge_outstanding_reserved,
          charge_currency = COALESCE(saas_api_key_budget_counters.charge_currency, EXCLUDED.charge_currency),
          updated_at = clock_timestamp()
        RETURNING window_kind, token_settled, token_outstanding_reserved,
-                 charge_settled, charge_outstanding_reserved, charge_currency`,
-      [tenantId, projectId, lineageId, windowKind, day, tokenUnits, chargeMinorUnits, chargeCurrency],
-    );
-
-  const dailyRows = (await upsert('daily', dayColumn)).rows;
-  const lifetimeRows = (await upsert('lifetime', KEY_BUDGET_LIFETIME_DAY)).rows;
-  const daily = dailyRows[0];
-  const lifetime = lifetimeRows[0];
-  if (!daily || !lifetime || dailyRows.length !== 1 || lifetimeRows.length !== 1) fail('STORAGE_ERROR');
+                 charge_settled, charge_outstanding_reserved, charge_currency
+     ), reserved_lifetime AS (
+       INSERT INTO saas_api_key_budget_counters
+         (tenant_id, project_id, lineage_id, window_kind, day,
+          token_outstanding_reserved, charge_outstanding_reserved, charge_currency)
+       SELECT $1, $2, $3, 'lifetime', $9::date, $6::bigint, $7::bigint, $8
+         FROM reserved_daily
+       ON CONFLICT (tenant_id, lineage_id, window_kind, day) DO UPDATE SET
+         token_outstanding_reserved = saas_api_key_budget_counters.token_outstanding_reserved + EXCLUDED.token_outstanding_reserved,
+         charge_outstanding_reserved = saas_api_key_budget_counters.charge_outstanding_reserved + EXCLUDED.charge_outstanding_reserved,
+         charge_currency = COALESCE(saas_api_key_budget_counters.charge_currency, EXCLUDED.charge_currency),
+         updated_at = clock_timestamp()
+       RETURNING window_kind, token_settled, token_outstanding_reserved,
+                 charge_settled, charge_outstanding_reserved, charge_currency
+     ), reserved_request AS (
+       INSERT INTO saas_api_key_budget_reservations
+         (tenant_id, project_id, lineage_id, request_id, day,
+          token_units, charge_minor_units, charge_currency)
+       SELECT $1, $2, $3, $4, $5::date, $6::bigint, $7::bigint, $8
+         FROM reserved_lifetime
+        WHERE $8::text IS NULL OR charge_currency IS NULL OR charge_currency = $8
+       RETURNING 1
+     )
+     SELECT *, (SELECT count(*)::int FROM reserved_request) AS reservation_count FROM reserved_daily
+     UNION ALL
+     SELECT *, (SELECT count(*)::int FROM reserved_request) AS reservation_count FROM reserved_lifetime`,
+    [
+      tenantId,
+      projectId,
+      lineageId,
+      requestId,
+      dayColumn,
+      tokenUnits,
+      chargeMinorUnits,
+      chargeCurrency,
+      KEY_BUDGET_LIFETIME_DAY,
+    ],
+  );
+  const daily = result.rows.find((row) => row.window_kind === 'daily');
+  const lifetime = result.rows.find((row) => row.window_kind === 'lifetime');
+  if (!daily || !lifetime || result.rows.length !== 2) fail('STORAGE_ERROR');
 
   const storedCurrency = (daily.charge_currency ?? lifetime.charge_currency) as string | null;
   if (chargeCurrency !== null && lifetime.charge_currency !== null && lifetime.charge_currency !== chargeCurrency) {
+    // Keep the original error priority: no reservation insert may run before
+    // a lifetime currency mismatch has been rejected. The SQL gate above
+    // prevents a duplicate/FK error masking this error; the caller rolls back.
     fail('CURRENCY_MISMATCH');
   }
-
-  await executor.query(
-    `INSERT INTO saas_api_key_budget_reservations
-       (tenant_id, project_id, lineage_id, request_id, day,
-        token_units, charge_minor_units, charge_currency)
-     VALUES ($1, $2, $3, $4, $5, $6::bigint, $7::bigint, $8)`,
-    [tenantId, projectId, lineageId, requestId, dayColumn, tokenUnits, chargeMinorUnits, chargeCurrency],
-  );
+  if (daily.reservation_count !== 1 || lifetime.reservation_count !== 1) fail('STORAGE_ERROR');
 
   const window = (row: UpsertedCounterRow): KeyBudgetReservedWindow & { charge: KeyBudgetReservedWindow } => ({
     settled: parseKeyBudgetAmount(row.token_settled),
@@ -514,50 +546,76 @@ export async function selectKeyBudgetReservation(
   return row ? reservationRecord(row) : null;
 }
 
-function subtractColumn(column: string, amount: string): string {
-  return `${column} = ${column} - ${amount}::bigint`;
-}
-
 async function adjustCounters(
   executor: SqlExecutor,
   reservation: KeyBudgetReservationRecord,
   tokenSettledDelta: string,
   chargeSettledDelta: string,
-  releaseOutstanding: boolean,
+  resolution: 'settled' | 'released' | null,
 ): Promise<void> {
   const tokenSettled = parseKeyBudgetAmount(tokenSettledDelta);
   const chargeSettled = parseKeyBudgetAmount(chargeSettledDelta);
-  const tokenOutstanding = releaseOutstanding ? reservation.tokenUnits : '0';
-  const chargeOutstanding = releaseOutstanding ? reservation.chargeMinorUnits : '0';
-  const update = (windowKind: 'daily' | 'lifetime', day: string) =>
-    executor.query(
-      `UPDATE saas_api_key_budget_counters
-       SET ${subtractColumn('token_outstanding_reserved', tokenOutstanding)},
-           ${subtractColumn('charge_outstanding_reserved', chargeOutstanding)},
-           token_settled = token_settled + $5::bigint,
-           charge_settled = charge_settled + $6::bigint,
-           updated_at = clock_timestamp()
-       WHERE tenant_id = $1 AND lineage_id = $2 AND window_kind = $3 AND day = $4
-         AND token_outstanding_reserved >= $7::bigint
-         AND charge_outstanding_reserved >= $8::bigint`,
-      [
-        reservation.tenantId,
-        reservation.lineageId,
-        windowKind,
-        day,
-        tokenSettled,
-        chargeSettled,
-        tokenOutstanding,
-        chargeOutstanding,
-      ],
-    );
-  for (const [windowKind, day] of [
-    ['daily', reservation.day],
-    ['lifetime', KEY_BUDGET_LIFETIME_DAY],
-  ] as const) {
-    const result = await update(windowKind, day);
-    if (result.rowCount !== 1) fail('STORAGE_ERROR');
-  }
+  const tokenOutstanding = resolution === null ? '0' : reservation.tokenUnits;
+  const chargeOutstanding = resolution === null ? '0' : reservation.chargeMinorUnits;
+  // Correction runs under the control-plane role and must not reference
+  // settlement-only columns. Release likewise never requires settled-charge
+  // UPDATE privilege. All interpolation below is module-owned SQL, not input.
+  const resolveRequest =
+    resolution === null
+      ? ''
+      : `, resolved_request AS (
+       UPDATE saas_api_key_budget_reservations AS reservation
+          SET state = '${resolution}', ${resolution === 'settled' ? 'settled_charge_minor_units = $5::bigint,' : ''}
+              updated_at = clock_timestamp()
+         FROM adjusted_lifetime
+        WHERE reservation.tenant_id = adjusted_lifetime.tenant_id
+          AND reservation.request_id = $9 AND reservation.state = 'outstanding'
+       RETURNING 1
+     )`;
+  const result = await executor.query<{ daily_count: number; lifetime_count: number; reservation_count: number }>(
+    `WITH adjusted_daily AS (
+       UPDATE saas_api_key_budget_counters
+          SET token_outstanding_reserved = token_outstanding_reserved - $6::bigint,
+              charge_outstanding_reserved = charge_outstanding_reserved - $7::bigint,
+              token_settled = token_settled + $4::bigint,
+              charge_settled = charge_settled + $5::bigint,
+              updated_at = clock_timestamp()
+        WHERE tenant_id = $1 AND lineage_id = $2 AND window_kind = 'daily' AND day = $3::date
+          AND token_outstanding_reserved >= $6::bigint
+          AND charge_outstanding_reserved >= $7::bigint
+       RETURNING tenant_id, lineage_id
+     ), adjusted_lifetime AS (
+       UPDATE saas_api_key_budget_counters AS counter
+          SET token_outstanding_reserved = counter.token_outstanding_reserved - $6::bigint,
+              charge_outstanding_reserved = counter.charge_outstanding_reserved - $7::bigint,
+              token_settled = counter.token_settled + $4::bigint,
+              charge_settled = counter.charge_settled + $5::bigint,
+              updated_at = clock_timestamp()
+         FROM adjusted_daily
+        WHERE counter.tenant_id = adjusted_daily.tenant_id AND counter.lineage_id = adjusted_daily.lineage_id
+          AND counter.window_kind = 'lifetime' AND counter.day = $8::date
+          AND counter.token_outstanding_reserved >= $6::bigint
+          AND counter.charge_outstanding_reserved >= $7::bigint
+       RETURNING counter.tenant_id
+     )${resolveRequest}
+     SELECT (SELECT count(*)::int FROM adjusted_daily) AS daily_count,
+            (SELECT count(*)::int FROM adjusted_lifetime) AS lifetime_count,
+            ${resolution === null ? '0' : '(SELECT count(*)::int FROM resolved_request)'} AS reservation_count`,
+    [
+      reservation.tenantId,
+      reservation.lineageId,
+      reservation.day,
+      tokenSettled,
+      chargeSettled,
+      tokenOutstanding,
+      chargeOutstanding,
+      KEY_BUDGET_LIFETIME_DAY,
+      ...(resolution === null ? [] : [reservation.requestId]),
+    ],
+  );
+  const row = result.rows[0];
+  if (result.rows.length !== 1 || !row || row.daily_count !== 1 || row.lifetime_count !== 1) fail('STORAGE_ERROR');
+  if (resolution !== null && row.reservation_count !== 1) fail('RESERVATION_STATE_CONFLICT');
 }
 
 /**
@@ -581,15 +639,8 @@ export async function settleKeyBudgetReservation(
     reservation,
     parseKeyBudgetAmount(actualTokenUnits),
     parseKeyBudgetAmount(actualChargeMinorUnits),
-    true,
+    'settled',
   );
-  const updated = await executor.query(
-    `UPDATE saas_api_key_budget_reservations
-       SET state = 'settled', settled_charge_minor_units = $3::bigint, updated_at = clock_timestamp()
-     WHERE tenant_id = $1 AND request_id = $2 AND state = 'outstanding'`,
-    [reservation.tenantId, reservation.requestId, parseKeyBudgetAmount(actualChargeMinorUnits)],
-  );
-  if (updated.rowCount !== 1) fail('RESERVATION_STATE_CONFLICT');
   return true;
 }
 
@@ -606,14 +657,7 @@ export async function releaseKeyBudgetReservation(
   const reservation = await selectKeyBudgetReservation(executor, tenantId, requestId, 'UPDATE');
   if (!reservation) return false;
   if (reservation.state !== 'outstanding') return false;
-  await adjustCounters(executor, reservation, '0', '0', true);
-  const updated = await executor.query(
-    `UPDATE saas_api_key_budget_reservations
-       SET state = 'released', updated_at = clock_timestamp()
-     WHERE tenant_id = $1 AND request_id = $2 AND state = 'outstanding'`,
-    [reservation.tenantId, reservation.requestId],
-  );
-  if (updated.rowCount !== 1) fail('RESERVATION_STATE_CONFLICT');
+  await adjustCounters(executor, reservation, '0', '0', 'released');
   return true;
 }
 
@@ -637,7 +681,7 @@ export async function applyKeyBudgetCorrection(
     reservation,
     parseKeyBudgetAmount(tokenSettledDelta),
     parseKeyBudgetAmount(chargeSettledDelta),
-    false,
+    null,
   );
   return true;
 }

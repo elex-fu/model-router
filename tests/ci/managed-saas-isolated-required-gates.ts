@@ -32,6 +32,10 @@ const gates = {
   },
   'key-ip-policy-080': { root: 'tests/saas/keys/ip-policy.postgres.integration.test.ts', httpFixture: false },
   'key-budget-policy-081': { root: 'tests/saas/keys/budget-policy.postgres.integration.test.ts', httpFixture: false },
+  'key-budget-batched-mutations': {
+    root: 'tests/saas/keys/budget-batched-mutations.postgres.integration.test.ts',
+    httpFixture: false,
+  },
   'settlement-sigkill-crash': {
     root: 'tests/drills/settlement-sigkill-crash.postgres.integration.test.ts',
     httpFixture: false,

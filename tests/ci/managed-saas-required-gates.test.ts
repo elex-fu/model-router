@@ -43,6 +43,7 @@ const isolatedGates = [
   ['usage-correction-063', 'tests/saas/metering/usage-correction.postgres.integration.test.ts', false],
   ['key-ip-policy-080', 'tests/saas/keys/ip-policy.postgres.integration.test.ts', false],
   ['key-budget-policy-081', 'tests/saas/keys/budget-policy.postgres.integration.test.ts', false],
+  ['key-budget-batched-mutations', 'tests/saas/keys/budget-batched-mutations.postgres.integration.test.ts', false],
   ['settlement-sigkill-crash', 'tests/drills/settlement-sigkill-crash.postgres.integration.test.ts', false],
   ['member-directory', 'tests/saas/identity/tenant-member-directory.postgres.integration.test.ts', false],
   ['member-directory-http', 'tests/saas/identity/tenant-member-directory-http.postgres.integration.test.ts', false],

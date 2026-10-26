@@ -260,7 +260,7 @@ jobs:
       fail-fast: false
       matrix:
         postgres-version: ["15", "18"]
-        gate: ["cancellation-059", "pre-dispatch-compensation", "concurrent-claim", "normal-success-terminal-replay", "usage-correction-063", "key-ip-policy-080", "key-budget-policy-081", "settlement-sigkill-crash", "member-directory", "member-directory-http", "dual-instance-failover", "marketing-redeem-codes-089", "marketing-promo-codes-090", "marketing-affiliate-091", "marketing-announcements-092", "quota-sync-093", "oauth-token-refresh-094", "announcement-fanout-095", "account-quarantine-097", "rate-limit-scheduling-098", "health-score-098", "oauth-refresh-onboarding", "kimi-commercial-preparation-diagnostic", "scheduler-native-protocol", "prepared-statements", "runtime-health-clock", "dispatch-capacity", "affinity-bind-race", "dispatch-proof-fence-batch", "payment-merchant-binding", "payment-worker-sigkill", "managed-saas-sigterm"]
+        gate: ["cancellation-059", "pre-dispatch-compensation", "concurrent-claim", "normal-success-terminal-replay", "usage-correction-063", "key-ip-policy-080", "key-budget-policy-081", "key-budget-batched-mutations", "settlement-sigkill-crash", "member-directory", "member-directory-http", "dual-instance-failover", "marketing-redeem-codes-089", "marketing-promo-codes-090", "marketing-affiliate-091", "marketing-announcements-092", "quota-sync-093", "oauth-token-refresh-094", "announcement-fanout-095", "account-quarantine-097", "rate-limit-scheduling-098", "health-score-098", "oauth-refresh-onboarding", "kimi-commercial-preparation-diagnostic", "scheduler-native-protocol", "prepared-statements", "runtime-health-clock", "dispatch-capacity", "affinity-bind-race", "dispatch-proof-fence-batch", "payment-merchant-binding", "payment-worker-sigkill", "managed-saas-sigterm"]
     services:
       postgres:
         image: postgres:${{ matrix.postgres-version }}
@@ -298,6 +298,7 @@ jobs:
           tests/saas/metering/usage-correction.postgres.integration.test.ts
           tests/saas/keys/ip-policy.postgres.integration.test.ts
           tests/saas/keys/budget-policy.postgres.integration.test.ts
+          tests/saas/keys/budget-batched-mutations.postgres.integration.test.ts
           tests/drills/settlement-sigkill-crash.postgres.integration.test.ts
           tests/saas/identity/tenant-member-directory.postgres.integration.test.ts
           tests/saas/identity/tenant-member-directory-http.postgres.integration.test.ts
