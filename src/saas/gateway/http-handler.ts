@@ -1,3 +1,4 @@
+import { reportFastGatewayFailure, type FastGatewayDiagnosticObserver } from './fast/failure-diagnostic.js';
 import { FastGatewayExecutionError, type FastGatewayExecutorPort } from './fast/executor.js';
 import type { PersistentResponsesContinuationResolver, ResolvedResponsesHistory } from './responses-continuation-resolver.js';
 import { normalizeResponsesHistoryConversationId, type ResponsesHistoryIdentity } from './responses-continuation-history.js';
@@ -495,6 +496,8 @@ export interface SaasGatewayReadinessProvider {
 export interface SaasGatewayHttpOptions {
   /** Opt-in text data plane; fallback is allowed only before durable intent. */
   readonly fastGateway?: FastGatewayExecutorPort;
+  /** Failure-only, sanitized and nonblocking; observer failures never affect the response. */
+  readonly fastGatewayDiagnostic?: FastGatewayDiagnosticObserver;
   readonly continuationHistoryResolver?: PersistentResponsesContinuationResolver;
   /**
    * G-B4: the Responses WebSocket surface. When present, an upgrade
@@ -2507,6 +2510,7 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
         });
         if (handled) return true;
       } catch (error) {
+        reportFastGatewayFailure(options.fastGatewayDiagnostic, error, requestId, res.headersSent);
         if (res.headersSent) await fastClient.abort();
         else
           sendHttpError(

@@ -1,10 +1,14 @@
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { mkdtemp, rm } from 'node:fs/promises';
 import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { FastGatewayExecutionError } from '../../../src/saas/gateway/fast/executor.js';
+import type { FastGatewayFailureDiagnostic } from '../../../src/saas/gateway/fast/failure-diagnostic.js';
+import { FastGatewaySnapshotError } from '../../../src/saas/gateway/fast/snapshots.js';
 import {
   createSaasGatewayHandler,
   type PreparedEvidenceDispatchPort,
@@ -12,6 +16,7 @@ import {
   type RequestPreparationPort,
   resolveSaasGatewayBodyLimits,
   type SaasGatewayEndpointFamilyBodyLimits,
+  type SaasGatewayHttpOptions,
   type SaasGatewayQueryRequestContext,
   type SaasGatewayQueryResult,
   type SaasGatewayReadinessProvider,
@@ -245,6 +250,8 @@ function sent(): PreparedEvidenceDispatchResult {
 
 function harness(
   options: {
+    readonly fastGateway?: SaasGatewayHttpOptions['fastGateway'];
+    readonly fastGatewayDiagnostic?: SaasGatewayHttpOptions['fastGatewayDiagnostic'];
     readonly preparationResult?: RequestPreparationResult;
     readonly afterPreparation?: (request: FakeRequest, response: FakeResponse) => void;
     readonly preDispatchCompensation?: GatewayPreDispatchCompensationPort;
@@ -325,6 +332,8 @@ function harness(
       }
     : undefined;
   const baseHandler = createSaasGatewayHandler({
+    fastGateway: options.fastGateway,
+    fastGatewayDiagnostic: options.fastGatewayDiagnostic,
     authenticator,
     preparation,
     dispatch,
@@ -1582,4 +1591,68 @@ test('G-B2: a JSON b64_json STT body takes the direct path without any staging',
     `preparation not reached (status ${setup.response.writeHeadCalls[0]?.status}, body ${String(setup.response.endBody ?? '').slice(0, 200)})`,
   );
   assert.equal(setup.preparationInputs[0].clientOperation, 'audio.stt');
+});
+
+
+test('fast failure diagnostics preserve generic and typed HTTP errors without strict fallback', async () => {
+  for (const error of [
+    new Error('private exception'),
+    new FastGatewaySnapshotError('SNAPSHOT_DENIED'),
+    new FastGatewayExecutionError(429, 'FAST_RATE_LIMITED'),
+  ]) {
+    for (const observer of ['capture', 'throw', 'reject'] as const) {
+      const seen: FastGatewayFailureDiagnostic[] = [];
+      let executions = 0;
+      const h = harness({
+        fastGateway: {
+          execute: async () => {
+            executions++;
+            throw error;
+          },
+        },
+        fastGatewayDiagnostic: (event) => {
+          seen.push(event);
+          if (observer === 'throw') throw new Error('observer failed');
+          if (observer === 'reject') return Promise.reject(new Error('observer failed'));
+        },
+      });
+      const requestId = randomUUID();
+      assert.equal(await h.handler(asRequest(h.request), asResponse(h.response), { requestId }), true);
+      assert.equal(executions, 1);
+      assert.equal(h.preparationInputs.length, 0);
+      assert.equal(h.dispatchInputs.length, 0);
+      assert.equal(h.response.writeHeadCalls[0]?.status, error instanceof FastGatewayExecutionError ? 429 : 503);
+      const body = JSON.parse(String(h.response.endBody));
+      assert.equal(
+        body.error.code,
+        error instanceof FastGatewayExecutionError ? 'FAST_RATE_LIMITED' : 'FAST_GATEWAY_UNAVAILABLE',
+      );
+      assert.equal(seen.length, 1);
+      assert.equal(seen[0].requestId, requestId);
+      assert.equal(seen[0].headersSent, false);
+      assert.equal(h.response.setHeaders.has('x-model-router-execution-mode'), false);
+    }
+  }
+});
+
+test('fast diagnostic failure after response start preserves abort and never sends a second response', async () => {
+  const seen: FastGatewayFailureDiagnostic[] = [];
+  const h = harness({
+    fastGateway: {
+      execute: async ({ client }) => {
+        await client.start(200, { 'content-type': 'application/json' });
+        throw new Error('private');
+      },
+    },
+    fastGatewayDiagnostic: (event) => {
+      seen.push(event);
+      throw new Error('observer failed');
+    },
+  });
+  assert.equal(await h.handler(asRequest(h.request), asResponse(h.response)), true);
+  assert.equal(h.response.writeHeadCalls.length, 1);
+  assert.equal(h.response.writeHeadCalls[0].status, 200);
+  assert.equal(h.response.destroyed, true);
+  assert.equal(seen[0].headersSent, true);
+  assert.equal(h.preparationInputs.length, 0);
 });

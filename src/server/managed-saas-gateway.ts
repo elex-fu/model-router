@@ -1,3 +1,4 @@
+import type { FastGatewayDiagnosticObserver } from '../saas/gateway/fast/failure-diagnostic.js';
 import { FastPinnedConnectorPool } from '../saas/gateway/fast/pinned-connector-pool.js';
 import { createPinnedProviderHttpConnector, createPinnedProviderHttpTestConnectorFactory } from '../saas/gateway/provider-http-address.js';
 import { FastGatewayExecutor, type FastGatewayExecutorPort } from '../saas/gateway/fast/executor.js';
@@ -345,6 +346,7 @@ export interface SaasGatewayImageMediaOptions {
 
 export interface ManagedSaasGatewayCompositionDependencies {
   readonly fastGateway?: FastGatewayExecutorPort;
+  readonly fastGatewayDiagnostic?: FastGatewayDiagnosticObserver;
   readonly continuationHistoryResolver?: PersistentResponsesContinuationResolver;
   /** Opt-in diagnostic sampling. Observer must enqueue without blocking or awaiting persistence. */
   readonly requestDiagnostics?: {
@@ -861,6 +863,7 @@ export function createManagedSaasGatewayComposition(
   });
   const httpHandler = createSaasGatewayHandler({
     ...(dependencies.fastGateway ? { fastGateway: dependencies.fastGateway } : {}),
+    ...(dependencies.fastGatewayDiagnostic ? { fastGatewayDiagnostic: dependencies.fastGatewayDiagnostic } : {}),
     ...(dependencies.continuationHistoryResolver ? { continuationHistoryResolver: dependencies.continuationHistoryResolver } : {}),
     authenticator: dependencies.authenticator,
     preparation,
@@ -1011,6 +1014,7 @@ export interface ManagedSaasFastGatewayOptions {
 
 export interface ManagedSaasGatewayProductionOptions {
   readonly fastGateway?: ManagedSaasFastGatewayOptions;
+  readonly fastGatewayDiagnostic?: FastGatewayDiagnosticObserver;
   readonly continuationHistoryResolver?: PersistentResponsesContinuationResolver;
   readonly requestDiagnostics?: ManagedSaasGatewayCompositionDependencies['requestDiagnostics'];
   readonly capacityCompletion?: (requestId: string) => Promise<void>;
@@ -2808,6 +2812,7 @@ export function createManagedSaasGatewayProductionComposition(
 
   return createManagedSaasGatewayComposition({
     ...(fastGateway ? { fastGateway } : {}),
+    ...(options.fastGatewayDiagnostic ? { fastGatewayDiagnostic: options.fastGatewayDiagnostic } : {}),
     ...(options.continuationHistoryResolver ? { continuationHistoryResolver: options.continuationHistoryResolver } : {}),
     ...(options.requestDiagnostics ? { requestDiagnostics: options.requestDiagnostics } : {}),
     authenticator: new CachedKeyAuthenticator(keyService),
