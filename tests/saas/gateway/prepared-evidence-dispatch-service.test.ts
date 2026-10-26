@@ -281,6 +281,7 @@ class FakeMetering {
 }
 
 class FakeEvidence {
+  includeAttemptSnapshot = false;
   readonly preflightCalls: Array<{ evidenceId: string; payloadSha256?: string }> = [];
   readonly calls: Array<{ evidenceId: string; payloadSha256?: string }> = [];
   record = evidence();
@@ -299,7 +300,12 @@ class FakeEvidence {
     if (evidenceId !== this.record.evidenceId || options?.payloadSha256 !== this.record.payloadSha256) {
       throw new Error('claim digest mismatch');
     }
-    return this.record;
+    return {
+      ...this.record,
+      ...(this.includeAttemptSnapshot
+        ? { authoritativeAttemptRecord: this.metering ? { ...this.metering.current, stateVersion: 999 } : undefined }
+        : {}),
+    };
   }
 
   async claimForDispatch(
@@ -321,7 +327,13 @@ class FakeEvidence {
       claimedAttemptId: 'attempt-1',
     };
     this.afterClaim?.();
-    return { ...this.record, ...this.claimResultPatch };
+    return {
+      ...this.record,
+      ...(this.includeAttemptSnapshot
+        ? { authoritativeAttemptRecord: { ...this.metering.current, stateVersion: 999 } }
+        : {}),
+      ...this.claimResultPatch,
+    };
   }
 }
 
@@ -2570,4 +2582,22 @@ test('committed but unusable sent result retains durable sent state without sett
   assert.equal(lease.releaseCount, 1);
   await assert.rejects(dispatcher.dispatch(input));
   assert.equal(sends, 1, 'uncertain result must never become a second upstream send');
+});
+
+test('forged public attempt snapshots never bypass the authoritative metering reads', async () => {
+  const proof = new FakeEvidence();
+  proof.includeAttemptSnapshot = true;
+  const metering = new FakeMetering();
+  const lease = new FakeLeaseProvider();
+  let sends = 0;
+  const result = await service(proof, metering, lease, {
+    async send() {
+      sends++;
+      return { responseStarted: true, resultHttpStatus: 200 };
+    },
+  }).dispatch({ evidenceId: 'evidence-1', payloadBytes: payload, audit });
+  assert.equal(result.kind, 'sent');
+  assert.equal(sends, 1);
+  assert.equal(metering.reads.length, 2);
+  assert.equal(metering.transitionInputs[0]?.expectedStateVersion, 2);
 });

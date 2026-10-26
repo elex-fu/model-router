@@ -7,6 +7,7 @@ import { saasAdvisoryKey } from '../../../src/saas/db/advisory-lock-keys.js';
 import type { SaasDatabase, SqlExecutor, SqlResult } from '../../../src/saas/db/index.js';
 import {
   canonicalPreparedRequestEvidencePayload,
+  getAuthoritativePreparedAttempt,
   type PreparedRequestEvidenceInput,
   SaasPreparedRequestEvidenceError,
   SaasPreparedRequestEvidenceService,
@@ -434,7 +435,7 @@ class FakeExecutor implements SqlExecutor {
         state_version: (BigInt(String(current.state_version)) + 1n).toString(),
         updated_at: new Date(Math.max(new Date(String(current.updated_at)).getTime(), CLOCK.getTime())).toISOString(),
       };
-      return { rows: [{ id: this.input.attemptId }] as Row[], rowCount: 1 };
+      return { rows: [this.rows.attempt] as Row[], rowCount: 1 };
     }
     if (sql.includes("SET status = 'claimed'")) {
       if (this.failEvidenceClaim) return { rows: [], rowCount: 0 };
@@ -514,6 +515,7 @@ class FakeExecutor implements SqlExecutor {
       ordinal: input.attemptOrdinal,
       upstream_id: input.upstreamId,
       account_id: input.accountId,
+      account_owner_kind: input.accountOwnerKind,
       provider_id: input.providerId,
       product_id: input.productId,
       resolved_model: input.resolvedModel,
@@ -569,6 +571,7 @@ class FakeExecutor implements SqlExecutor {
       result_http_status: null,
       unknown_reason: null,
       state_version: '1',
+      created_at: CLOCK.toISOString(),
       updated_at: CLOCK.toISOString(),
     };
   }
@@ -987,7 +990,15 @@ test('signed stored OpenAI evidence renders JSON/SSE tools through the builtin K
             }
             assert.equal(Object.isFrozen(identity), true);
             // Rendering must retain the binding captured before any resolver awaits.
-            Object.assign(claimed, { protocol: 'anthropic', clientProtocol: 'anthropic', clientOperation: 'messages' });
+            assert.throws(
+              () =>
+                Object.assign(claimed, {
+                  protocol: 'anthropic',
+                  clientProtocol: 'anthropic',
+                  clientOperation: 'messages',
+                }),
+              TypeError,
+            );
             return use({ headerName: 'x-api-key', value: 'synthetic-stored-fixture' });
           },
           fetch: async (_url, init) => {
@@ -1239,11 +1250,21 @@ test('claim satisfies the attempt guard with one bound versioned CAS and no repe
   fake.evidence.statement_sha256 = registered.statementSha256;
   const originalAttempt = fake.rows.attempt as Record<string, unknown>;
   originalAttempt.updated_at = new Date(CLOCK.getTime() - 1000).toISOString();
-  await evidenceService.preflightForDispatch(input.evidenceId ?? '', input.audit);
+  const preflight = await evidenceService.preflightForDispatch(input.evidenceId ?? '', input.audit);
+  assert.equal(preflight.authoritativeAttemptRecord?.stateVersion, 1);
+  assert.equal(getAuthoritativePreparedAttempt(preflight, evidenceService), preflight.authoritativeAttemptRecord);
+  assert.equal(getAuthoritativePreparedAttempt({ ...preflight }, evidenceService), undefined);
+  assert.equal(getAuthoritativePreparedAttempt(preflight, service(fake)), undefined);
+  assert.ok(Object.isFrozen(preflight.authoritativeAttemptRecord));
+  assert.ok(Object.isFrozen(preflight.authoritativeAttemptRecord?.modelResolution));
+  assert.equal(preflight.authoritativeAttemptRecord?.preparedEvidenceId, null);
   assert.equal(fake.attemptClaimQueries.length, 0, 'preflight must not bump or bind');
   assert.equal(originalAttempt.state_version, '1');
   const claimed = await evidenceService.claimForDispatch(input.evidenceId ?? '', input.audit);
   assert.equal(claimed.status, 'claimed');
+  assert.equal(claimed.authoritativeAttemptRecord?.stateVersion, 2);
+  assert.equal(claimed.authoritativeAttemptRecord?.preparedEvidenceId, input.evidenceId);
+  assert.equal(claimed.authoritativeAttemptRecord?.updatedAt, CLOCK.toISOString());
   const current = fake.rows.attempt as Record<string, unknown>;
   assert.equal(current.state_version, '2');
   assert.equal(current.updated_at, CLOCK.toISOString());

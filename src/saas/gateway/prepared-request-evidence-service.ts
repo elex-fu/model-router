@@ -1,6 +1,8 @@
 import { createHash, createPublicKey, type KeyObject, randomUUID, verify as verifySignature } from 'node:crypto';
 import { saasAdvisoryKey, sortAndDedupeAdvisoryKeys } from '../db/advisory-lock-keys.js';
 import type { SaasDatabase, SqlExecutor } from '../db/index.js';
+import { mapStoredAttemptRecord, storedAttemptColumns } from '../metering/service.js';
+import type { AttemptRecord } from '../metering/types.js';
 import type { ModelResolutionProvenance } from './contracts.js';
 
 export const PREPARED_REQUEST_EVIDENCE_SCHEMA_VERSION = 1;
@@ -132,6 +134,8 @@ export interface PreparedRequestEvidenceInput {
 }
 
 export interface PreparedRequestEvidenceRecord {
+  /** Exact attempt snapshot from preflight or claim UPDATE RETURNING; absent for registration/legacy ports. */
+  readonly authoritativeAttemptRecord?: AttemptRecord;
   readonly evidenceId: string;
   readonly tenantId: string;
   readonly projectId: string;
@@ -204,6 +208,37 @@ export interface PreparedRequestEvidenceDispatchPort {
     audit: PreparedRequestEvidenceAudit,
     options?: PreparedRequestEvidenceClaimOptions,
   ): Promise<PreparedRequestEvidenceRecord>;
+}
+
+// A structurally identical object is not authority. Only snapshots produced by
+// this service for this exact port may replace a separate metering read.
+const authoritativeAttempts = new WeakMap<
+  PreparedRequestEvidenceRecord,
+  {
+    readonly issuer: PreparedRequestEvidenceDispatchPort;
+    readonly attempt: AttemptRecord;
+  }
+>();
+
+export function getAuthoritativePreparedAttempt(
+  record: PreparedRequestEvidenceRecord,
+  issuer: PreparedRequestEvidenceDispatchPort,
+): AttemptRecord | undefined {
+  const context = authoritativeAttempts.get(record);
+  return context?.issuer === issuer ? context.attempt : undefined;
+}
+
+function withAuthoritativeAttempt(
+  issuer: PreparedRequestEvidenceDispatchPort,
+  record: PreparedRequestEvidenceRecord,
+  row: EvidenceRow,
+): PreparedRequestEvidenceRecord {
+  const attempt = mapStoredAttemptRecord(row);
+  if (attempt.modelResolution) Object.freeze(attempt.modelResolution);
+  Object.freeze(attempt);
+  const result = Object.freeze({ ...record, authoritativeAttemptRecord: attempt });
+  authoritativeAttempts.set(result, { issuer, attempt });
+  return result;
 }
 
 export type TrustedPreparedRequestVerifierKey = KeyObject | string | Uint8Array;
@@ -1909,7 +1944,7 @@ export class SaasPreparedRequestEvidenceService {
           fencesAlreadyHeld: true,
         });
         this.assertWindow(normalized, lockedAt);
-        return this.recordFromRow(stored, normalized, statementSha256);
+        return withAuthoritativeAttempt(this, this.recordFromRow(stored, normalized, statementSha256), attempt);
       });
     } catch (error) {
       throw this.wrapStorage(error, 'Prepared request evidence preflight failed');
@@ -1971,7 +2006,7 @@ export class SaasPreparedRequestEvidenceService {
           normalizedRowValue(attempt, 'state_version', 'locked attempt version'),
           'locked attempt version',
         );
-        const attemptUpdate = await tx.query(
+        const attemptUpdate = await tx.query<EvidenceRow>(
           'UPDATE saas_attempts ' +
             'SET prepared_evidence_id = $3, state_version = state_version + 1, ' +
             'updated_at = GREATEST(updated_at, clock_timestamp()) ' +
@@ -1980,7 +2015,7 @@ export class SaasPreparedRequestEvidenceService {
             "AND binding_state = 'bound' AND dispatch_authority_state = 'bound' " +
             "AND dispatch_state = 'not_sent' AND result_state = 'pending' AND response_started = false " +
             'AND response_started_at IS NULL AND result_http_status IS NULL AND unknown_reason IS NULL ' +
-            'RETURNING id',
+            `RETURNING ${storedAttemptColumns}`,
           [
             normalized.tenantId,
             normalized.attemptId,
@@ -2011,7 +2046,9 @@ export class SaasPreparedRequestEvidenceService {
         );
         const row = evidenceUpdate.rows[0];
         if (!row) fail('STORAGE_ERROR', 'prepared evidence claim returned no row');
-        return this.recordFromRow(row, normalized, statementSha256);
+        const claimedAttempt = attemptUpdate.rows[0];
+        if (!claimedAttempt) fail('STORAGE_ERROR', 'prepared evidence attempt claim returned no row');
+        return withAuthoritativeAttempt(this, this.recordFromRow(row, normalized, statementSha256), claimedAttempt);
       });
     } catch (error) {
       throw this.wrapStorage(error, 'Prepared request evidence could not be claimed');

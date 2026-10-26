@@ -1,10 +1,9 @@
 import { createHash } from 'node:crypto';
-import { currentRequestDiagnosticTrace } from './request-diagnostic-trace.js';
-import type { CodexNativeWsSessionHandle } from './codex/native-ws-session.js';
 import type { ReadableStreamReadResult } from 'node:stream/web';
 import type { KnownNonSuccessHttpResponseInput } from '../metering/service.js';
 import type { AttemptRecord, AttemptTransitionInput } from '../metering/types.js';
 import { serviceTierTrustCategory } from '../pricing/service-tier-trust.js';
+import type { CodexNativeWsSessionHandle } from './codex/native-ws-session.js';
 import type { ModelResolutionProvenance } from './contracts.js';
 import type {
   NormalSuccessObservedUsage,
@@ -24,13 +23,15 @@ import {
   type PreparedEvidenceDispatchObserver,
   type PreparedEvidenceDispatchStage,
 } from './prepared-evidence-dispatch-observer.js';
-import type {
-  PreparedRequestEvidenceAudit,
-  PreparedRequestEvidenceClaimOptions,
-  PreparedRequestEvidenceDispatchPort,
-  PreparedRequestEvidenceRecord,
+import {
+  getAuthoritativePreparedAttempt,
+  type PreparedRequestEvidenceAudit,
+  type PreparedRequestEvidenceClaimOptions,
+  type PreparedRequestEvidenceDispatchPort,
+  type PreparedRequestEvidenceRecord,
 } from './prepared-request-evidence-service.js';
 import { ProviderHttpTransportError } from './provider-http-transport.js';
+import { currentRequestDiagnosticTrace } from './request-diagnostic-trace.js';
 import type { NormalizedUsageEvidence, TransportServiceTierEvidence } from './usage-evidence.js';
 
 export interface PreparedEvidenceMeteringPort {
@@ -817,9 +818,11 @@ export class SaasPreparedEvidenceDispatchService {
     const preflightEvidence = await this.observe('preflight', () =>
       this.evidence.preflightForDispatch(input.evidenceId, input.audit, claimOptions),
     );
-    const attempt = await this.observe('attempt-read', () =>
-      this.metering.getAttempt(preflightEvidence.tenantId, preflightEvidence.requestId, preflightEvidence.attemptId),
-    );
+    const attempt =
+      getAuthoritativePreparedAttempt(preflightEvidence, this.evidence) ??
+      (await this.observe('attempt-read', () =>
+        this.metering.getAttempt(preflightEvidence.tenantId, preflightEvidence.requestId, preflightEvidence.attemptId),
+      ));
     if (!attempt) fail('ATTEMPT_NOT_FOUND', 'claimed prepared evidence attempt was not found');
     if (
       attempt.preparedEvidenceId !== null ||
@@ -889,9 +892,15 @@ export class SaasPreparedEvidenceDispatchService {
       );
       // Claim is itself a versioned attempt update. Never fence dispatch using
       // the preflight snapshot or an inferred version increment.
-      const current = await this.observe('attempt-read', () =>
-        this.metering.getAttempt(preflightEvidence.tenantId, preflightEvidence.requestId, preflightEvidence.attemptId),
-      );
+      const current =
+        getAuthoritativePreparedAttempt(evidence, this.evidence) ??
+        (await this.observe('attempt-read', () =>
+          this.metering.getAttempt(
+            preflightEvidence.tenantId,
+            preflightEvidence.requestId,
+            preflightEvidence.attemptId,
+          ),
+        ));
       if (!current) fail('ATTEMPT_NOT_FOUND', 'claimed prepared evidence attempt was not found');
       assertPostClaimAttempt(current, evidence, preflightEvidence);
       if (input.client?.signal.aborted) {
@@ -1133,8 +1142,11 @@ export class SaasPreparedEvidenceDispatchService {
                     currentRequestDiagnosticTrace()?.mark('settled');
                   }
                   outcome = {
-                    kind: 'sent', settlementOutcome: completion.kind,
-                    evidence, attempt: completion.attempt, transport: transportResult,
+                    kind: 'sent',
+                    settlementOutcome: completion.kind,
+                    evidence,
+                    attempt: completion.attempt,
+                    transport: transportResult,
                   };
                 } else {
                   const attempt = await this.normalSuccessSettlement.retainUnknown({

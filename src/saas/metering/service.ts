@@ -1050,6 +1050,7 @@ function mapRequest(row: Row): RequestRecord {
   };
 }
 
+/** Strict decoder shared by authoritative evidence reads and attempt mutations. */
 function mapAttempt(row: Row): AttemptRecord {
   const bindingState = asBindingState(row.binding_state);
   const dispatchAuthorityState = asDispatchAuthorityState(
@@ -3082,3 +3083,6 @@ export class SaasMeteringService {
 }
 
 export type { MeteringServiceOptions };
+
+// Evidence operations decode the same persisted attempt shape without another database read.
+export { attemptColumns as storedAttemptColumns, mapAttempt as mapStoredAttemptRecord };

@@ -380,6 +380,15 @@ test('restricted PG dispatch authority batches retain exact reads, claim effects
           assert.equal(record.providerProtocol, fixture.input.providerProtocol);
           assert.equal(record.providerOperation, fixture.input.providerOperation);
           assert.equal(record.status, method === 'claimForDispatch' ? 'claimed' : 'registered');
+          assert.equal(record.authoritativeAttemptRecord?.id, fixture.input.attemptId);
+          assert.equal(
+            record.authoritativeAttemptRecord?.stateVersion,
+            Number(before.attempt_version) + (method === 'claimForDispatch' ? 1 : 0),
+          );
+          assert.equal(
+            record.authoritativeAttemptRecord?.preparedEvidenceId,
+            method === 'claimForDispatch' ? fixture.evidenceId : null,
+          );
           const batchIndex = trace.findIndex((sql) => sql.includes('prepared-evidence:authority-batch'));
           assert.equal(trace.filter((sql) => sql.includes('prepared-evidence:authority-batch')).length, 1);
           assert.ok(batchIndex > trace.findLastIndex((sql) => sql.includes('pg_advisory_xact_lock_shared')));
@@ -413,7 +422,12 @@ test('restricted PG dispatch authority batches retain exact reads, claim effects
           const baselineRecord = await baseline[method](fixture.evidenceId, fixture.input.audit, {
             payloadSha256: fixture.input.payloadSha256,
           });
-          assert.deepEqual({ ...baselineRecord, claimedAt: null }, { ...record, claimedAt: null });
+          const comparable = (value: PreparedRequestEvidenceRecord) => ({
+            ...value,
+            claimedAt: null,
+            authoritativeAttemptRecord: { ...value.authoritativeAttemptRecord, updatedAt: null },
+          });
+          assert.deepEqual(comparable(baselineRecord), comparable(record));
           assert.deepEqual(baselineKeys, fixture.fenceBatch.keys);
           assert.equal(baselineTrace.length, method === 'preflightForDispatch' ? 18 : 21);
           assert.equal(baselineTrace.length - trace.length, fixture.fenceBatch.keys.length - 1);
