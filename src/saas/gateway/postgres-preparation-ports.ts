@@ -16,7 +16,10 @@ import {
   SaasRequestAdmissionService,
 } from './admission.js';
 import { SaasAdmissionAuthorizationError, type SaasRequestAdmissionAuthorizationPrelock } from './authorization-prelock.js';
-import { readPreparationTransactionRecords } from './postgres-request-admission-guard.js';
+import {
+  PostgresRequestAdmissionGuard,
+  readPreparationTransactionRecords,
+} from './postgres-request-admission-guard.js';
 import { readRequestAdmissionIpPolicy } from './request-admission-ip-policy.js';
 import {
   BillingGroupSpendAdmissionDeniedError,
@@ -151,6 +154,14 @@ export interface PostgresPreparationPorts {
   readonly admission: RequestPreparationAdmissionPort;
   readonly attempt: RequestPreparationAttemptPort;
   readonly compensation: RequestPreparationCompensationPort;
+}
+
+// This chooses an optimization only; it cannot mint guard facts. A shape
+// clone or custom admission port deliberately preserves the raw executor.
+const nativeFactAdmissions = new WeakSet<RequestPreparationAdmissionPort>();
+
+export function supportsPreparationTransactionFacts(admission: RequestPreparationAdmissionPort): boolean {
+  return nativeFactAdmissions.has(admission);
 }
 
 function nonEmpty(value: unknown): value is string {
@@ -566,6 +577,12 @@ export function createPostgresPreparationPorts(options: PostgresPreparationPorts
     throw new TypeError('Postgres preparation compiler and estimator versions are required');
   }
 
+  // Capture the configured dependency once, including its method: swapping
+  // options.guard later cannot change a port already marked as native.
+  const configuredGuard = options.guard;
+  const guard: SaasRequestAdmissionGuard = Object.freeze({
+    revalidate: configuredGuard.revalidate.bind(configuredGuard),
+  });
   const now = options.now ?? (() => new Date());
   const admissionTtlMs = options.admissionTtlMs ?? 30_000;
   const idFactory = options.idFactory ?? randomUUID;
@@ -849,7 +866,7 @@ export function createPostgresPreparationPorts(options: PostgresPreparationPorts
           options.database,
           fixedIdsMetering,
           options.billing,
-          options.guard,
+          guard,
           options.authorizationPrelock,
           { idFactory, now },
         );
@@ -965,7 +982,7 @@ export function createPostgresPreparationPorts(options: PostgresPreparationPorts
           return { decision: 'reject', code: 'binding_mismatch', message: SAFE_ADMISSION_FAILURE };
         }
         if (result.kind === 'replayed') {
-          await options.guard.revalidate({
+          await guard.revalidate({
             executor,
             request: result.request,
             candidate: persistedAttempt,
@@ -1220,5 +1237,6 @@ export function createPostgresPreparationPorts(options: PostgresPreparationPorts
     billing: options.billing,
   });
 
+  if (configuredGuard instanceof PostgresRequestAdmissionGuard) nativeFactAdmissions.add(admission);
   return { caller, entitlement, admission, attempt, compensation };
 }

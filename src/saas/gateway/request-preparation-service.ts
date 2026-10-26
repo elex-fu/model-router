@@ -634,6 +634,8 @@ export interface RequestPreparationDependencies {
   readonly attempt: RequestPreparationAttemptPort;
   /** Required for durable preparation; absence is a deliberate fail-closed result. */
   readonly transaction?: RequestPreparationTransactionPort;
+  /** Native production optimization only; this flag grants no guard authority. */
+  readonly reuseTransactionFacts?: boolean;
   /** Missing compensation is an explicit retain-hold/manual-reconciliation outcome. */
   readonly compensation?: RequestPreparationCompensationPort;
   /** Optional only so a missing production capability returns blocked, not success. */
@@ -2746,11 +2748,13 @@ export class SaasRequestPreparationService {
 
     try {
       return await transaction.transaction(async (executor) => {
-        const result = await withPreparationTransactionFacts(
-          executor,
-          { tenantId: caller.tenantId, requestId: ids.requestId, attemptId: ids.attemptId, payloadSha256 },
-          durableWork,
-        );
+        const result = this.dependencies.reuseTransactionFacts === true
+          ? await withPreparationTransactionFacts(
+              executor,
+              { tenantId: caller.tenantId, requestId: ids.requestId, attemptId: ids.attemptId, payloadSha256 },
+              durableWork,
+            )
+          : await durableWork(executor);
         if (result.outcome !== 'prepared') throw new RequestPreparationTransactionRollback(result);
         return result;
       });

@@ -10,8 +10,10 @@ import {
 } from '../../../src/saas/gateway/postgres-preparation-budget.js';
 import {
   createPostgresPreparationPorts,
+  supportsPreparationTransactionFacts,
   type PostgresPreparationPortsOptions,
 } from '../../../src/saas/gateway/postgres-preparation-ports.js';
+import { PostgresRequestAdmissionGuard } from '../../../src/saas/gateway/postgres-request-admission-guard.js';
 import { GatewayRequestIdempotencyStore } from '../../../src/saas/gateway/request-idempotency.js';
 import {
   allowRequestPreparation,
@@ -636,6 +638,7 @@ function setup(
     requestFingerprintVersion: 'fingerprint-v1',
   });
   return {
+    options,
     ports,
     caller: value,
     entitlement: ent,
@@ -1290,3 +1293,30 @@ for (const [label, prelockError, expectedDecision, expectedCode] of [
     assert.deepEqual(fixture.calls, { meter: 0, reserve: 0, capacityReserve: 0, capacityRelease: 0, walletRelease: 0, guard: 0 });
   });
 }
+
+test('only exact native admission factory ports opt into transaction fact scopes', () => {
+  const fixture = setup();
+  assert.equal(supportsPreparationTransactionFacts(fixture.ports.admission), false);
+  const native = createPostgresPreparationPorts({
+    ...fixture.options,
+    guard: new PostgresRequestAdmissionGuard(fixture.database),
+  });
+  assert.equal(supportsPreparationTransactionFacts(native.admission), true);
+  assert.equal(supportsPreparationTransactionFacts({ ...native.admission }), false);
+  assert.equal(supportsPreparationTransactionFacts({ authorizeAndReserve: native.admission.authorizeAndReserve }), false);
+});
+
+test('factory binds its original guard even if configuration or its method is changed later', async () => {
+  const fixture = setup();
+  const options = { ...fixture.options };
+  const guard = options.guard;
+  const ports = createPostgresPreparationPorts(options);
+  const rejectSwapped = async () => {
+    throw new Error('swapped guard must never run');
+  };
+  options.guard = { revalidate: rejectSwapped };
+  guard.revalidate = rejectSwapped;
+  const result = await ports.admission.authorizeAndReserve(fixture.admissionInput() as never, { executor: fixture.executor });
+  assert.equal(result.decision, 'allow');
+  assert.equal(fixture.guardInputs.length, 1);
+});

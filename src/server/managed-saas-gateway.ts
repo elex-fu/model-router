@@ -73,6 +73,7 @@ import {
 import { openCodeGoFixedRequestHeaders } from '../saas/gateway/opencode-go/transport-headers.js';
 import { createOpenRouterFixedRequestHeaders } from '../saas/gateway/openrouter/transport-headers.js';
 import type { PostgresPreparationObserver } from '../saas/gateway/postgres-preparation-observer.js';
+import { supportsPreparationTransactionFacts } from '../saas/gateway/postgres-preparation-ports.js';
 import { PostgresProviderAccountModelCooldownRegistry } from '../saas/gateway/postgres-provider-account-model-cooldowns.js';
 import {
   PostgresProviderAccountRuntimeHealthStore,
@@ -2642,6 +2643,9 @@ export function createManagedSaasGatewayProductionComposition(
       authority,
       scheduler,
       payload,
+      // Check the exact native port before adding the trusted idempotency
+      // decorator. Custom/test ports retain the original executor identity.
+      reuseTransactionFacts: supportsPreparationTransactionFacts(options.admission),
       admission: createProductionIdempotencyAdmission(options.admission, idempotencyStore),
       attempt: options.attempt,
       transaction: database,
