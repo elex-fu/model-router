@@ -76,6 +76,19 @@ const COMMERCIAL_PRICE_VERSION_COLUMNS = [
  * remain SELECT-only even where source SQL still asks for a row lock.
  */
 export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlaneColumnGrant[] = [
+  ...columnGrants('saas_fast_receipt_liability_releases', 'SELECT', [
+    'intent_id',
+    'tenant_id',
+    'request_id',
+    'allocation_id',
+    'allocation_epoch',
+    'currency',
+    'released_minor_units',
+    'retained_minor_units',
+    'receipt_digest',
+    'protocol_version',
+    'created_at',
+  ]),
   ...columnGrants('saas_fast_gateway_resolutions', 'SELECT', [
     'id',
     'intent_id',
@@ -124,6 +137,8 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'currency',
     'max_cost_minor_units',
     'price_snapshot',
+    'allocation_id',
+    'allocation_epoch',
     'send_deadline',
     'created_at',
   ]),
@@ -135,6 +150,7 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'charge_minor_units',
     'usage',
     'usage_digest',
+    'receipt_digest',
     'http_status',
     'created_at',
   ]),
@@ -4520,6 +4536,7 @@ SELECT
  * new columns remain inaccessible until the template is reconciled again.
  */
 export const SAAS_GATEWAY_RUNTIME_READ_TABLES = [
+  'saas_fast_receipt_liability_releases',
   'saas_fast_gateway_resolutions',
   'saas_fast_gateway_owners',
   'saas_fast_credit_allocations',
@@ -4646,6 +4663,16 @@ export type SaasGatewayColumnGrant = readonly [
 
 /** Column DML used by gateway request preparation, compensation, evidence and settlement. */
 export const SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS: readonly SaasGatewayColumnGrant[] = [
+  ['saas_fast_receipt_liability_releases', 'intent_id', 'INSERT'],
+  ['saas_fast_receipt_liability_releases', 'tenant_id', 'INSERT'],
+  ['saas_fast_receipt_liability_releases', 'request_id', 'INSERT'],
+  ['saas_fast_receipt_liability_releases', 'allocation_id', 'INSERT'],
+  ['saas_fast_receipt_liability_releases', 'allocation_epoch', 'INSERT'],
+  ['saas_fast_receipt_liability_releases', 'currency', 'INSERT'],
+  ['saas_fast_receipt_liability_releases', 'released_minor_units', 'INSERT'],
+  ['saas_fast_receipt_liability_releases', 'retained_minor_units', 'INSERT'],
+  ['saas_fast_receipt_liability_releases', 'receipt_digest', 'INSERT'],
+  ['saas_fast_receipt_liability_releases', 'protocol_version', 'INSERT'],
   ['saas_fast_gateway_owners', 'owner', 'INSERT'],
   ['saas_fast_gateway_owners', 'epoch', 'INSERT'],
   ['saas_fast_credit_allocations', 'id', 'INSERT'],

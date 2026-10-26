@@ -22,7 +22,12 @@ const permitted = new Set([
 ]);
 process.once(
   'message',
-  async (raw: { boundary: string; intent?: FastReserveIntentInput; receipt?: FastReceiptInput }) => {
+  async (raw: {
+    boundary: string;
+    intent?: FastReserveIntentInput;
+    receipt?: FastReceiptInput;
+    beforeReceiptCommit?: boolean;
+  }) => {
     if (!permitted.has(raw.boundary)) throw new Error('test boundary not allowed');
     const database = createSaasDatabase({ connectionString: roleUrls()[2], max: 2 });
     async function pause(): Promise<never> {
@@ -32,6 +37,13 @@ process.once(
     const wrapped: SaasDatabase = {
       ...database,
       query: async <Row>(sql: string, values?: readonly unknown[]): Promise<SqlResult<Row>> => {
+        if (raw.beforeReceiptCommit && sql.includes('fast-journal:append-receipt */')) {
+          return database.transaction(async (tx) => {
+            const result = await tx.query<Row>(sql, values);
+            await pause();
+            return result;
+          });
+        }
         const result = await database.query<Row>(sql, values);
         if (sql.includes(`${raw.boundary} */`)) await pause();
         return result;

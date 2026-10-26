@@ -58,7 +58,7 @@ export function consoleUsageSourceCtes(includeUsage = false): string {
             (f.resolution_id IS NULL AND f.outcome = 'failed' AND f.receipt_charge = 0
              AND f.http_status IS NULL AND f.receipt_usage = '{}'::jsonb) THEN 'released'
           ELSE 'settled' END
-        WHEN f.job_state IN ('blocked', 'completed') OR f.resolution_id IS NOT NULL
+        WHEN f.job_state IN ('blocked', 'blocked_v2', 'completed') OR f.resolution_id IS NOT NULL
           OR f.outcome IN ('failed', 'unknown') OR (f.outcome IS NULL AND f.send_deadline <= CURRENT_TIMESTAMP)
           THEN 'reconciliation_pending'
         ELSE 'pending' END AS financial_status,

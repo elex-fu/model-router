@@ -716,10 +716,11 @@ BEGIN
     SELECT manifest.table_name, manifest.privilege_type,
            pg_catalog.string_to_array(manifest.column_names, ' ') AS column_names
     FROM (VALUES
+      ('saas_fast_receipt_liability_releases', 'SELECT', 'intent_id tenant_id request_id allocation_id allocation_epoch currency released_minor_units retained_minor_units receipt_digest protocol_version created_at'),
       ('saas_fast_gateway_resolutions', 'SELECT', 'id intent_id tenant_id request_id kind actor_user_id actor_session_id idempotency_key request_digest charge_minor_units usage usage_digest evidence_reference evidence_sha256 support_ticket_ref reason created_at'),
       ('saas_fast_gateway_resolutions', 'INSERT', 'id intent_id tenant_id request_id kind actor_user_id actor_session_id idempotency_key request_digest charge_minor_units usage usage_digest evidence_reference evidence_sha256 support_ticket_ref reason'),
-      ('saas_fast_gateway_intents', 'SELECT', 'id tenant_id request_id attempt_id project_id proxy_key_id authority_snapshot currency max_cost_minor_units price_snapshot send_deadline created_at'),
-      ('saas_fast_gateway_receipts', 'SELECT', 'intent_id tenant_id request_id outcome charge_minor_units usage usage_digest http_status created_at'),
+      ('saas_fast_gateway_intents', 'SELECT', 'id tenant_id request_id attempt_id project_id proxy_key_id authority_snapshot currency max_cost_minor_units price_snapshot allocation_id allocation_epoch send_deadline created_at'),
+      ('saas_fast_gateway_receipts', 'SELECT', 'intent_id tenant_id request_id outcome charge_minor_units usage usage_digest receipt_digest http_status created_at'),
       ('saas_fast_billing_jobs', 'SELECT', 'intent_id state ledger_transaction_id completed_at'),
       ('saas_fast_billing_jobs', 'INSERT', 'intent_id state'),
       ('saas_fast_billing_jobs', 'UPDATE', 'state'),
@@ -1265,6 +1266,7 @@ BEGIN
   FOR v_table IN
     SELECT read_relation.table_name
     FROM (VALUES
+      ('saas_fast_receipt_liability_releases'),
       ('saas_fast_gateway_resolutions'),
       ('saas_fast_gateway_owners'), ('saas_fast_credit_allocations'), ('saas_fast_gateway_intents'), ('saas_fast_gateway_receipts'), ('saas_fast_billing_jobs'),
       ('saas_responses_continuation_contexts'),
@@ -1387,6 +1389,16 @@ BEGIN
       ('saas_fast_gateway_intents', 'allocation_epoch', 'INSERT'),
       ('saas_fast_gateway_intents', 'send_deadline', 'INSERT'),
       ('saas_fast_gateway_intents', 'created_at', 'INSERT'),
+      ('saas_fast_receipt_liability_releases', 'intent_id', 'INSERT'),
+      ('saas_fast_receipt_liability_releases', 'tenant_id', 'INSERT'),
+      ('saas_fast_receipt_liability_releases', 'request_id', 'INSERT'),
+      ('saas_fast_receipt_liability_releases', 'allocation_id', 'INSERT'),
+      ('saas_fast_receipt_liability_releases', 'allocation_epoch', 'INSERT'),
+      ('saas_fast_receipt_liability_releases', 'currency', 'INSERT'),
+      ('saas_fast_receipt_liability_releases', 'released_minor_units', 'INSERT'),
+      ('saas_fast_receipt_liability_releases', 'retained_minor_units', 'INSERT'),
+      ('saas_fast_receipt_liability_releases', 'receipt_digest', 'INSERT'),
+      ('saas_fast_receipt_liability_releases', 'protocol_version', 'INSERT'),
       ('saas_fast_gateway_receipts', 'intent_id', 'INSERT'),
       ('saas_fast_gateway_receipts', 'tenant_id', 'INSERT'),
       ('saas_fast_gateway_receipts', 'request_id', 'INSERT'),

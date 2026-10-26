@@ -718,6 +718,7 @@ test('migration 008 defines bounded append-only catalog tables and registry vers
     143,
     144,
     145,
+    146,
   ]);
   assert.equal(SAAS_MIGRATIONS[7], PROVIDER_CATALOG_AND_RIGHTS_SAAS_MIGRATION);
   assert.match(PROVIDER_CATALOG_AND_RIGHTS_SAAS_MIGRATION.sql, /CREATE TABLE saas_provider_capabilities/);

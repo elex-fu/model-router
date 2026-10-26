@@ -7,6 +7,8 @@ const path = '.github/workflows/fast-gateway-required.yml';
 const workflow = read(path);
 const nativeScenarioMatrix = `\${{ matrix.native-scenario }}`;
 const journal = 'tests/saas/gateway/fast/journal.postgres.integration.test.ts';
+const resolution = 'tests/saas/gateway/fast/resolution.postgres.integration.test.ts';
+const journalCommand = `node --import tsx --test --test-concurrency=1 ${journal} ${resolution}`;
 const redis = 'tests/saas/gateway/fast/redis-admission.local.integration.test.ts';
 const native = 'tests/saas/gateway/fast/native-http.postgres.integration.test.ts';
 const runtime = 'tests/saas/gateway/fast/native-http-runtime-fixture.ts';
@@ -25,6 +27,7 @@ const strictRoots = [
   'snapshots.test.ts',
   'terminal-gate.test.ts',
   'ticket-transport.test.ts',
+  'resolution.postgres.integration.test.ts',
   'resolution-http.test.ts',
   'native-http-runtime-fixture.ts',
   'native-http-seed-fixture.ts',
@@ -96,11 +99,11 @@ function validate(source: string): void {
     ].join(' '),
   );
   assert.equal(actual[5]?.run, provision);
-  for (const [index, root, env] of [
-    [6, journal, roleEnv],
+  for (const [index, command, env] of [
+    [6, journalCommand, roleEnv],
     [
       7,
-      redis,
+      `node --import tsx --test ${redis}`,
       {
         NODE_ENV: 'test',
         MODEL_ROUTER_FAST_ADMISSION_REDIS_TEST: '1',
@@ -109,7 +112,7 @@ function validate(source: string): void {
     ],
     [
       8,
-      native,
+      `node --import tsx --test ${native}`,
       {
         ...roleEnv,
         MODEL_ROUTER_NATIVE_FAST_HTTP_REQUIRED: '1',
@@ -118,7 +121,7 @@ function validate(source: string): void {
       },
     ],
   ] as const) {
-    assert.equal(actual[index]?.run, `node --import tsx --test ${root}`);
+    assert.equal(actual[index]?.run, command);
     assert.deepEqual(actual[index]?.env, env);
   }
 }
@@ -140,6 +143,8 @@ test('required fast wiring rejects disabled roots, altered roles, missing tools 
     ['--lib ES2023 --strict', '--lib ES2023'],
     [`          ${runtime}\n`, ''],
     [`          ${seed}\n`, ''],
+    [`          ${resolution}\n`, ''],
+    [journalCommand, `node --import tsx --test ${journal}`],
     ['MODEL_ROUTER_NATIVE_FAST_HTTP_REQUIRED: "1"', 'MODEL_ROUTER_NATIVE_FAST_HTTP_REQUIRED: "0"'],
     ['MODEL_ROUTER_FAST_ADMISSION_REDIS_TEST: "1"', 'MODEL_ROUTER_FAST_ADMISSION_REDIS_TEST: "0"'],
     ['MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED: "1"', 'MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED: "0"'],
@@ -148,7 +153,7 @@ test('required fast wiring rejects disabled roots, altered roles, missing tools 
       'postgresql://postgres@postgres:5432/model_router_saas_ci',
     ],
     [provision, 'echo skipped'],
-    [`run: node --import tsx --test ${journal}`, `run: node --import tsx --test ${journal} || true`],
+    [`run: ${journalCommand}`, `run: ${journalCommand} || true`],
     [`run: node --import tsx --test ${native}`, `if: false\n        run: node --import tsx --test ${native}`],
   ]) {
     assert.notEqual(workflow.replace(original, replacement), workflow);
@@ -223,4 +228,41 @@ test('default native gate requires actual TPM reconciliation without erasing RPM
   assert.match(defaultDrain, /requests, currentRequests/);
   assert.match(defaultDrain, /tokens, requests \* 15/);
   assert.doesNotMatch(defaultDrain, /redis\.(?:set|del|flushDb|flushAll)\(/);
+});
+
+test('required PG15/18 roots retain receipt-v2 money, race, restart and native pre-ledger proofs', () => {
+  validate(workflow);
+  const source = read(journal);
+  for (const proof of [
+    'receipt v2 reduces durable H before ledger, not wallet or backing; replay proof is digest-compatible',
+    'receipt v2 keeps C=0, C=M and >2^53 exact, with no second surplus release',
+    'receipt v2 missing, invalid, wrong-price and non-success proofs persist evidence but retain M',
+    'receipt v2 worker outage retains only proven C and restart exact-drains unchanged cap',
+    'receipt v2 active/retired/takeover ordering preserves original allocation and never requires current process epoch',
+    'receipt v2 lost autocommit ACK and legacy-first proof replay release at most once',
+    'receipt v2 current-target addition follows a concurrent intent version committed after its snapshot',
+    'receipt v2 concurrent refill and retirement serialize without losing or duplicating liability',
+    'receipt v2 allocation CHECK rolls back receipt+job+release on corrupt backing, rather than silently skipping compaction',
+  ]) {
+    assert.ok(source.includes(`'${proof}'`), `required full journal root must retain proof: ${proof}`);
+  }
+  assert.doesNotMatch(source, /\bt(?:est)?\.(?:skip|todo)\s*\(/);
+  const resolutionSource = read(resolution);
+  assert.match(resolutionSource, /versioned fast resolution preserves immutable paid evidence and retained liability/);
+  assert.doesNotMatch(resolutionSource, /\bt(?:est)?\.(?:skip|todo)\s*\(/);
+  const nativeSource = read(native);
+  assert.match(nativeSource, /await tx\.query\(WALLET_FENCE_SQL, \[saasAdvisoryKey\.walletFence/);
+  assert.match(nativeSource, /saas_fast_receipt_liability_releases/);
+  assert.match(nativeSource, /max_cost_minor_units-released/);
+  assert.match(nativeSource, /state='pending_v2'/);
+  assert.match(nativeSource, /state IN \('blocked','blocked_v2'\)/);
+  assert.match(nativeSource, /after\.backing, before\.backing/);
+  assert.match(nativeSource, /after\.wallet, before\.wallet/);
+  assert.match(nativeSource, /after\.postings,\s*before\.postings/);
+  assert.match(nativeSource, /after\.maximum_held, before\.maximum_held/);
+  assert.match(nativeSource, /BigInt\(after\.available\) - BigInt\(before\.available\),\s*released/);
+  assert.match(nativeSource, /BigInt\(before\.held\) - BigInt\(after\.held\),\s*released/);
+  assert.match(nativeSource, /upstreamRequests, sentBeforeDenial/);
+  assert.match(nativeSource, /upstreamRequests, Number\(expected\.count\)/);
+  assert.match(nativeSource, /finalLiability\.releases, expected\.count/);
 });

@@ -31,7 +31,12 @@ background usage copies, or inferred monetary postings.
 
 ## Independent execution and money axes
 
-A succeeded receipt can still have pending money. Positive platform charges are
+A succeeded receipt can still have pending money. Internal `pending_v2` and
+`blocked_v2` retain the existing public pending and reconciliation-pending financial
+semantics; receipt-time liability compaction alone never marks usage financially
+acknowledged. The operator case API separately exposes original
+`maxCostMinorUnits` and current `retainedLiabilityMinorUnits`; customer usage DTOs
+do not conflate either with posted charges. Positive platform charges are
 settled only after a completed job acknowledges a ledger entry matching tenant,
 currency, amount, intent business key and exact receipt/resolution metadata.
 Zero-charge successful jobs settle with no ledger entry. The exact known-unsent
@@ -68,6 +73,6 @@ This adapter covers customer request history/detail, usage totals and daily
 summary buckets only. Admin analytics, historical exports, webhook emissions,
 financial reports and any direct legacy-table consumers are **not** backfilled
 or made fast-aware by this change. Fast intent tenant/time indexes are a separate
-next-migration scaling follow-up; migrations 143–145 remain immutable. No claim
+next-migration scaling follow-up; migrations 143–146 remain immutable. No claim
 of large-history read performance is made without those indexes and query-plan
 validation. Gateway hot-path performance is unaffected by these read-only APIs.

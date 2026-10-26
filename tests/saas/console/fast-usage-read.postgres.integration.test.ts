@@ -89,10 +89,26 @@ test('fast and strict customer usage coexist under the restricted control-plane 
   }
   const detail = (intent: FastIntent) => queries.getRequestDetail({ ...scope, requestId: intent.requestId });
   const paid = await reserve();
-  await journal.appendReceipt(receiptFixture(paid, '7'));
+  const paidPrice = (
+    await gateway.query<{ price_snapshot: unknown }>(
+      'SELECT price_snapshot FROM saas_fast_gateway_intents WHERE id=$1',
+      [paid.id],
+    )
+  ).rows[0].price_snapshot;
+  await journal.appendReceipt({ ...receiptFixture(paid, '7'), verification: { priceSnapshot: paidPrice } });
   await t.test('receipt success is not financial completion until the job acknowledges its exact ledger', async () => {
     assert.equal((await detail(paid))?.financialStatus, 'pending');
     assert.equal((await detail(paid))?.usageEvents[0]?.billableBasis, 'unknown');
+    const cases = new FastGatewayResolutionService(control);
+    const pending = await cases.getCase({ tenantId: strict.tenantId, intentId: paid.id });
+    assert.equal(pending?.state, 'pending');
+    assert.equal(pending?.maxCostMinorUnits, '80');
+    assert.equal(pending?.retainedLiabilityMinorUnits, '7');
+    await gateway.query("UPDATE saas_fast_billing_jobs SET state='blocked_v2' WHERE intent_id=$1", [paid.id]);
+    assert.equal((await detail(paid))?.financialStatus, 'reconciliation_pending');
+    assert.equal((await detail(paid))?.usageEvents[0]?.billableBasis, 'unknown');
+    assert.equal((await cases.getCase({ tenantId: strict.tenantId, intentId: paid.id }))?.state, 'blocked');
+    await gateway.query("UPDATE saas_fast_billing_jobs SET state='pending_v2' WHERE intent_id=$1", [paid.id]);
     // Fixture corruption drill: a completed flag alone is not acknowledgement
     // of a positive charge. Restore the pending job before the real worker runs.
     await gateway.query("UPDATE saas_fast_billing_jobs SET state='completed',completed_at=now() WHERE intent_id=$1", [
@@ -100,7 +116,7 @@ test('fast and strict customer usage coexist under the restricted control-plane 
     ]);
     assert.equal((await detail(paid))?.financialStatus, 'reconciliation_pending');
     assert.equal((await detail(paid))?.usageEvents[0]?.billableBasis, 'unknown');
-    await gateway.query("UPDATE saas_fast_billing_jobs SET state='pending',completed_at=NULL WHERE intent_id=$1", [
+    await gateway.query("UPDATE saas_fast_billing_jobs SET state='pending_v2',completed_at=NULL WHERE intent_id=$1", [
       paid.id,
     ]);
     await journal.runOnce();

@@ -1,12 +1,4 @@
-import { FAST_GATEWAY_CREDIT_STRIPES_SAAS_MIGRATION } from './145_fast_gateway_credit_stripes.js';
-import { FAST_GATEWAY_RESOLUTION_SAAS_MIGRATION } from './144_fast_gateway_resolution.js';
-import { FAST_GATEWAY_JOURNAL_SAAS_MIGRATION } from './143_fast_gateway_journal.js';
-import { PAYMENT_CREATE_REQUEST_FINGERPRINT_SAAS_MIGRATION } from './142_payment_create_request_fingerprint.js';
-import { RESPONSES_CONTINUATION_CONTEXTS_SAAS_MIGRATION } from './141_responses_continuation_contexts.js';
-import { PAYMENT_MERCHANT_BINDINGS_SAAS_MIGRATION } from './140_payment_merchant_bindings.js';
-import { PLATFORM_INFERENCE_ACCESS_OPERATIONS_SAAS_MIGRATION } from './139_platform_inference_access_operations.js';
 import { PROJECT_AUTHORIZATION_SAAS_MIGRATION } from './002_project_authorization.js';
-import { REDIS_QUOTA_WRITEBACK_SAAS_MIGRATION } from './138_redis_quota_writeback.js';
 import { PROJECT_MEMBERSHIP_BACKFILL_SAAS_MIGRATION } from './003_project_membership_backfill.js';
 import { API_KEYS_SAAS_MIGRATION } from './004_api_keys.js';
 import { SUPPLY_PROFILES_AND_ENTITLEMENTS_SAAS_MIGRATION } from './005_supply_profiles_and_entitlements.js';
@@ -123,6 +115,15 @@ import { RESPONSES_COMPACT_OPERATION_SAAS_MIGRATION } from './134_responses_comp
 import { KIMI_CODING_QUOTA_SNAPSHOTS_SAAS_MIGRATION } from './135_kimi_coding_quota_snapshots.js';
 import { OPS_MEDIA_REQUEUE_REQUESTS_SAAS_MIGRATION } from './136_ops_media_requeue_requests.js';
 import { PLATFORM_CREDENTIAL_VALIDATION_REQUEUE_SAAS_MIGRATION } from './137_platform_credential_validation_requeue.js';
+import { REDIS_QUOTA_WRITEBACK_SAAS_MIGRATION } from './138_redis_quota_writeback.js';
+import { PLATFORM_INFERENCE_ACCESS_OPERATIONS_SAAS_MIGRATION } from './139_platform_inference_access_operations.js';
+import { PAYMENT_MERCHANT_BINDINGS_SAAS_MIGRATION } from './140_payment_merchant_bindings.js';
+import { RESPONSES_CONTINUATION_CONTEXTS_SAAS_MIGRATION } from './141_responses_continuation_contexts.js';
+import { PAYMENT_CREATE_REQUEST_FINGERPRINT_SAAS_MIGRATION } from './142_payment_create_request_fingerprint.js';
+import { FAST_GATEWAY_JOURNAL_SAAS_MIGRATION } from './143_fast_gateway_journal.js';
+import { FAST_GATEWAY_RESOLUTION_SAAS_MIGRATION } from './144_fast_gateway_resolution.js';
+import { FAST_GATEWAY_CREDIT_STRIPES_SAAS_MIGRATION } from './145_fast_gateway_credit_stripes.js';
+import { FAST_RECEIPT_LIABILITY_RELEASES_SAAS_MIGRATION } from './146_fast_receipt_liability_releases.js';
 
 export interface SaasMigration {
   version: number;
@@ -805,4 +806,5 @@ export const SAAS_MIGRATIONS: readonly SaasMigration[] = [
   FAST_GATEWAY_JOURNAL_SAAS_MIGRATION,
   FAST_GATEWAY_RESOLUTION_SAAS_MIGRATION,
   FAST_GATEWAY_CREDIT_STRIPES_SAAS_MIGRATION,
+  FAST_RECEIPT_LIABILITY_RELEASES_SAAS_MIGRATION,
 ];

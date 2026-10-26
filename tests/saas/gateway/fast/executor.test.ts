@@ -8,6 +8,7 @@ import {
   type FastIntentInput,
   type FastReceiptInput,
 } from '../../../../src/saas/gateway/fast/executor.js';
+import { fastJournalCanonicalJson } from '../../../../src/saas/gateway/fast/journal.js';
 import { CachedFastGatewaySnapshots } from '../../../../src/saas/gateway/fast/snapshots.js';
 import type { PreparedEvidenceClientStream } from '../../../../src/saas/gateway/prepared-evidence-dispatch-service.js';
 import {
@@ -182,8 +183,71 @@ test('native engine sends after durable intent and completes after durable recei
   assert.equal(s.receipts[0].outcome, 'succeeded');
   assert.equal(s.receipts[0].usage.inputTotal, '10');
   assert.equal(s.receipts[0].chargeMinorUnits, '0');
+  assert.equal(s.receipts[0].verification, undefined);
   assert.ok(s.ended());
 });
+test('paid pricing proof is the identical deeply frozen intent snapshot across async mutation', async () => {
+  const s = setup({}, false, true);
+  const originalPrice = s.snapshot.candidates[0].customerPrice;
+  assert.ok(originalPrice);
+  const originalInputRate = originalPrice.rates.input;
+  assert.ok(originalInputRate);
+  const expectedPrice = JSON.parse(fastJournalCanonicalJson(originalPrice));
+  const executor = new FastGatewayExecutor({
+    ...s.options,
+    payload: (candidate) => ({
+      compile: async (input) => {
+        // A snapshot provider reusing objects must not reprice an admitted call.
+        Object.assign(originalInputRate, { numeratorMinorUnits: '50' });
+        return s.options.payload(candidate).compile(input);
+      },
+    }),
+    journal: {
+      ...s.options.journal,
+      reserveIntent: async (input) => {
+        assert.ok(Object.isFrozen(input.priceSnapshot));
+        const proof = input.priceSnapshot as { customerPrice: typeof originalPrice };
+        assert.ok(Object.isFrozen(proof.customerPrice));
+        const frozenInputRate = proof.customerPrice.rates.input;
+        assert.ok(frozenInputRate);
+        assert.ok(Object.isFrozen(frozenInputRate));
+        assert.throws(() => Object.assign(frozenInputRate, { numeratorMinorUnits: '100' }));
+        return s.options.journal.reserveIntent(input);
+      },
+    },
+  });
+  assert.equal(await executor.execute(s.input), true);
+  assert.equal(s.intents[0].maxCostMinorUnits, '144');
+  assert.equal(s.receipts[0].chargeMinorUnits, '15');
+  assert.equal(s.receipts[0].verification?.priceSnapshot, s.intents[0].priceSnapshot);
+  assert.deepEqual(s.receipts[0].verification?.priceSnapshot.customerPrice, expectedPrice);
+  assert.equal(s.calls.filter((call) => call === 'fetch').length, 1);
+});
+
+test('only complete successful paid receipts carry the internal proof and failed ACK never resends upstream', async () => {
+  for (const paid of [false, true]) {
+    const s = setup({}, false, paid);
+    const receipts: FastReceiptInput[] = [];
+    const executor = new FastGatewayExecutor({
+      ...s.options,
+      journal: {
+        ...s.options.journal,
+        appendReceipt: async (receipt) => {
+          receipts.push(receipt);
+          throw new Error('uncertain durable receipt ACK');
+        },
+      },
+    });
+    await assert.rejects(executor.execute(s.input), /uncertain durable receipt ACK/);
+    assert.equal(receipts.length, 2);
+    assert.equal(Boolean(receipts[0].verification), paid);
+    assert.equal(receipts[1].outcome, 'unknown');
+    assert.equal(receipts[1].verification, undefined);
+    assert.equal(s.ended(), false);
+    assert.equal(s.calls.filter((call) => call === 'fetch').length, 1);
+  }
+});
+
 test('SSE DONE stays hidden while receipt commit acknowledgement is pending', async () => {
   const receipt = deferred<void>();
   const observed = deferred<void>();

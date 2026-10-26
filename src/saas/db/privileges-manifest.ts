@@ -122,10 +122,11 @@ export interface SaasWorkerGrantStatement {
 }
 
 export const MANIFEST_CONTROL_PLANE_COLUMN_GROUPS: readonly SaasControlPlaneColumnGroup[] = [
+  { table: 'saas_fast_receipt_liability_releases', privilege: 'SELECT', columns: ['intent_id', 'tenant_id', 'request_id', 'allocation_id', 'allocation_epoch', 'currency', 'released_minor_units', 'retained_minor_units', 'receipt_digest', 'protocol_version', 'created_at'] },
   { table: 'saas_fast_gateway_resolutions', privilege: 'SELECT', columns: ['id', 'intent_id', 'tenant_id', 'request_id', 'kind', 'actor_user_id', 'actor_session_id', 'idempotency_key', 'request_digest', 'charge_minor_units', 'usage', 'usage_digest', 'evidence_reference', 'evidence_sha256', 'support_ticket_ref', 'reason', 'created_at'] },
   { table: 'saas_fast_gateway_resolutions', privilege: 'INSERT', columns: ['id', 'intent_id', 'tenant_id', 'request_id', 'kind', 'actor_user_id', 'actor_session_id', 'idempotency_key', 'request_digest', 'charge_minor_units', 'usage', 'usage_digest', 'evidence_reference', 'evidence_sha256', 'support_ticket_ref', 'reason'] },
-  { table: 'saas_fast_gateway_intents', privilege: 'SELECT', columns: ['id', 'tenant_id', 'request_id', 'attempt_id', 'project_id', 'proxy_key_id', 'authority_snapshot', 'currency', 'max_cost_minor_units', 'price_snapshot', 'send_deadline', 'created_at'] },
-  { table: 'saas_fast_gateway_receipts', privilege: 'SELECT', columns: ['intent_id', 'tenant_id', 'request_id', 'outcome', 'charge_minor_units', 'usage', 'usage_digest', 'http_status', 'created_at'] },
+  { table: 'saas_fast_gateway_intents', privilege: 'SELECT', columns: ['id', 'tenant_id', 'request_id', 'attempt_id', 'project_id', 'proxy_key_id', 'authority_snapshot', 'currency', 'max_cost_minor_units', 'price_snapshot', 'allocation_id', 'allocation_epoch', 'send_deadline', 'created_at'] },
+  { table: 'saas_fast_gateway_receipts', privilege: 'SELECT', columns: ['intent_id', 'tenant_id', 'request_id', 'outcome', 'charge_minor_units', 'usage', 'usage_digest', 'receipt_digest', 'http_status', 'created_at'] },
   { table: 'saas_fast_billing_jobs', privilege: 'SELECT', columns: ['intent_id', 'state', 'ledger_transaction_id', 'completed_at'] },
   { table: 'saas_fast_billing_jobs', privilege: 'INSERT', columns: ['intent_id', 'state'] },
   { table: 'saas_fast_billing_jobs', privilege: 'UPDATE', columns: ['state'] },
@@ -4775,10 +4776,11 @@ export const MANIFEST_CONTROL_PLANE_COLUMN_GROUPS: readonly SaasControlPlaneColu
 ];
 
 export const MANIFEST_CONTROL_PLANE_COLUMN_SQL_ROWS: readonly SaasControlPlaneColumnSqlRow[] = [
+  { table: 'saas_fast_receipt_liability_releases', privilege: 'SELECT', columns: ['intent_id', 'tenant_id', 'request_id', 'allocation_id', 'allocation_epoch', 'currency', 'released_minor_units', 'retained_minor_units', 'receipt_digest', 'protocol_version', 'created_at'] },
   { table: 'saas_fast_gateway_resolutions', privilege: 'SELECT', columns: ['id', 'intent_id', 'tenant_id', 'request_id', 'kind', 'actor_user_id', 'actor_session_id', 'idempotency_key', 'request_digest', 'charge_minor_units', 'usage', 'usage_digest', 'evidence_reference', 'evidence_sha256', 'support_ticket_ref', 'reason', 'created_at'] },
   { table: 'saas_fast_gateway_resolutions', privilege: 'INSERT', columns: ['id', 'intent_id', 'tenant_id', 'request_id', 'kind', 'actor_user_id', 'actor_session_id', 'idempotency_key', 'request_digest', 'charge_minor_units', 'usage', 'usage_digest', 'evidence_reference', 'evidence_sha256', 'support_ticket_ref', 'reason'] },
-  { table: 'saas_fast_gateway_intents', privilege: 'SELECT', columns: ['id', 'tenant_id', 'request_id', 'attempt_id', 'project_id', 'proxy_key_id', 'authority_snapshot', 'currency', 'max_cost_minor_units', 'price_snapshot', 'send_deadline', 'created_at'] },
-  { table: 'saas_fast_gateway_receipts', privilege: 'SELECT', columns: ['intent_id', 'tenant_id', 'request_id', 'outcome', 'charge_minor_units', 'usage', 'usage_digest', 'http_status', 'created_at'] },
+  { table: 'saas_fast_gateway_intents', privilege: 'SELECT', columns: ['id', 'tenant_id', 'request_id', 'attempt_id', 'project_id', 'proxy_key_id', 'authority_snapshot', 'currency', 'max_cost_minor_units', 'price_snapshot', 'allocation_id', 'allocation_epoch', 'send_deadline', 'created_at'] },
+  { table: 'saas_fast_gateway_receipts', privilege: 'SELECT', columns: ['intent_id', 'tenant_id', 'request_id', 'outcome', 'charge_minor_units', 'usage', 'usage_digest', 'receipt_digest', 'http_status', 'created_at'] },
   { table: 'saas_fast_billing_jobs', privilege: 'SELECT', columns: ['intent_id', 'state', 'ledger_transaction_id', 'completed_at'] },
   { table: 'saas_fast_billing_jobs', privilege: 'INSERT', columns: ['intent_id', 'state'] },
   { table: 'saas_fast_billing_jobs', privilege: 'UPDATE', columns: ['state'] },
@@ -9338,6 +9340,7 @@ export const MANIFEST_CONTROL_PLANE_TABLE_SQL_ROWS: readonly SaasControlPlaneTab
 ];
 
 export const MANIFEST_GATEWAY_READ_TABLES: readonly SaasGatewayReadTableTsEntry[] = [
+  { table: 'saas_fast_receipt_liability_releases' },
   { table: 'saas_fast_gateway_resolutions' },
   { table: 'saas_fast_gateway_owners' },
   { table: 'saas_fast_credit_allocations' },
@@ -9629,6 +9632,7 @@ export const MANIFEST_GATEWAY_READ_TABLES: readonly SaasGatewayReadTableTsEntry[
 ];
 
 export const MANIFEST_GATEWAY_READ_SQL_ROWS: readonly SaasGatewayReadSqlRow[] = [
+  { tables: ['saas_fast_receipt_liability_releases'] },
   { tables: ['saas_fast_gateway_resolutions'] },
   { tables: ['saas_fast_gateway_owners', 'saas_fast_credit_allocations', 'saas_fast_gateway_intents', 'saas_fast_gateway_receipts', 'saas_fast_billing_jobs'] },
   { tables: ['saas_responses_continuation_contexts'] },
@@ -9820,6 +9824,7 @@ const REDIS_QUOTA_GATEWAY_COLUMNS = [
 ] as const;
 
 export const MANIFEST_GATEWAY_COLUMN_GROUPS: readonly SaasGatewayColumnTsGroup[] = [
+  { table: 'saas_fast_receipt_liability_releases', privilege: 'INSERT', columns: ['intent_id', 'tenant_id', 'request_id', 'allocation_id', 'allocation_epoch', 'currency', 'released_minor_units', 'retained_minor_units', 'receipt_digest', 'protocol_version'], tsStyle: 'inline' },
   { table: 'saas_fast_gateway_owners', privilege: 'INSERT', columns: ['owner', 'epoch'], tsStyle: 'inline' },
   { table: 'saas_fast_credit_allocations', privilege: 'INSERT', columns: ['id', 'tenant_id', 'wallet_id', 'currency', 'owner', 'epoch', 'stripe', 'state', 'backing_minor_units', 'available_minor_units', 'created_at'], tsStyle: 'inline' },
   { table: 'saas_fast_gateway_intents', privilege: 'INSERT', columns: ['id', 'request_id', 'attempt_id', 'tenant_id', 'project_id', 'proxy_key_id', 'intent_digest', 'request_fingerprint', 'payload_sha256', 'account_id', 'currency', 'max_cost_minor_units', 'price_snapshot', 'authority_snapshot', 'allocation_id', 'allocation_epoch', 'send_deadline', 'created_at'], tsStyle: 'inline' },
@@ -11024,6 +11029,16 @@ export const MANIFEST_GATEWAY_COLUMN_SQL_ENTRIES: readonly SaasGatewayColumnSqlE
   { table: 'saas_fast_gateway_intents', column: 'allocation_epoch', privilege: 'INSERT' },
   { table: 'saas_fast_gateway_intents', column: 'send_deadline', privilege: 'INSERT' },
   { table: 'saas_fast_gateway_intents', column: 'created_at', privilege: 'INSERT' },
+  { table: 'saas_fast_receipt_liability_releases', column: 'intent_id', privilege: 'INSERT' },
+  { table: 'saas_fast_receipt_liability_releases', column: 'tenant_id', privilege: 'INSERT' },
+  { table: 'saas_fast_receipt_liability_releases', column: 'request_id', privilege: 'INSERT' },
+  { table: 'saas_fast_receipt_liability_releases', column: 'allocation_id', privilege: 'INSERT' },
+  { table: 'saas_fast_receipt_liability_releases', column: 'allocation_epoch', privilege: 'INSERT' },
+  { table: 'saas_fast_receipt_liability_releases', column: 'currency', privilege: 'INSERT' },
+  { table: 'saas_fast_receipt_liability_releases', column: 'released_minor_units', privilege: 'INSERT' },
+  { table: 'saas_fast_receipt_liability_releases', column: 'retained_minor_units', privilege: 'INSERT' },
+  { table: 'saas_fast_receipt_liability_releases', column: 'receipt_digest', privilege: 'INSERT' },
+  { table: 'saas_fast_receipt_liability_releases', column: 'protocol_version', privilege: 'INSERT' },
   { table: 'saas_fast_gateway_receipts', column: 'intent_id', privilege: 'INSERT' },
   { table: 'saas_fast_gateway_receipts', column: 'tenant_id', privilege: 'INSERT' },
   { table: 'saas_fast_gateway_receipts', column: 'request_id', privilege: 'INSERT' },

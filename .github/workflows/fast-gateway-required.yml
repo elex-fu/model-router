@@ -72,6 +72,7 @@ jobs:
           tests/saas/gateway/fast/snapshots.test.ts
           tests/saas/gateway/fast/terminal-gate.test.ts
           tests/saas/gateway/fast/ticket-transport.test.ts
+          tests/saas/gateway/fast/resolution.postgres.integration.test.ts
           tests/saas/gateway/fast/resolution-http.test.ts
           tests/saas/gateway/fast/native-http-runtime-fixture.ts
           tests/saas/gateway/fast/native-http-seed-fixture.ts
@@ -79,14 +80,14 @@ jobs:
           tests/ci/fast-gateway-required-gates.test.ts
       - name: Provision full migrations and restricted application roles
         run: bash tests/saas/db/managed-postgres-runtime-privileges.integration.sh
-      - name: Run required real PostgreSQL fast journal and crash gates
+      - name: Run required real PostgreSQL fast journal, resolution and crash gates
         env:
           NODE_ENV: test
           MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED: "1"
           MODEL_ROUTER_SAAS_GATEWAY_E2E_MIGRATOR_URL: postgresql://model_router_saas_migrator@postgres:5432/model_router_saas_ci
           MODEL_ROUTER_SAAS_GATEWAY_E2E_CONTROL_PLANE_URL: postgresql://model_router_saas_control_plane@postgres:5432/model_router_saas_ci
           MODEL_ROUTER_SAAS_GATEWAY_E2E_GATEWAY_URL: postgresql://model_router_saas_gateway@postgres:5432/model_router_saas_ci
-        run: node --import tsx --test tests/saas/gateway/fast/journal.postgres.integration.test.ts
+        run: node --import tsx --test --test-concurrency=1 tests/saas/gateway/fast/journal.postgres.integration.test.ts tests/saas/gateway/fast/resolution.postgres.integration.test.ts
       # Destructive Redis restart tests own a separate loopback child, not the
       # native HTTP service. No FLUSHALL, process killing, or shared state reset.
       - name: Run required real Redis admission restart and drain gates

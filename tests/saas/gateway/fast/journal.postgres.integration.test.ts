@@ -111,6 +111,427 @@ test('fast money journal real PostgreSQL: atomic reserve, durable completion, ex
       )
     ).rows[0];
   }
+  async function assertLiability(tenantId: string) {
+    const rows = await gateway.query<{
+      id: string;
+      backing: string;
+      available: string;
+      held: string;
+      malformed: string;
+    }>(
+      `SELECT a.id,a.backing_minor_units::text AS backing,a.available_minor_units::text AS available,
+        COALESCE(SUM(CASE WHEN j.state='completed' THEN 0 ELSE i.max_cost_minor_units-COALESCE(l.released_minor_units,0) END),0)::text AS held,
+        COUNT(*) FILTER (WHERE l.intent_id IS NOT NULL AND (l.released_minor_units+l.retained_minor_units<>i.max_cost_minor_units
+          OR l.retained_minor_units<>r.charge_minor_units OR l.receipt_digest<>r.receipt_digest
+          OR l.allocation_id<>i.allocation_id OR l.allocation_epoch<>i.allocation_epoch OR l.tenant_id<>i.tenant_id
+          OR l.request_id<>i.request_id OR l.currency<>i.currency))::text AS malformed
+       FROM saas_fast_credit_allocations a LEFT JOIN saas_fast_gateway_intents i ON i.allocation_id=a.id
+       LEFT JOIN saas_fast_billing_jobs j ON j.intent_id=i.id
+       LEFT JOIN saas_fast_gateway_receipts r ON r.intent_id=i.id
+       LEFT JOIN saas_fast_receipt_liability_releases l ON l.intent_id=i.id
+       WHERE a.tenant_id=$1 GROUP BY a.id`,
+      [tenantId],
+    );
+    for (const row of rows.rows) {
+      assert.equal(BigInt(row.backing), BigInt(row.available) + BigInt(row.held), `B=A+sum(H): ${row.id}`);
+      assert.equal(row.malformed, '0');
+    }
+    const current = await facts(tenantId);
+    assert.ok(BigInt(current.balance) >= BigInt(current.backing));
+    return current;
+  }
+  async function releaseCount(intentId: string) {
+    return (
+      await gateway.query<{ count: string }>(
+        'SELECT count(*)::text AS count FROM saas_fast_receipt_liability_releases WHERE intent_id=$1',
+        [intentId],
+      )
+    ).rows[0].count;
+  }
+  await t.test(
+    'receipt v2 reduces durable H before ledger, not wallet or backing; replay proof is digest-compatible',
+    async () => {
+      const scope = await setup();
+      const input = intentFixture(scope.tenantId, scope.owner);
+      const intent = await reserve(scope.journal, input);
+      assert.equal((await assertLiability(scope.tenantId)).available, '20');
+      const legacy = receiptFixture(intent);
+      const receipt = { ...legacy, verification: { priceSnapshot: input.priceSnapshot } };
+      await scope.journal.appendReceipt(receipt);
+      assert.deepEqual(await assertLiability(scope.tenantId), {
+        balance: '100',
+        backing: '100',
+        available: '80',
+        intents: '1',
+        charges: '0',
+        completed: '0',
+      });
+      assert.equal((await jobFacts(intent.id)).state, 'pending_v2');
+      assert.equal(await releaseCount(intent.id), '1');
+      assert.equal(
+        (
+          await gateway.query("SELECT intent_id FROM saas_fast_billing_jobs WHERE intent_id=$1 AND state='pending'", [
+            intent.id,
+          ])
+        ).rowCount,
+        0,
+        'old worker cannot claim v2',
+      );
+      await assert.rejects(
+        gateway.query("UPDATE saas_fast_billing_jobs SET state='pending' WHERE intent_id=$1", [intent.id]),
+        { code: '55000' },
+      );
+      await Promise.all([scope.journal.appendReceipt(receipt), scope.journal.appendReceipt(legacy)]);
+      assert.equal((await assertLiability(scope.tenantId)).available, '80');
+      await scope.journal.runOnce();
+      await scope.journal.appendReceipt(receipt);
+      assert.deepEqual(await assertLiability(scope.tenantId), {
+        balance: '80',
+        backing: '80',
+        available: '80',
+        intents: '1',
+        charges: '1',
+        completed: '1',
+      });
+      assert.equal(await releaseCount(intent.id), '1');
+      await assert.rejects(
+        migrator.query('UPDATE saas_fast_receipt_liability_releases SET retained_minor_units=0 WHERE intent_id=$1', [
+          intent.id,
+        ]),
+        { code: '55000' },
+      );
+      await assert.rejects(
+        migrator.query('DELETE FROM saas_fast_receipt_liability_releases WHERE intent_id=$1', [intent.id]),
+        { code: '55000' },
+      );
+      await assert.rejects(migrator.query('TRUNCATE saas_fast_receipt_liability_releases'), { code: '55000' });
+      await assert.rejects(
+        control.query(
+          'INSERT INTO saas_fast_receipt_liability_releases SELECT * FROM saas_fast_receipt_liability_releases WHERE intent_id=$1',
+          [intent.id],
+        ),
+        { code: '42501' },
+      );
+      await scope.journal.close();
+      await assertLiability(scope.tenantId);
+    },
+  );
+  await t.test('receipt v2 keeps C=0, C=M and >2^53 exact, with no second surplus release', async () => {
+    for (const [balance, maximum, charge, expectedRelease] of [
+      ['100', '80', '0', '1'],
+      ['100', '80', '80', '0'],
+      ['9007199254741093', '9007199254740993', '9007199254740992', '1'],
+    ]) {
+      const scope = await setup(balance);
+      const input = intentFixture(scope.tenantId, scope.owner, priceFixture(maximum));
+      const intent = await reserve(scope.journal, input);
+      await scope.journal.appendReceipt({
+        ...receiptFixture(intent, charge),
+        verification: { priceSnapshot: input.priceSnapshot },
+      });
+      assert.equal((await assertLiability(scope.tenantId)).available, (BigInt(balance) - BigInt(charge)).toString());
+      assert.equal(await releaseCount(intent.id), expectedRelease);
+      assert.equal((await jobFacts(intent.id)).state, 'pending_v2');
+      await scope.journal.drain();
+      assert.equal((await assertLiability(scope.tenantId)).balance, (BigInt(balance) - BigInt(charge)).toString());
+      await scope.journal.close();
+    }
+  });
+  await t.test(
+    'receipt v2 missing, invalid, wrong-price and non-success proofs persist evidence but retain M',
+    async () => {
+      for (const mode of ['legacy', 'bad_charge', 'incomplete', 'wrong_price', 'failed', 'unknown'] as const) {
+        const scope = await setup();
+        const input = intentFixture(scope.tenantId, scope.owner);
+        const intent = await reserve(scope.journal, input);
+        const receipt = {
+          ...receiptFixture(intent),
+          verification:
+            mode === 'legacy'
+              ? undefined
+              : { priceSnapshot: mode === 'wrong_price' ? priceFixture() : input.priceSnapshot },
+        };
+        if (mode === 'bad_charge') receipt.chargeMinorUnits = '21';
+        if (mode === 'incomplete') receipt.usage = { inputTotal: null };
+        if (mode === 'failed') {
+          receipt.outcome = 'failed';
+          receipt.httpStatus = 500;
+        }
+        if (mode === 'unknown') {
+          receipt.outcome = 'unknown';
+          receipt.chargeMinorUnits = null;
+        }
+        await scope.journal.appendReceipt(receipt);
+        assert.equal(await releaseCount(intent.id), '0');
+        assert.equal((await assertLiability(scope.tenantId)).available, '20');
+        await scope.journal.runOnce();
+        await assertLiability(scope.tenantId);
+        if (mode === 'bad_charge' || mode === 'incomplete') assert.equal((await jobFacts(intent.id)).state, 'blocked');
+        await scope.journal.close();
+      }
+    },
+  );
+  await t.test(
+    'receipt v2 cannot spend another tenant/request or use a larger self-consistent price proof than persisted M',
+    async () => {
+      const scope = await setup();
+      const input = intentFixture(scope.tenantId, scope.owner);
+      const intent = await reserve(scope.journal, input);
+      const proof = { priceSnapshot: input.priceSnapshot };
+      const other = await setup();
+      await assert.rejects(
+        scope.journal.appendReceipt({ ...receiptFixture(intent), tenantId: other.tenantId, verification: proof }),
+        { code: '23503' },
+      );
+      await assert.rejects(
+        scope.journal.appendReceipt({ ...receiptFixture(intent), requestId: randomUUID(), verification: proof }),
+        { code: '23503' },
+      );
+      assert.equal(await releaseCount(intent.id), '0');
+      assert.equal((await assertLiability(scope.tenantId)).available, '20');
+      assert.equal((await assertLiability(other.tenantId)).available, '100');
+      await scope.journal.appendReceipt({
+        ...receiptFixture(intent, '81'),
+        verification: { priceSnapshot: priceFixture('100') },
+      });
+      assert.equal((await jobFacts(intent.id)).state, 'pending_v2');
+      assert.equal(await releaseCount(intent.id), '0');
+      await scope.journal.runOnce();
+      assert.equal((await jobFacts(intent.id)).state, 'blocked_v2');
+      assert.equal(
+        (
+          await gateway.query("SELECT intent_id FROM saas_fast_billing_jobs WHERE intent_id=$1 AND state='blocked'", [
+            intent.id,
+          ])
+        ).rowCount,
+        0,
+        'old resolver cannot reopen v2 blocked evidence',
+      );
+      assert.equal((await assertLiability(scope.tenantId)).available, '20');
+      assert.equal((await facts(scope.tenantId)).charges, '0');
+      await other.journal.close();
+      await scope.journal.close();
+    },
+  );
+  await t.test('receipt v2 worker outage retains only proven C and restart exact-drains unchanged cap', async () => {
+    const scope = await setup('1000');
+    for (let index = 0; index < 25; index++) {
+      const input = intentFixture(scope.tenantId, scope.owner);
+      const intent = await reserve(scope.journal, input);
+      await scope.journal.appendReceipt({
+        ...receiptFixture(intent),
+        verification: { priceSnapshot: input.priceSnapshot },
+      });
+      const current = await assertLiability(scope.tenantId);
+      assert.equal(current.backing, '1000');
+      assert.equal(current.charges, '0');
+    }
+    assert.equal((await facts(scope.tenantId)).available, '500');
+    const worker = new PostgresFastGatewayJournal(gateway, { allocationOwner: randomUUID() });
+    await worker.drain();
+    assert.deepEqual(await assertLiability(scope.tenantId), {
+      balance: '500',
+      backing: '500',
+      available: '500',
+      intents: '25',
+      charges: '25',
+      completed: '25',
+    });
+    await worker.drain();
+    await worker.close();
+    await scope.journal.close();
+  });
+  await t.test(
+    'receipt v2 active/retired/takeover ordering preserves original allocation and never requires current process epoch',
+    async () => {
+      for (const mode of ['receipt_first', 'retirement_first', 'takeover_active', 'takeover_retired'] as const) {
+        const scope = await setup();
+        const input = intentFixture(scope.tenantId, scope.owner);
+        const intent = await reserve(scope.journal, input);
+        let successor: PostgresFastGatewayJournal | undefined;
+        if (mode === 'retirement_first') await scope.journal.retireAllocations();
+        if (mode.startsWith('takeover')) {
+          successor = new PostgresFastGatewayJournal(gateway, {
+            allocationOwner: scope.owner,
+            allocationTrancheMinorUnits: '100',
+          });
+          if (mode === 'takeover_retired') await successor.replenish(scope.tenantId, 'USD');
+          else await successor.runOnce();
+        }
+        await scope.journal.appendReceipt({
+          ...receiptFixture(intent),
+          verification: { priceSnapshot: input.priceSnapshot },
+        });
+        assert.equal(
+          await releaseCount(intent.id),
+          mode === 'retirement_first' || mode === 'takeover_retired' ? '0' : '1',
+        );
+        await assertLiability(scope.tenantId);
+        if (mode === 'receipt_first') {
+          await scope.journal.retireAllocations();
+          assert.equal((await assertLiability(scope.tenantId)).backing, '20');
+        }
+        await scope.journal.runOnce();
+        assert.equal((await assertLiability(scope.tenantId)).balance, '80');
+        await successor?.close();
+        await scope.journal.close();
+      }
+    },
+  );
+  await t.test('receipt v2 lost autocommit ACK and legacy-first proof replay release at most once', async () => {
+    for (const legacyFirst of [false, true]) {
+      let lose = !legacyFirst;
+      const wrapped: SaasDatabase = {
+        ...gateway,
+        query: async <Row>(sql: string, values?: readonly unknown[]) => {
+          const result = await gateway.query<Row>(sql, values);
+          if (lose && sql.includes('fast-journal:append-receipt')) {
+            lose = false;
+            throw new Error('lost receipt+release COMMIT ACK');
+          }
+          return result;
+        },
+      };
+      const scope = await setup('100', '100', randomUUID(), wrapped);
+      const input = intentFixture(scope.tenantId, scope.owner);
+      const intent = await reserve(scope.journal, input);
+      const receipt = receiptFixture(intent);
+      if (legacyFirst) await scope.journal.appendReceipt(receipt);
+      await scope.journal.appendReceipt({ ...receipt, verification: { priceSnapshot: input.priceSnapshot } });
+      assert.equal(await releaseCount(intent.id), legacyFirst ? '0' : '1');
+      assert.equal((await assertLiability(scope.tenantId)).available, legacyFirst ? '20' : '80');
+      await scope.journal.drain();
+      assert.equal((await assertLiability(scope.tenantId)).balance, '80');
+      await scope.journal.close();
+    }
+  });
+  await t.test(
+    'receipt v2 current-target addition follows a concurrent intent version committed after its snapshot',
+    async () => {
+      let heldTx: SqlExecutor | undefined;
+      let heldRequest: string | undefined;
+      const wrapped: SaasDatabase = {
+        ...gateway,
+        query: async <Row>(sql: string, values?: readonly unknown[]) => {
+          if (heldTx && sql.includes('fast-journal:reserve-intent') && values?.[1] === heldRequest)
+            return heldTx.query<Row>(sql, values);
+          return gateway.query<Row>(sql, values);
+        },
+      };
+      const scope = await setup('1000', '1000', randomUUID(), wrapped);
+      const input = intentFixture(scope.tenantId, scope.owner);
+      const first = await reserve(scope.journal, input);
+      const second = intentFixture(scope.tenantId, scope.owner);
+      heldRequest = second.requestId;
+      let locked!: () => void, release!: () => void;
+      const ready = new Promise<void>((r) => {
+        locked = r;
+      });
+      const unlock = new Promise<void>((r) => {
+        release = r;
+      });
+      let holderPid = 0;
+      const holding = gateway.transaction(async (tx) => {
+        heldTx = tx;
+        holderPid = (await tx.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0].pid;
+        await reserve(scope.journal, second);
+        locked();
+        await unlock;
+      });
+      await ready;
+      const appending = scope.journal.appendReceipt({
+        ...receiptFixture(first),
+        verification: { priceSnapshot: input.priceSnapshot },
+      });
+      try {
+        let blocked = false;
+        for (let attempt = 0; attempt < 100 && !blocked; attempt++) {
+          blocked = (
+            await gateway.query<{ blocked: boolean }>(
+              `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE query LIKE '/* fast-journal:append-receipt */%' AND $1=ANY(pg_blocking_pids(pid))) AS blocked`,
+              [holderPid],
+            )
+          ).rows[0].blocked;
+          if (!blocked) await new Promise((r) => setTimeout(r, 5));
+        }
+        assert.equal(
+          blocked,
+          true,
+          'receipt has a real old statement snapshot while the second intent owns the target row',
+        );
+        assert.equal(
+          (await facts(scope.tenantId)).available,
+          '920',
+          'neither second intent nor receipt release is visible',
+        );
+      } finally {
+        release();
+        await holding;
+        await appending;
+      }
+      assert.equal((await assertLiability(scope.tenantId)).available, '900', '1000-80-80+(80-20), no lost decrement');
+      await scope.journal.close();
+      assert.equal((await assertLiability(scope.tenantId)).backing, '80');
+    },
+  );
+  await t.test(
+    'receipt v2 concurrent refill and retirement serialize without losing or duplicating liability',
+    async () => {
+      for (const retire of [false, true]) {
+        const scope = await setup('1000', '1000', randomUUID(), gateway, 2);
+        const inputs = Array.from({ length: 6 }, () => intentFixture(scope.tenantId, scope.owner));
+        const intents: FastIntent[] = [];
+        for (const input of inputs) intents.push(await reserve(scope.journal, input));
+        await Promise.all([
+          ...intents.map((intent, index) =>
+            scope.journal.appendReceipt({
+              ...receiptFixture(intent),
+              verification: { priceSnapshot: inputs[index].priceSnapshot },
+            }),
+          ),
+          retire ? scope.journal.retireAllocations() : scope.journal.replenish(scope.tenantId, 'USD', '80'),
+        ]);
+        await assertLiability(scope.tenantId);
+        await scope.journal.drain();
+        assert.equal((await assertLiability(scope.tenantId)).balance, '880');
+        await scope.journal.close();
+        assert.equal((await assertLiability(scope.tenantId)).backing, '0');
+      }
+    },
+  );
+  await t.test(
+    'receipt v2 allocation CHECK rolls back receipt+job+release on corrupt backing, rather than silently skipping compaction',
+    async () => {
+      const scope = await setup();
+      const input = intentFixture(scope.tenantId, scope.owner);
+      const intent = await reserve(scope.journal, input);
+      await migrator.query('UPDATE saas_fast_credit_allocations SET available_minor_units=90 WHERE tenant_id=$1', [
+        scope.tenantId,
+      ]);
+      await assert.rejects(
+        scope.journal.appendReceipt({
+          ...receiptFixture(intent),
+          verification: { priceSnapshot: input.priceSnapshot },
+        }),
+        { code: '23514' },
+      );
+      assert.equal(
+        (await gateway.query('SELECT intent_id FROM saas_fast_gateway_receipts WHERE intent_id=$1', [intent.id]))
+          .rowCount,
+        0,
+      );
+      assert.equal(
+        (await gateway.query('SELECT intent_id FROM saas_fast_billing_jobs WHERE intent_id=$1', [intent.id])).rowCount,
+        0,
+      );
+      assert.equal(await releaseCount(intent.id), '0');
+      await migrator.query('UPDATE saas_fast_credit_allocations SET available_minor_units=20 WHERE tenant_id=$1', [
+        scope.tenantId,
+      ]);
+      await assertLiability(scope.tenantId);
+      await scope.journal.close();
+    },
+  );
   await t.test(
     'same-wallet concurrent reservations cannot exceed escrow; strict holds and negative correction cannot spend backing',
     async () => {
@@ -440,53 +861,82 @@ test('fast money journal real PostgreSQL: atomic reserve, durable completion, ex
           assert.equal(signal, 'SIGKILL');
         }
       }
-      for (const boundary of [
-        'fast-journal:worker-claim',
-        'fast-journal:worker-ledger',
-        'fast-journal:worker-balance-check',
-        'fast-journal:worker-wallet',
-        'fast-journal:worker-complete',
-        'fast-journal:worker-credit-lock',
-        'fast-journal:worker-credit',
-      ]) {
-        const { tenantId, owner, journal } = await setup();
-        const intent = await reserve(journal, intentFixture(tenantId, owner));
-        await journal.appendReceipt(receiptFixture(intent));
-        const pendingJob = await jobFacts(intent.id);
-        await killAt(boundary, {}, async () => {
-          if (boundary !== 'fast-journal:worker-complete') return;
-          assert.deepEqual(
-            await jobFacts(intent.id),
-            pendingJob,
-            'uncommitted completion is invisible to other sessions',
-          );
-          assert.deepEqual(
-            await facts(tenantId),
-            {
-              balance: '100',
-              backing: '100',
-              available: '20',
-              intents: '1',
-              charges: '0',
-              completed: '0',
-            },
-            'ledger, wallet and credit remain externally atomic while paused before final credit restoration',
+      for (const compacted of [false, true])
+        for (const boundary of [
+          'fast-journal:worker-claim',
+          'fast-journal:worker-ledger',
+          'fast-journal:worker-balance-check',
+          'fast-journal:worker-wallet',
+          'fast-journal:worker-complete',
+          'fast-journal:worker-credit-lock',
+          'fast-journal:worker-credit',
+        ]) {
+          const { tenantId, owner, journal } = await setup();
+          const input = intentFixture(tenantId, owner);
+          const intent = await reserve(journal, input);
+          await journal.appendReceipt({
+            ...receiptFixture(intent),
+            ...(compacted ? { verification: { priceSnapshot: input.priceSnapshot } } : {}),
+          });
+          const pendingJob = await jobFacts(intent.id);
+          await killAt(boundary, {}, async () => {
+            if (boundary !== 'fast-journal:worker-complete') return;
+            assert.deepEqual(
+              await jobFacts(intent.id),
+              pendingJob,
+              'uncommitted completion is invisible to other sessions',
+            );
+            assert.deepEqual(
+              await facts(tenantId),
+              {
+                balance: '100',
+                backing: '100',
+                available: compacted ? '80' : '20',
+                intents: '1',
+                charges: '0',
+                completed: '0',
+              },
+              'ledger, wallet and credit remain externally atomic while paused before final credit restoration',
+            );
+          });
+          assert.deepEqual(await jobFacts(intent.id), pendingJob, 'process death restores every job completion field');
+          assert.deepEqual(await facts(tenantId), {
+            balance: '100',
+            backing: '100',
+            available: compacted ? '80' : '20',
+            intents: '1',
+            charges: '0',
+            completed: '0',
+          });
+          await assertLiability(tenantId);
+          await journal.runOnce();
+          await journal.runOnce();
+          await assertLiability(tenantId);
+          assert.equal((await facts(tenantId)).balance, '80');
+          assert.equal((await facts(tenantId)).charges, '1');
+          await journal.close();
+        }
+      for (const beforeReceiptCommit of [true, false]) {
+        const scope = await setup();
+        const input = intentFixture(scope.tenantId, scope.owner);
+        const intent = await reserve(scope.journal, input);
+        const receipt = { ...receiptFixture(intent), verification: { priceSnapshot: input.priceSnapshot } };
+        await killAt('fast-journal:append-receipt', { receipt, beforeReceiptCommit }, async () => {
+          assert.equal((await assertLiability(scope.tenantId)).available, beforeReceiptCommit ? '20' : '80');
+          assert.equal(await releaseCount(intent.id), beforeReceiptCommit ? '0' : '1');
+          assert.equal(
+            (await gateway.query('SELECT intent_id FROM saas_fast_gateway_receipts WHERE intent_id=$1', [intent.id]))
+              .rowCount,
+            beforeReceiptCommit ? 0 : 1,
           );
         });
-        assert.deepEqual(await jobFacts(intent.id), pendingJob, 'process death restores every job completion field');
-        assert.deepEqual(await facts(tenantId), {
-          balance: '100',
-          backing: '100',
-          available: '20',
-          intents: '1',
-          charges: '0',
-          completed: '0',
-        });
-        await journal.runOnce();
-        await journal.runOnce();
-        assert.equal((await facts(tenantId)).balance, '80');
-        assert.equal((await facts(tenantId)).charges, '1');
-        await journal.close();
+        assert.equal((await assertLiability(scope.tenantId)).available, beforeReceiptCommit ? '20' : '80');
+        await scope.journal.appendReceipt(receipt);
+        assert.equal(await releaseCount(intent.id), '1');
+        assert.equal((await assertLiability(scope.tenantId)).available, '80');
+        await scope.journal.drain();
+        assert.equal((await assertLiability(scope.tenantId)).balance, '80');
+        await scope.journal.close();
       }
       const receiptFixtureScope = await setup();
       const intent = await reserve(

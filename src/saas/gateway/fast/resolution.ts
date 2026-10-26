@@ -37,7 +37,10 @@ export interface FastOutcomeCase {
   readonly attemptId: string;
   readonly tenantId: string;
   readonly currency: string | null;
+  /** Original durable maximum, not current liability after receipt compaction. */
   readonly maxCostMinorUnits: string;
+  /** Zero after settlement; null if durable release evidence is inconsistent. */
+  readonly retainedLiabilityMinorUnits: string | null;
   readonly outcome: string | null;
   readonly state: string;
   readonly resolutionId: string | null;
@@ -95,11 +98,28 @@ function normalize(input: FastResolutionInput): FastResolutionInput {
   };
 }
 
+function publicJobState(state: string): string {
+  return state === 'pending_v2' ? 'pending' : state === 'blocked_v2' ? 'blocked' : state;
+}
+
+// Read-only case display validates the immutable marker before reporting H.
+// Original M remains separately visible; a release is neither a refund nor a
+// posted charge. A malformed marker is unknown, not an invented full-M hold.
+const VALID_RELEASE = `l.protocol_version=2 AND l.tenant_id=i.tenant_id AND l.request_id=i.request_id
+  AND l.allocation_id=i.allocation_id AND l.allocation_epoch=i.allocation_epoch AND l.currency=i.currency
+  AND l.receipt_digest=r.receipt_digest AND l.retained_minor_units=r.charge_minor_units
+  AND l.released_minor_units>0 AND l.retained_minor_units>=0
+  AND l.released_minor_units::numeric+l.retained_minor_units::numeric=i.max_cost_minor_units`;
+
 const CASE_SELECT = `SELECT i.id AS "intentId",i.request_id AS "requestId",i.attempt_id AS "attemptId",
   i.tenant_id AS "tenantId",i.currency,i.max_cost_minor_units::text AS "maxCostMinorUnits",
-  r.outcome,COALESCE(j.state,'unresolved') AS state,x.id AS "resolutionId",x.kind AS "resolutionKind",
+  CASE WHEN j.state='completed' THEN '0' WHEN l.intent_id IS NULL THEN i.max_cost_minor_units::text
+    WHEN ${VALID_RELEASE} THEN l.retained_minor_units::text ELSE NULL END AS "retainedLiabilityMinorUnits",
+  r.outcome,CASE j.state WHEN 'pending_v2' THEN 'pending' WHEN 'blocked_v2' THEN 'blocked'
+    ELSE COALESCE(j.state,'unresolved') END AS state,x.id AS "resolutionId",x.kind AS "resolutionKind",
   i.send_deadline AS "sendDeadline" FROM saas_fast_gateway_intents i
   LEFT JOIN saas_fast_gateway_receipts r ON r.intent_id=i.id
+  LEFT JOIN saas_fast_receipt_liability_releases l ON l.intent_id=i.id
   LEFT JOIN saas_fast_billing_jobs j ON j.intent_id=i.id
   LEFT JOIN saas_fast_gateway_resolutions x ON x.intent_id=i.id`;
 
@@ -172,18 +192,67 @@ export class FastGatewayResolutionService {
           input.intentId,
         ])
       ).rows[0];
-      if (job && job.state !== 'blocked') {
+      if (job && job.state !== 'blocked' && job.state !== 'blocked_v2') {
         const concurrent = await this.existing(tx, input, requestDigest);
         if (concurrent) return concurrent;
         throw new FastResolutionError('NOT_ELIGIBLE');
       }
+      // Fresh statement after the job fence: a receipt that won job ownership
+      // may have committed while we waited. Immutable receipt/release evidence
+      // must be checked before authorizing any replacement financial outcome.
+      const retainedLiability = async (): Promise<bigint> => {
+        const evidence = (
+          await tx.query<{
+            outcome: string | null;
+            http_status: number | null;
+            charge_minor_units: string | null;
+            usage: Readonly<Record<string, string | null>> | null;
+            retained_minor_units: string;
+            release_valid: boolean;
+          }>(
+            `SELECT r.outcome,r.http_status,r.charge_minor_units,r.usage,
+           COALESCE(l.retained_minor_units,i.max_cost_minor_units)::text AS retained_minor_units,
+           (l.intent_id IS NULL OR COALESCE(${VALID_RELEASE},false)) AS release_valid
+           FROM saas_fast_gateway_intents i
+           LEFT JOIN saas_fast_gateway_receipts r ON r.intent_id=i.id
+           LEFT JOIN saas_fast_receipt_liability_releases l ON l.intent_id=i.id
+           WHERE i.id=$1 AND i.tenant_id=$2`,
+            [input.intentId, input.tenantId],
+          )
+        ).rows[0];
+        if (!evidence?.release_valid) throw new FastResolutionError('NOT_ELIGIBLE');
+        let provenSuccess = false;
+        if (
+          intent.price_snapshot !== null &&
+          evidence.outcome === 'succeeded' &&
+          evidence.http_status !== null &&
+          evidence.http_status >= 200 &&
+          evidence.http_status < 300 &&
+          evidence.charge_minor_units !== null &&
+          evidence.usage !== null
+        ) {
+          try {
+            const original = calculateFastReceiptCharge(intent.price_snapshot, evidence.usage);
+            provenSuccess =
+              original === BigInt(evidence.charge_minor_units) && original <= BigInt(intent.max_cost_minor_units);
+          } catch {
+            // A success flag alone is not proof. Incomplete/unverifiable usage
+            // retains the existing audited unknown-resolution capability.
+          }
+        }
+        // A blocked proven paid success needs repair or a separate financial
+        // correction, not an operator assertion replacing immutable evidence.
+        if (provenSuccess) throw new FastResolutionError('NOT_ELIGIBLE');
+        return BigInt(evidence.retained_minor_units);
+      };
+      const retained = await retainedLiability();
       let charge: bigint;
       try {
         charge = input.kind === 'non_execution' ? 0n : calculateFastReceiptCharge(intent.price_snapshot, input.usage);
       } catch {
         throw new FastResolutionError('INVALID_INPUT');
       }
-      if (charge !== BigInt(input.chargeMinorUnits) || charge > BigInt(intent.max_cost_minor_units))
+      if (charge !== BigInt(input.chargeMinorUnits) || charge > retained)
         throw new FastResolutionError('INVALID_INPUT');
       // The job fence can wait past natural session expiry; the user fence
       // blocks revocation writers but cannot stop time. Re-read authority now.
@@ -225,11 +294,17 @@ export class FastGatewayResolutionService {
       // resolution insertion rather than overriding a financial outcome.
       const queued = await tx.query(
         `INSERT INTO saas_fast_billing_jobs(intent_id,state) VALUES($1,'pending')
-        ON CONFLICT(intent_id) DO UPDATE SET state='pending' WHERE saas_fast_billing_jobs.state='blocked'
+        ON CONFLICT(intent_id) DO UPDATE SET state=CASE saas_fast_billing_jobs.state
+          WHEN 'blocked_v2' THEN 'pending_v2' ELSE 'pending' END
+        WHERE saas_fast_billing_jobs.state IN ('blocked','blocked_v2')
         RETURNING intent_id`,
         [input.intentId],
       );
       if (queued.rowCount !== 1) throw new FastResolutionError('NOT_ELIGIBLE');
+      // Missing-job reads acquire no row lock. A receipt can win, compact and
+      // then become blocked before this upsert takes its lock. Recheck from a
+      // fresh snapshot under that lock; neither proof nor H may be stale.
+      if (charge > (await retainedLiability())) throw new FastResolutionError('INVALID_INPUT');
       // The missing-job upsert can itself wait for a concurrent receipt writer.
       if (
         !(await new PostgresUnknownOutcomeOperatorAuthorizationAdapter(tx).mayResolveUnknownOutcome({
@@ -276,6 +351,6 @@ export class FastGatewayResolutionService {
     ).rows[0];
     if (!found) return null;
     if (found.request_digest !== requestDigest) throw new FastResolutionError('CONFLICT');
-    return { resolutionId: found.id, intentId: input.intentId, replayed: true, state: found.state };
+    return { resolutionId: found.id, intentId: input.intentId, replayed: true, state: publicJobState(found.state) };
   }
 }

@@ -8,7 +8,7 @@ This is an opt-in bounded-text vertical slice, not a replacement for every stric
 * Off-path refill acquires the existing wallet advisory fence. It subtracts legacy reservations, refund freezes and **all** fast allocation backing before allocating. The explicit tranche setting caps each owner's active backing; it is not an overdraft allowance. Legacy wallet summaries, reserves, refunds and new negative corrections include fast backing.
 * A generation takeover fences old owners. Retirement returns only unused available credit. Unresolved intent maxima never expire or become reusable because of a Redis restart, process exit or TTL.
 * Before terminal HTTP success/EOF, one SQL statement appends an immutable usage receipt and its durable work row. An ambiguous append may be retried with the exact same receipt; a conflicting digest is rejected. Failed/unknown receipts retain money for reconciliation, except the explicitly trusted definitely-unsent tuple (`failed`, HTTP status null, charge `'0'`, empty usage object). That marker may be emitted only before entering transport; the worker releases its maximum exactly once. A completed non-2xx response or any ambiguous send can never use the marker.
-* The worker claims durable jobs with `FOR UPDATE SKIP LOCKED`, recomputes exact bigint charges `C` from the frozen price, verifies usage bounds and `C <= M`, posts balanced immutable ledger entries, adjusts the wallet and credit allocation, and completes the job in one transaction. A crash rolls everything back. Active allocations regain `M-C`; retired allocations release their entire `M` backing while charging `C` once.
+* The worker claims durable jobs with `FOR UPDATE SKIP LOCKED`, recomputes exact bigint charges `C` from the frozen price, verifies usage bounds and `C <= H` for retained liability `H` (original `M` without a release marker), posts balanced immutable ledger entries, adjusts the wallet and credit allocation, and completes the job in one transaction. A crash rolls everything back. Active allocations regain `H-C`; retired allocations release their entire `H` backing while charging `C` once.
 * Native PostgreSQL command tags are checked: a resolved `ROLLBACK` response to `COMMIT` is not reported as a committed transaction. Lost ACKs are still uncertain, never permission to replay upstream.
 
 ## Runtime contract
@@ -37,7 +37,7 @@ Report recovery counts (`onCreditRecovery`, or intent statement count minus orig
 
 Before each intent SQL the journal remembers the existing bounded wallet hint's committed-restore generation and the current worker promise. At an acknowledged no-write result it captures a matching batch **before** the replay lookup. Thus a worker completing during that SQL or lookup is not lost or replaced with a newer batch. A whole batch starting and finishing between those boundaries is detected by the generation change. Only a successfully acknowledged transaction with an actual positive restore to this owner's current active epoch advances that generation; failed/unknown COMMIT does not. No unobserved-wallet hint is created, and eviction can only lose this scheduling optimization.
 
-The worker's existing detail read uses a primary-key allocation LEFT JOIN to identify active matching tenant/currency/epoch/owner snapshots. After receipt price/usage validation, only `C < M` marks a planned scope before taking its wallet fence. Admission may wait only for a captured batch with that matching scope. Empty polls, another tenant, another owner of the same wallet, or an as-yet-unidentified batch leave the original fragmentation refill available immediately, even if that unrelated work stalls longer than the recovery budget. The guarded credit UPDATE records actual restored scopes; only successful COMMIT completion can confirm that hint. If the captured matching batch fails or restores no applicable credit, the same recovery stage can still perform its one original unused-credit refill within the **remaining**, unreset budget.
+The worker's existing detail read uses a primary-key allocation LEFT JOIN to identify active matching tenant/currency/epoch/owner snapshots. After receipt price/usage and release-marker validation, only `C < H` marks a planned scope before taking its wallet fence. Admission may wait only for a captured batch with that matching scope. Empty polls, another tenant, another owner of the same wallet, or an as-yet-unidentified batch leave the original fragmentation refill available immediately, even if that unrelated work stalls longer than the recovery budget. The guarded credit UPDATE records actual restored scopes; only successful COMMIT completion can confirm that hint. If the captured matching batch fails or restores no applicable credit, the same recovery stage can still perform its one original unused-credit refill within the **remaining**, unreset budget.
 
 The same captured scope governs `credit_busy` reselection: if a matching positive restoration is still in flight, wait for that exact batch's successful COMMIT before issuing a fresh CAS rather than racing the depleted window twice. No matching batch retains an immediate first reselection. A failed/unknown or zero-restore batch is not confirmed progress, but it cannot revoke the original safe BUSY reselection while budget/authority remain valid: only the fresh guarded CAS can pay from other available credit, and the worker is never rerun. When no batch was captured at the no-write ACK, a matching scope that first becomes identifiable during the replay lookup can be joined; a previously captured batch is never replaced by newer work. Actual restoration hints explicitly check owner as well as epoch/state/positive amount.
 
@@ -51,9 +51,57 @@ Run `node scripts/run-commercial-postgres-gate.mjs --pg-bin /path/to/pg/bin --te
 
 The control-plane-only `/admin/api/v1/ops/fast-unknown-outcomes` endpoint lists cases (`GET ?tenantId=...`), reads a case (`GET /:intentId?tenantId=...`) and accepts an append-only resolution (`POST /:intentId/resolve?tenantId=...`). It requires an active operations/superadmin session; POST additionally requires same-origin, CSRF and an `Idempotency-Key`. The exact JSON fields are `kind`, `chargeMinorUnits`, `usage`, `evidenceReference`, `evidenceSha256`, `supportTicketRef`, and `reason`. Actor identity comes only from the authenticated session.
 
-`verified_usage` recomputes exact usage against the frozen price and maximum. `non_execution` requires positive trusted operator attestation of provider non-execution, charge `'0'` and empty usage. The evidence reference/hash is an audited human attestation, **not automatically verified provider proof**. Passing the last-send deadline is only an eligibility guard, never evidence that execution finished or did not happen. No timeout, missing receipt or support ticket alone authorizes release. Operators must not resolve a still-running or unverified call.
+`verified_usage` recomputes exact usage against the frozen price and retained liability `H`, not the original maximum after compaction. `non_execution` requires positive trusted operator attestation of provider non-execution, charge `'0'` and empty usage. The evidence reference/hash is an audited human attestation, **not automatically verified provider proof**. Passing the last-send deadline is only an eligibility guard, never evidence that execution finished or did not happen. No timeout, missing receipt or support ticket alone authorizes release. Operators must not resolve a still-running or unverified call.
 
 A resolution does not modify the original intent/receipt. It queues the same durable worker (202 means pending, not financially complete), which atomically settles once. Missing receipts can be resolved without fabrication; genuine late receipts remain immutable evidence and do not override an already-authoritative resolution. Conflicting evidence requires separate incident review, not a second resolution/debit. Authorization is rechecked behind the revocation fence and again after waiting for a job lock. Gateway credentials cannot create operator resolutions.
+
+A new-version resolver refuses to replace a successful paid receipt whose charge
+independently recomputes from the immutable intent price and complete receipt usage,
+even if the job is blocked. Proof also requires a successful HTTP status and a
+charge within original M. A success flag alone is insufficient: genuinely unknown,
+failed, incomplete, invalid-status, overbound or otherwise unverified blocked
+evidence remains eligible for audited resolution within current H. Proven-success repair/refund/correction belongs to its separate financial
+workflow, not this unknown-outcome endpoint. Completed jobs are never reopened.
+
+Internal `pending_v2`/`blocked_v2` states map to existing public `pending`/`blocked`.
+Case reads retain `maxCostMinorUnits` as original M and separately return
+`retainedLiabilityMinorUnits` as current H (zero after completion, null if release
+evidence is inconsistent). Resolutions validate the append-only marker's exact
+identity, digest and `R+H=M`, and cannot charge above H or add new funding. A v2
+blocked job requeues as v2, never legacy pending. A final fresh evidence check after
+the job upsert closes the missing-job race where a receipt arrives, compacts, and
+becomes blocked between the resolver's initial read and its write. If resolution
+owns the job first, later receipts cannot compact or override its financial outcome.
+
+## Durable paid-receipt liability compaction (migration 146)
+
+For a complete successful paid response, the native executor passes the exact deeply
+frozen price snapshot used for the durable intent and charge calculation. This internal
+proof is not client input and is not part of the legacy receipt digest. The journal
+independently verifies price/usage and binds the proof to the persisted intent before
+releasing anything. In one durable receipt command, a newly won v2 job can add
+`R=M-C` to its still-active original allocation and append an immutable release marker.
+Backing B and posted wallet balance do not change; retained liability becomes H=C.
+The invariant is `B=A+sum(H)` over unsettled intents. Missing/invalid proof, unknown,
+failed, BYOK and retired-allocation paths retain the prior conservative accounting.
+
+The receipt, work row, credit restoration and marker commit together before terminal
+HTTP EOF/SSE DONE. An exact duplicate or lost-ACK retry cannot release again, and
+never resends upstream. A later worker charges C once and restores only H-C; verified
+compacted success restores zero at settlement. This is earlier release of unused
+reserved liability, not a refund or a posted expense, and is not a performance claim.
+
+**146 rollout:** keep fast mode opt-in. Pause admission, drain legacy success work,
+apply migration and deploy compaction-aware worker/control-plane readers before
+starting new producers. Old workers select only legacy pending jobs; old resolvers
+cannot reopen v2 blocked jobs. Schema guards prevent v2-to-legacy downgrade. On
+rollback, disable new producers but retain a new-version drain worker until all v2
+work is settled/resolved; never remove markers or send v2 jobs to old workers.
+Customer reads are compatible, but unported admin/export consumers remain out of
+scope. Run the dedicated `resolution.postgres.integration.test.ts` and
+`console/fast-usage-read.postgres.integration.test.ts` gates alongside journal/native
+HTTP gates. The resolver gate covers both first-writer orderings and the post-upsert
+proof/H recheck, including a synthetic malformed historical producer marker.
 
 **145 rollout:** drain/disable fast mode before applying 145 and replacing gateway processes. The active allocation unique key changes to include `stripe`; pre-145 refill SQL is not rolling-compatible and fails closed after migration. Strict rollback remains available, but do not run an old fast gateway binary against the new schema. Never rewrite a published migration checksum.
 
@@ -81,6 +129,6 @@ Admission gateways must keep `MODEL_ROUTER_FAST_OWNER` stable across restarts an
 
 ## Settlement credit-lock scope
 
-The worker reads immutable allocation identity/state under the existing sorted wallet fences, without locking admission credit rows during ledger construction. Refill, retirement and settlement all share those fences; native admission can only subtract available credit. After inserting the complete ledger batch, the worker explicitly runs the two existing named deferred balance constraints with `SET CONSTRAINTS ... IMMEDIATE`, before wallet projection and credit locks. This adds one SQL operation per paid batch; it moves the same mandatory checks out of the credit-lock window, never disables or replaces them.
+The worker reads immutable allocation identity/state under the existing sorted wallet fences, without locking admission credit rows during ledger construction. Refill, retirement and settlement all share those fences. Native intents subtract available credit; verified receipt compaction may add proven surplus to available credit but cannot change allocation backing or state. After inserting the complete ledger batch, the worker explicitly runs the two existing named deferred balance constraints with `SET CONSTRAINTS ... IMMEDIATE`, before wallet projection and credit locks. This adds one SQL operation per paid batch; it moves the same mandatory checks out of the credit-lock window, never disables or replaces them.
 
 A late, separate SELECT acquires sorted `FOR NO KEY UPDATE` locks and checks the original tenant/wallet/currency/epoch/state tuple again. The next guarded statement restores credit additively from current row values, including any native CAS that committed while lock acquisition waited. Keeping these commands separate avoids same-statement snapshot/EPQ ambiguity. Together with the balance-check flush, this adds two SQL operations per paid batch versus the original early-lock worker. Any tuple mismatch, missing row or balance-check failure rolls back the entire ledger/projection/job transaction. Only credit restoration, job completion and COMMIT retain these scarce row locks. The existing strict wallet fence still covers the complete financial transaction. This is a lock-scope change, not a measured HTTP performance claim.

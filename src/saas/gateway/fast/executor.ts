@@ -18,7 +18,7 @@ import {
 } from '../provider-http-transport.js';
 import { observeRequestDiagnosticPhase } from '../request-diagnostic-trace.js';
 import type { RequestPreparationPayloadCompiler } from '../request-preparation-service.js';
-import { calculateFastReceiptCharge } from './journal.js';
+import { calculateFastReceiptCharge, type FastPriceSnapshot } from './journal.js';
 import type { FastGatewayAdmission } from './redis-admission.js';
 import {
   authorizeFastGatewaySnapshot,
@@ -55,6 +55,8 @@ export interface FastReceiptInput {
   readonly usage: Readonly<Record<string, string | null>>;
   readonly usageDigest: string;
   readonly httpStatus: number | null;
+  /** Internal frozen intent price, never client-supplied evidence. */
+  readonly verification?: { readonly priceSnapshot: FastPriceSnapshot };
 }
 export interface FastGatewayJournalPort {
   reserveIntent(
@@ -118,6 +120,13 @@ function hash(value: string | Uint8Array): string {
 }
 function canonical(value: unknown): string {
   return JSON.stringify(value, (_key, item) => (typeof item === 'bigint' ? item.toString() : item));
+}
+function deepFreeze<T>(value: T): T {
+  if (value && typeof value === 'object') {
+    for (const child of Object.values(value)) deepFreeze(child);
+    Object.freeze(value);
+  }
+  return value;
 }
 function fallbackReason(input: FastGatewayExecuteInput): string | null {
   if (input.idempotencyKey !== undefined) return 'client_idempotency';
@@ -247,7 +256,12 @@ export class FastGatewayExecutor implements FastGatewayExecutorPort {
       input.selected?.('strict', 'provider_protocol');
       return false;
     }
-    const price = candidate.customerPrice;
+    // Capture before compilation/admission awaits. A provider implementation
+    // may refresh or reuse its snapshot objects; that must never change the
+    // maximum, durable intent price, final charge or compaction proof in flight.
+    const price: CustomerPriceVersionRecord | null = candidate.customerPrice
+      ? deepFreeze(JSON.parse(canonical(candidate.customerPrice)) as CustomerPriceVersionRecord)
+      : null;
     if (candidate.authority.supplyMode === 'platform' && (!price || !pricingSupported(price))) {
       input.selected?.('strict', 'price_policy');
       return false;
@@ -347,13 +361,13 @@ export class FastGatewayExecutor implements FastGatewayExecutorPort {
       input.selected?.('strict', 'zero_price');
       return false;
     }
-    const priceSnapshot = price
-      ? {
+    const priceSnapshot: FastPriceSnapshot | null = price
+      ? Object.freeze({
           schemaVersion: 1,
           customerPrice: price,
           maxInputTokens: maxInput.toString(),
           maxOutputTokens: maxOutput.toString(),
-        }
+        })
       : null;
     if (input.client.signal.aborted) throw new FastGatewayExecutionError(503, 'FAST_AUTHORITY_EXPIRED');
     const remainingValidity = () => Math.min(deadline - performance.now(), snapshot.validUntilMs - Date.now());
@@ -423,7 +437,7 @@ export class FastGatewayExecutor implements FastGatewayExecutorPort {
           accountId: candidate.authority.accountId,
           currency: price?.currency ?? null,
           maxCostMinorUnits: maxCost.toString(),
-          priceSnapshot: JSON.parse(canonical(priceSnapshot)),
+          priceSnapshot,
           authoritySnapshot: JSON.parse(
             canonical({
               revision: snapshot.revision,
@@ -576,11 +590,13 @@ export class FastGatewayExecutor implements FastGatewayExecutorPort {
           usage,
           usageDigest: hash(canonical({ status, usage, charge: charge.toString() })),
           httpStatus: status,
+          ...(succeeded && priceSnapshot ? { verification: { priceSnapshot } } : {}),
         }),
       );
       terminalReceipt = true;
       // Rate windows track actual completed tokens plus conservative inflight
-      // reservations. Financial M is unchanged; no refund on missing/failed ACK.
+      // reservations. Only the durable receipt transaction may compact financial
+      // liability; this rate feedback never releases money on a missing ACK.
       if (succeeded && usage.inputTotal != null && usage.outputTotal != null) {
         const total = BigInt(usage.inputTotal) + BigInt(usage.outputTotal);
         if (total >= 0n && total <= maxInput + maxOutput) actualTokenUnits = Number(total);

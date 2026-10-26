@@ -361,3 +361,59 @@ test('credit backoff cancellation, authority and shared budget win without leavi
     assert.equal(f.timers.size, 0);
   }
 });
+
+test('receipt verification is captured before await, excluded from v1 digest, and cannot upgrade an exact replay', async () => {
+  const snapshot = priceFixture();
+  const receipt = {
+    intentId: 'receipt-proof-intent',
+    requestId: 'receipt-proof-request',
+    tenantId: 'receipt-proof-tenant',
+    outcome: 'succeeded' as const,
+    chargeMinorUnits: '20',
+    usage: { inputTotal: '20', outputTotal: '0' },
+    usageDigest: 'd'.repeat(64),
+    httpStatus: 200,
+  };
+  const expectedDigest = fastJournalDigest(receipt);
+  const expectedSnapshot = fastJournalCanonicalJson(snapshot);
+  let release!: () => void;
+  const pause = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const attempts: (readonly unknown[])[] = [];
+  const db: SaasDatabase = {
+    async query<Row>(sql: string, values?: readonly unknown[]): Promise<SqlResult<Row>> {
+      if (sql.startsWith('INSERT INTO saas_fast_gateway_owners')) return { rows: [], rowCount: 1 };
+      if (sql.includes('fast-journal:append-receipt')) {
+        attempts.push(values ?? []);
+        if (attempts.length === 1) {
+          await pause;
+          throw new Error('uncertain first receipt commit');
+        }
+        throw Object.assign(new Error('duplicate receipt'), { code: '23505' });
+      }
+      assert.match(sql, /SELECT receipt_digest FROM saas_fast_gateway_receipts/);
+      return { rows: [{ receipt_digest: expectedDigest } as Row], rowCount: 1 };
+    },
+    transaction: async () => {
+      throw new Error('must not start another receipt transaction');
+    },
+    migrate: async () => {},
+    verifySchema: async () => {},
+    ping: async () => {},
+    close: async () => {},
+  };
+  const journal = new PostgresFastGatewayJournal(db, { allocationOwner: 'receipt-proof-owner' });
+  const appending = journal.appendReceipt({ ...receipt, verification: { priceSnapshot: snapshot } });
+  receipt.usage.inputTotal = '70';
+  Object.assign(snapshot.customerPrice.rates, { input: { numeratorMinorUnits: '2', denominatorUnits: '1' } });
+  release();
+  await appending;
+  assert.equal(attempts.length, 2);
+  assert.deepEqual(attempts[0], attempts[1], 'retry cannot pick up changed usage or proof');
+  assert.equal(attempts[0][5], '{"inputTotal":"20","outputTotal":"0"}');
+  assert.equal(attempts[0][7], expectedDigest);
+  assert.equal(attempts[0][9], 'pending_v2');
+  assert.equal(attempts[0][10], expectedSnapshot);
+  await journal.close({ drain: false });
+});

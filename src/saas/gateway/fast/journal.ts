@@ -54,6 +54,8 @@ export interface FastReceiptInput {
   readonly usage: Readonly<Record<string, string | null>>;
   readonly usageDigest: string;
   readonly httpStatus: number | null;
+  /** Internal frozen price proof only; never part of canonical provider evidence. */
+  readonly verification?: { readonly priceSnapshot: unknown };
 }
 /**
  * Trusted transport contract: this exact tuple is legal ONLY when sendFast has
@@ -595,7 +597,7 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
 
   private async findExisting(input: FastReserveIntentInput, identity: string): Promise<FastReserveResult | null> {
     const result = await this.database.query<{ request_id: string; intent_digest: string; status: string }>(
-      `SELECT i.request_id, i.intent_digest, COALESCE(j.state, r.outcome, 'unresolved') AS status
+      `SELECT i.request_id, i.intent_digest, COALESCE(CASE j.state WHEN 'pending_v2' THEN 'pending' WHEN 'blocked_v2' THEN 'blocked' ELSE j.state END, r.outcome, 'unresolved') AS status
          FROM saas_fast_gateway_intents i LEFT JOIN saas_fast_gateway_receipts r ON r.intent_id = i.id
          LEFT JOIN saas_fast_billing_jobs j ON j.intent_id = i.id
         WHERE i.request_id = $1 AND i.tenant_id = $2`,
@@ -613,7 +615,37 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
     if (input.chargeMinorUnits !== null) parseMinorUnits(input.chargeMinorUnits, { allowZero: true });
     if (input.outcome === 'unknown' && input.chargeMinorUnits !== null) throw new Error('FAST_JOURNAL_UNKNOWN_CHARGE');
     for (const value of Object.values(input.usage)) if (value !== null) parseMinorUnits(value, { allowZero: true });
-    const receiptDigest = fastJournalDigest(input);
+    // Keep the v1 digest unchanged even when the caller adds internal proof.
+    const evidence = {
+      intentId: input.intentId,
+      requestId: input.requestId,
+      tenantId: input.tenantId,
+      outcome: input.outcome,
+      chargeMinorUnits: input.chargeMinorUnits,
+      usage: input.usage,
+      usageDigest: input.usageDigest,
+      httpStatus: input.httpStatus,
+    };
+    const receiptDigest = fastJournalDigest(evidence);
+    const usageJson = fastJournalCanonicalJson(input.usage);
+    let verifiedPrice: string | null = null;
+    if (
+      input.outcome === 'succeeded' &&
+      input.httpStatus !== null &&
+      input.httpStatus >= 200 &&
+      input.httpStatus < 300 &&
+      input.chargeMinorUnits !== null &&
+      input.verification?.priceSnapshot != null
+    ) {
+      try {
+        const priceJson = fastJournalCanonicalJson(input.verification.priceSnapshot);
+        if (calculateFastReceiptCharge(JSON.parse(priceJson), JSON.parse(usageJson)) === BigInt(input.chargeMinorUnits))
+          verifiedPrice = priceJson;
+      } catch {
+        // Invalid proof must not discard the only durable provider evidence.
+        // Preserve the old uncompressed path; the worker independently checks it.
+      }
+    }
     // Snapshot every parameter before the first await. Retrying a receipt is
     // safe; retrying an intent/upstream execution is deliberately forbidden.
     const values = [
@@ -622,15 +654,26 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
       input.requestId,
       input.outcome,
       input.chargeMinorUnits,
-      fastJournalCanonicalJson(input.usage),
+      usageJson,
       input.usageDigest,
       receiptDigest,
       input.httpStatus,
-      input.outcome === 'succeeded' || isFastDefinitelyUnsentReceipt(input) ? 'pending' : 'blocked',
+      verifiedPrice !== null
+        ? 'pending_v2'
+        : input.outcome === 'succeeded' || isFastDefinitelyUnsentReceipt(input)
+          ? 'pending'
+          : 'blocked',
+      verifiedPrice,
     ];
     const append = async (): Promise<void> => {
       try {
-        const result = await this.database.query(
+        const result = await this.database.query<{
+          intent_id: string;
+          tenant_id: string | null;
+          currency: string | null;
+          owner: string | null;
+          epoch: string | null;
+        }>(
           `/* fast-journal:append-receipt */
            WITH receipt AS (
              INSERT INTO saas_fast_gateway_receipts
@@ -639,11 +682,47 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
            ), queued AS (
              INSERT INTO saas_fast_billing_jobs(intent_id, state)
              SELECT intent_id, $10::text FROM receipt
-             ON CONFLICT(intent_id) DO NOTHING
-           ) SELECT intent_id FROM receipt`,
+             ON CONFLICT(intent_id) DO NOTHING RETURNING intent_id
+           ), eligible AS MATERIALIZED (
+             SELECT i.id AS intent_id,i.tenant_id,i.request_id,i.allocation_id,i.allocation_epoch,i.currency,
+               i.max_cost_minor_units-$5::bigint AS released_minor_units,$5::bigint AS retained_minor_units
+             FROM saas_fast_gateway_intents i JOIN queued q ON q.intent_id=i.id
+             WHERE i.id=$1 AND i.tenant_id=$2 AND i.request_id=$3 AND i.currency IS NOT NULL
+               AND i.price_snapshot=$11::jsonb AND $11::jsonb IS NOT NULL
+               AND $4::text='succeeded' AND $9::integer BETWEEN 200 AND 299
+               AND $5::bigint >= 0 AND $5::bigint < i.max_cost_minor_units
+           ), credit AS (
+             UPDATE saas_fast_credit_allocations a
+                SET available_minor_units=a.available_minor_units+e.released_minor_units
+               FROM eligible e
+              WHERE a.id=e.allocation_id AND a.tenant_id=e.tenant_id AND a.currency=e.currency
+                AND a.epoch=e.allocation_epoch AND a.state='active'
+             RETURNING e.*,a.owner,a.epoch
+           ), released AS (
+             INSERT INTO saas_fast_receipt_liability_releases
+               (intent_id,tenant_id,request_id,allocation_id,allocation_epoch,currency,
+                released_minor_units,retained_minor_units,receipt_digest,protocol_version)
+             SELECT intent_id,tenant_id,request_id,allocation_id,allocation_epoch,currency,
+               released_minor_units,retained_minor_units,$8::text,2 FROM credit
+             RETURNING intent_id,tenant_id,currency
+           ) SELECT r.intent_id,l.tenant_id,l.currency,c.owner,c.epoch
+             FROM receipt r LEFT JOIN released l ON l.intent_id=r.intent_id
+             LEFT JOIN credit c ON c.intent_id=l.intent_id`,
           values,
         );
         one(result.rowCount);
+        // This result exists only for a new actual release and an acknowledged
+        // autocommit. Duplicate/lost-ACK lookup never fabricates progress.
+        const released = result.rows[0];
+        if (
+          released?.tenant_id &&
+          released.currency &&
+          released.owner === this.options.allocationOwner &&
+          released.epoch === this.epoch
+        ) {
+          const hint = this.observedMaximum.get(`${released.tenant_id}:${released.currency}`);
+          if (hint) hint.restoreGeneration++;
+        }
       } catch (error) {
         if (!isUniqueViolation(error)) throw error;
         const result = await this.database.query<{ receipt_digest: string }>(
@@ -854,7 +933,7 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
     const count = await this.database.transaction(async (tx) => {
       const jobs = await tx.query<{ intent_id: string }>(
         `/* fast-journal:worker-claim */ SELECT intent_id FROM saas_fast_billing_jobs
-         WHERE state='pending' ORDER BY created_at,intent_id LIMIT $1 FOR UPDATE SKIP LOCKED`,
+         WHERE state IN ('pending','pending_v2') ORDER BY created_at,intent_id LIMIT $1 FOR UPDATE SKIP LOCKED`,
         [limit],
       );
       if (jobs.rows.length === 0) return 0;
@@ -880,9 +959,12 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
       `SELECT i.*,COALESCE(x.charge_minor_units,r.charge_minor_units) AS charge_minor_units,
          COALESCE(x.usage,r.usage) AS usage,COALESCE(x.usage_digest,r.usage_digest) AS usage_digest,
          CASE WHEN x.kind='non_execution' THEN 'not_executed' WHEN x.kind='verified_usage' THEN 'succeeded' ELSE r.outcome END AS outcome,
-         r.http_status,x.id AS resolution_id,x.kind AS resolution_kind,a.owner AS active_allocation_owner
+         r.http_status,r.receipt_digest,r.charge_minor_units AS original_charge_minor_units,
+         CASE WHEN l.intent_id IS NULL THEN NULL ELSE to_jsonb(l) || jsonb_build_object(
+           'released_minor_units',l.released_minor_units::text,'retained_minor_units',l.retained_minor_units::text) END AS liability_release,x.id AS resolution_id,x.kind AS resolution_kind,a.owner AS active_allocation_owner
        FROM saas_fast_gateway_intents i LEFT JOIN saas_fast_gateway_receipts r ON r.intent_id=i.id
        LEFT JOIN saas_fast_gateway_resolutions x ON x.intent_id=i.id
+       LEFT JOIN saas_fast_receipt_liability_releases l ON l.intent_id=i.id
        LEFT JOIN saas_fast_credit_allocations a ON a.id=i.allocation_id AND a.tenant_id=i.tenant_id
          AND a.currency=i.currency AND a.epoch=i.allocation_epoch AND a.state='active'
        WHERE i.id=ANY($1::uuid[]) ORDER BY i.tenant_id,i.currency,i.id`,
@@ -890,7 +972,7 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
     );
     if (result.rows.length !== intentIds.length) throw new Error('FAST_JOURNAL_MISSING_INTENT');
     const invalid: string[] = [];
-    const valid: Array<{ row: SettlementRow; charge: bigint; ledgerId: string | null }> = [];
+    const valid: Array<{ row: SettlementRow; charge: bigint; held: bigint; ledgerId: string | null }> = [];
     for (const row of result.rows) {
       try {
         const unsent =
@@ -902,15 +984,16 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
             httpStatus: row.http_status,
           });
         const charge = unsent ? 0n : calculateFastReceiptCharge(row.price_snapshot, row.usage);
+        const held = remainingFastLiability(row);
         if (
           (!unsent && row.outcome !== 'succeeded') ||
           row.charge_minor_units === null ||
           charge !== BigInt(row.charge_minor_units) ||
-          charge > BigInt(row.max_cost_minor_units)
+          charge > held
         ) {
           throw new Error('invalid charge');
         }
-        valid.push({ row, charge, ledgerId: charge > 0n ? randomUUID() : null });
+        valid.push({ row, charge, held, ledgerId: charge > 0n ? randomUUID() : null });
         // This existing read's immutable identity + active allocation snapshot
         // is scheduling evidence only. Mark before the wallet fence so unrelated
         // or empty polls never consume this wallet's fragment recovery budget.
@@ -918,7 +1001,7 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
           row.currency !== null &&
           row.allocation_epoch === this.epoch &&
           row.active_allocation_owner === this.options.allocationOwner &&
-          charge < BigInt(row.max_cost_minor_units)
+          charge < held
         )
           progress.planned.add(`${row.tenant_id}:${row.currency}`);
       } catch {
@@ -927,8 +1010,8 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
     }
     if (invalid.length) {
       const blocked = await tx.query(
-        `UPDATE saas_fast_billing_jobs SET state='blocked',attempts=attempts+1,
-        last_error='receipt_price_mismatch' WHERE intent_id=ANY($1::uuid[]) AND state='pending'`,
+        `UPDATE saas_fast_billing_jobs SET state=CASE state WHEN 'pending_v2' THEN 'blocked_v2' ELSE 'blocked' END,attempts=attempts+1,
+        last_error='receipt_price_mismatch' WHERE intent_id=ANY($1::uuid[]) AND state IN ('pending','pending_v2')`,
         [invalid],
       );
       if (blocked.rowCount !== invalid.length) throw new Error('FAST_JOURNAL_STATE_CONFLICT');
@@ -959,7 +1042,7 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
       const allocationById = new Map(allocations.rows.map((allocation) => [allocation.id, allocation]));
       const wallets = new Map<string, { id: string; tenantId: string; charge: bigint; ledgerId: string }>();
       const postings: LedgerBatchRow[] = [];
-      for (const { row, charge, ledgerId } of paid) {
+      for (const { row, charge, held, ledgerId } of paid) {
         const allocation = row.allocation_id === null ? undefined : allocationById.get(row.allocation_id);
         if (
           !allocation ||
@@ -969,7 +1052,6 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
         )
           throw new Error('FAST_JOURNAL_ALLOCATION_MISMATCH');
         if (allocation.owner === this.options.allocationOwner) ownCreditAllocations.add(allocation.id);
-        const maximum = BigInt(row.max_cost_minor_units);
         const credit = credits.get(allocation.id) ?? {
           id: allocation.id,
           tenant_id: allocation.tenant_id,
@@ -980,8 +1062,8 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
           release: 0n,
           restore: 0n,
         };
-        credit.release += allocation.state === 'active' ? charge : maximum;
-        credit.restore += allocation.state === 'active' ? maximum - charge : 0n;
+        credit.release += allocation.state === 'active' ? charge : held;
+        credit.restore += allocation.state === 'active' ? held - charge : 0n;
         credits.set(allocation.id, credit);
         if (charge > 0n && ledgerId !== null) {
           postings.push({
@@ -1036,7 +1118,7 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
       `/* fast-journal:worker-complete */ UPDATE saas_fast_billing_jobs j
       SET state='completed',attempts=attempts+1,ledger_transaction_id=c.ledger_id,completed_at=now(),last_error=NULL
       FROM jsonb_to_recordset($1::jsonb) AS c(intent_id uuid,ledger_id uuid)
-      WHERE j.intent_id=c.intent_id AND j.state='pending'`,
+      WHERE j.intent_id=c.intent_id AND j.state IN ('pending','pending_v2')`,
       [fastJournalCanonicalJson(valid.map(({ row, ledgerId }) => ({ intent_id: row.id, ledger_id: ledgerId })))],
     );
     if (completed.rowCount !== valid.length) throw new Error('FAST_JOURNAL_STATE_CONFLICT');
@@ -1119,6 +1201,18 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
   }
 }
 
+interface ReceiptLiabilityRelease {
+  intent_id: string;
+  tenant_id: string;
+  request_id: string;
+  allocation_id: string;
+  allocation_epoch: string;
+  currency: string;
+  released_minor_units: string;
+  retained_minor_units: string;
+  receipt_digest: string;
+  protocol_version: number;
+}
 interface SettlementRow {
   id: string;
   request_id: string;
@@ -1136,6 +1230,32 @@ interface SettlementRow {
   http_status: number | null;
   resolution_id: string | null;
   resolution_kind: string | null;
+  receipt_digest: string | null;
+  original_charge_minor_units: string | null;
+  liability_release: ReceiptLiabilityRelease | null;
+}
+
+function remainingFastLiability(row: SettlementRow): bigint {
+  const maximum = BigInt(row.max_cost_minor_units);
+  const release = row.liability_release;
+  if (release == null) return maximum;
+  const returned = parseMinorUnits(release.released_minor_units);
+  const retained = parseMinorUnits(release.retained_minor_units, { allowZero: true });
+  if (
+    release.protocol_version !== 2 ||
+    release.intent_id !== row.id ||
+    release.tenant_id !== row.tenant_id ||
+    release.request_id !== row.request_id ||
+    release.allocation_id !== row.allocation_id ||
+    release.allocation_epoch !== row.allocation_epoch ||
+    release.currency !== row.currency ||
+    release.receipt_digest !== row.receipt_digest ||
+    row.original_charge_minor_units === null ||
+    retained !== BigInt(row.original_charge_minor_units) ||
+    returned + retained !== maximum
+  )
+    throw new Error('FAST_JOURNAL_LIABILITY_MISMATCH');
+  return retained;
 }
 
 /** Frozen customer price; no current-price lookup can change a receipt's bill. */
@@ -1187,7 +1307,7 @@ export function calculateFastReceiptCharge(snapshot: unknown, usage: Readonly<Re
   return calculation.amountMinorUnits;
 }
 
-interface FastPriceSnapshot {
+export interface FastPriceSnapshot {
   readonly schemaVersion: 1;
   readonly customerPrice: CustomerPriceVersionRecord;
   readonly maxInputTokens: string;

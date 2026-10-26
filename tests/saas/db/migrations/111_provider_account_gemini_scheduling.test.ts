@@ -14,14 +14,14 @@ test('111 remains directly after 110 while later forwards retain their order', (
   assert.equal(migration.name, 'provider_account_gemini_scheduling');
   assert.deepEqual(Object.keys(migration).sort(), ['name', 'sql', 'version']);
   const registered = SAAS_MIGRATIONS.map(({ version }) => version);
-  assert.deepEqual(registered.slice(-5), [141, 142, 143, 144, 145]);
+  assert.deepEqual(registered.slice(-6), [141, 142, 143, 144, 145, 146]);
   const index = registered.indexOf(111);
   assert.ok(index > 0, '111 is registered');
   assert.equal(registered[index - 1], 110, '111 lands directly after 110');
   // Batch-3 (117 bedrock / 119 grok) tails registered after 116; 111's
   // direct-predecessor contract above is what pins the ordering.
   // Later forwards do not change 111's direct predecessor or unique registration.
-  assert.equal(registered.at(-1), 145, 'fast gateway credit stripes 145 is the applied head');
+  assert.equal(registered.at(-1), 146, 'fast receipt liability releases 146 is the applied head');
   assert.equal(SAAS_MIGRATIONS[index], migration);
   // The assert-count guard: exactly one registration for the version.
   assert.equal(SAAS_MIGRATIONS.filter((m) => m.version === 111).length, 1);

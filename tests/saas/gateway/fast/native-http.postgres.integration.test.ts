@@ -10,7 +10,9 @@ import { join, resolve } from 'node:path';
 import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createClient } from '@redis/client';
+import { saasAdvisoryKey, WALLET_FENCE_SQL } from '../../../../src/saas/db/advisory-lock-keys.js';
 import { createSaasDatabase } from '../../../../src/saas/db/index.js';
+import type { SqlExecutor } from '../../../../src/saas/db/types.js';
 import { anyRoleConfigured, roleUrls } from '../../metering/normal-success-postgres-fixture.js';
 import type { NativeFastHttpConfig } from './native-http-runtime-fixture.js';
 import { seedNativeFastHttpInventory } from './native-http-seed-fixture.js';
@@ -166,6 +168,7 @@ test(`required native fast HTTP ${scenario}: first funded send and exact durable
 
   const upstream = { json: 0, sse: 0, invalid: 0 };
   let tlsConnections = 0;
+  let upstreamRequests = 0;
   let nextBarrier: { entered(): void; released: Promise<void> } | undefined;
   const mock = createHttpsServer(
     { cert: await readFile(certificateFile), key: await readFile(tlsKeyFile) },
@@ -178,6 +181,7 @@ test(`required native fast HTTP ${scenario}: first funded send and exact durable
         for await (const chunk of req) chunks.push(Buffer.from(chunk));
         const body = JSON.parse(Buffer.concat(chunks).toString()) as { model?: string; stream?: boolean };
         assert.equal(body.model, route.providerModel);
+        upstreamRequests++;
         const barrier = nextBarrier;
         nextBarrier = undefined;
         if (barrier) {
@@ -346,33 +350,87 @@ test(`required native fast HTTP ${scenario}: first funded send and exact durable
       assert.deepEqual(payload.usage, { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 });
     }
   };
-  if (pressure) {
-    for (const stream of [false, true]) {
-      let release = () => {};
-      let entered = () => {};
-      const reachedUpstream = new Promise<void>((resolve) => {
-        entered = resolve;
-      });
-      nextBarrier = {
-        entered,
-        released: new Promise<void>((resolve) => {
-          release = resolve;
-        }),
-      };
-      const pending = request(stream);
-      void pending.catch(() => {}); // The awaited response below still fails; teardown cannot leak a rejection.
+  const readLiability = async (database: SqlExecutor) => {
+    const facts = (
+      await database.query<Record<string, string>>(
+        `WITH intents AS (SELECT * FROM saas_fast_gateway_intents WHERE tenant_id=$1),
+        receipts AS (SELECT r.* FROM saas_fast_gateway_receipts r JOIN intents i ON i.id=r.intent_id),
+        releases AS (SELECT l.* FROM saas_fast_receipt_liability_releases l JOIN intents i ON i.id=l.intent_id),
+        jobs AS (SELECT j.* FROM saas_fast_billing_jobs j JOIN intents i ON i.id=j.intent_id),
+        allocations AS (SELECT * FROM saas_fast_credit_allocations WHERE tenant_id=$1),
+        held AS (SELECT i.max_cost_minor_units,COALESCE(l.released_minor_units,0) AS released
+          FROM intents i LEFT JOIN jobs j ON j.intent_id=i.id LEFT JOIN releases l ON l.intent_id=i.id
+          WHERE j.state IS DISTINCT FROM 'completed')
+        SELECT (SELECT COALESCE(sum(backing_minor_units),0) FROM allocations)::text AS backing,
+          (SELECT COALESCE(sum(available_minor_units),0) FROM allocations)::text AS available,
+          (SELECT count(*) FROM allocations a WHERE a.backing_minor_units<>a.available_minor_units+
+            (SELECT COALESCE(sum(i.max_cost_minor_units-COALESCE(l.released_minor_units,0)),0) FROM intents i
+              LEFT JOIN jobs j ON j.intent_id=i.id LEFT JOIN releases l ON l.intent_id=i.id
+              WHERE i.allocation_id=a.id AND j.state IS DISTINCT FROM 'completed'))::text AS inconsistent_allocations,
+          (SELECT count(*) FROM intents i LEFT JOIN receipts r ON r.intent_id=i.id WHERE r.intent_id IS NULL)::text AS unreceipted,
+          (SELECT COALESCE(sum(max_cost_minor_units),0) FROM held)::text AS maximum_held,
+          (SELECT COALESCE(sum(max_cost_minor_units-released),0) FROM held)::text AS held,
+          (SELECT count(*) FROM receipts)::text AS receipts,
+          (SELECT count(*) FROM releases)::text AS releases,
+          (SELECT COALESCE(sum(released_minor_units),0) FROM releases)::text AS released,
+          (SELECT count(*) FROM jobs WHERE state='pending_v2')::text AS pending_v2,
+          (SELECT count(*) FROM jobs WHERE state IN ('blocked','blocked_v2'))::text AS blocked,
+          (SELECT count(*) FROM releases l JOIN intents i ON i.id=l.intent_id JOIN receipts r ON r.intent_id=l.intent_id
+            WHERE l.protocol_version<>2 OR l.tenant_id<>i.tenant_id OR l.request_id<>i.request_id
+              OR l.allocation_id<>i.allocation_id OR l.allocation_epoch<>i.allocation_epoch OR l.currency<>i.currency
+              OR l.receipt_digest<>r.receipt_digest OR l.released_minor_units+l.retained_minor_units<>i.max_cost_minor_units
+              OR l.retained_minor_units<>r.charge_minor_units OR r.outcome<>'succeeded' OR r.http_status NOT BETWEEN 200 AND 299)::text AS invalid_releases,
+          (SELECT posted_balance_minor_units FROM saas_wallets WHERE tenant_id=$1 AND currency='USD')::text AS wallet,
+          (SELECT count(*) FROM saas_ledger_transactions WHERE tenant_id=$1 AND idempotency_namespace='fast-journal-v1')::text AS postings`,
+        [seeded.tenantId],
+      )
+    ).rows[0];
+    assert.ok(facts);
+    assert.equal(
+      BigInt(facts.backing),
+      BigInt(facts.available) + BigInt(facts.held),
+      'B = A + sum(H), H = M - durable release',
+    );
+    assert.equal(
+      facts.invalid_releases,
+      '0',
+      'every immutable release matches the receipt and original allocation identity',
+    );
+    assert.equal(
+      facts.inconsistent_allocations,
+      '0',
+      'B = A + sum(H) holds for each original stripe, not only globally',
+    );
+    assert.equal(facts.blocked, '0');
+    return facts;
+  };
+  for (const stream of pressure ? [false, true] : [false, true, false, true]) {
+    let release = () => {};
+    let entered = () => {};
+    const reachedUpstream = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    nextBarrier = {
+      entered,
+      released: new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+    };
+    const pending = request(stream);
+    void pending.catch(() => {}); // The awaited response still fails; teardown cannot leak a rejection.
+    try {
+      let timer: NodeJS.Timeout | undefined;
       try {
-        let timer: NodeJS.Timeout | undefined;
-        try {
-          await Promise.race([
-            reachedUpstream,
-            new Promise<never>((_, reject) => {
-              timer = setTimeout(() => reject(new Error('first funded request did not reach actual upstream')), 5_000);
-            }),
-          ]);
-        } finally {
-          clearTimeout(timer);
-        }
+        await Promise.race([
+          reachedUpstream,
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new Error('first funded request did not reach actual upstream')), 5_000);
+          }),
+        ]);
+      } finally {
+        clearTimeout(timer);
+      }
+      if (pressure) {
         const before = (
           await migrator.query<{ backing: string; available: string; intents: string }>(
             `SELECT COALESCE(sum(backing_minor_units),0)::text AS backing,
@@ -389,6 +447,7 @@ test(`required native fast HTTP ${scenario}: first funded send and exact durable
           524480n,
           'one real M remains held during upstream execution',
         );
+        const sentBeforeDenial = upstreamRequests;
         const denied = await request(stream);
         assert.equal(denied.status, 429, 'second M cannot fit inside explicit 1m while first is unsettled');
         assert.match(await denied.text(), /FAST_CREDIT_NOT_READY/);
@@ -403,12 +462,58 @@ test(`required native fast HTTP ${scenario}: first funded send and exact durable
         ).rows[0];
         assert.ok(after);
         assert.equal(after.intents, before.intents, 'pressure rejection creates no intent or upstream send');
+        assert.equal(upstreamRequests, sentBeforeDenial, 'overlapping pressure rejection never sends upstream');
         assert.ok(BigInt(after.backing) <= 1_000_000n, 'retry pressure does not enlarge the explicit cap');
-      } finally {
-        release();
       }
-      await assertSuccess(await pending, stream);
-      // Wait for this legitimate charge to finish before the next independent pressure round.
+      // The real upstream is still held: no receipt can exist for this intent.
+      // Hold the actual wallet fence only AFTER the overlapping cap denial;
+      // the receipt may commit, but the native asynchronous worker cannot post.
+      // No sleeps, worker mocks, or process injection establish this ordering.
+      await migrator.transaction(async (tx) => {
+        await tx.query(WALLET_FENCE_SQL, [saasAdvisoryKey.walletFence(seeded.tenantId, 'USD')]);
+        const before = await readLiability(tx);
+        assert.equal(before.unreceipted, '1', 'held upstream guarantees the new intent has no receipt yet');
+        assert.ok(BigInt(before.held) >= BigInt(maximum), 'unreceipted native intent retains the unchanged real M');
+        release();
+        await assertSuccess(await pending, stream);
+        const after = await readLiability(tx);
+        assert.equal(after.unreceipted, '0');
+        assert.equal(after.backing, before.backing, 'receipt release never changes wallet backing');
+        assert.equal(after.wallet, before.wallet, 'receipt success does not prematurely debit the wallet');
+        assert.equal(
+          after.postings,
+          before.postings,
+          'terminal success and receipt release precede asynchronous ledger',
+        );
+        assert.equal(BigInt(after.receipts), BigInt(before.receipts) + 1n);
+        assert.equal(
+          BigInt(after.releases),
+          BigInt(before.releases) + 1n,
+          'native executor supplies valid frozen price verification',
+        );
+        assert.equal(
+          BigInt(after.pending_v2),
+          BigInt(before.pending_v2) + 1n,
+          'old workers cannot claim compacted receipt jobs',
+        );
+        assert.equal(after.maximum_held, before.maximum_held, 'compaction never shrinks immutable maximum M');
+        const released = BigInt(maximum) - 35n;
+        assert.equal(BigInt(after.released) - BigInt(before.released), released);
+        assert.equal(
+          BigInt(after.available) - BigInt(before.available),
+          released,
+          'M-C becomes available before ledger',
+        );
+        assert.equal(BigInt(before.held) - BigInt(after.held), released, 'only actual C remains as receipt liability');
+        t.diagnostic(
+          `${stream ? 'SSE' : 'JSON'} pre-ledger: M=${maximum} C=35 released=${released} B/wallet/postings unchanged; every stripe conserved`,
+        );
+      });
+    } finally {
+      release();
+    }
+    if (pressure) {
+      // A distinct round starts only after this legitimate charge settles.
       const wanted = stream ? '2' : '1';
       const deadline = Date.now() + 15_000;
       let completed = '0';
@@ -426,8 +531,6 @@ test(`required native fast HTTP ${scenario}: first funded send and exact durable
       }
       assert.equal(completed, wanted);
     }
-  } else {
-    for (const stream of [false, true, false, true]) await assertSuccess(await request(stream), stream);
   }
   const bounds = (
     await migrator.query<{ maximum: string; input_bound: string; output_bound: string; estimator: string }>(
@@ -504,6 +607,13 @@ test(`required native fast HTTP ${scenario}: first funded send and exact durable
   });
   assert.ok(BigInt(facts.backing) > 0n, 'unused escrow remains durable backing, not a refund or overdraft');
   assert.deepEqual(upstream, { json: pressure ? 1 : 2, sse: pressure ? 1 : 2, invalid: 0 });
+  assert.equal(upstreamRequests, Number(expected.count), 'exact raw sends: no denied or duplicate upstream execution');
+  const finalLiability = await readLiability(migrator);
+  assert.equal(finalLiability.held, '0');
+  assert.equal(finalLiability.maximum_held, '0');
+  assert.equal(finalLiability.pending_v2, '0');
+  assert.equal(finalLiability.releases, expected.count);
+  assert.equal(BigInt(finalLiability.released), BigInt(expected.count) * (BigInt(maximum) - 35n));
   if (pressure)
     assert.ok(BigInt(facts.backing) <= 1_000_000n, 'completed pressure rounds retain the explicit hard cap');
   if (scenario === 'builtin-default') {
@@ -600,6 +710,6 @@ test(`required native fast HTTP ${scenario}: first funded send and exact durable
     assert.equal(tlsConnections, 1, 'default pooled transport reuses one real TLS connection for serial JSON/SSE');
   }
   t.diagnostic(
-    `${scenario}: first-funded=200 M=${maximum} completed=${expected.count} charge=${expected.charge} unresolved=0 TLS-connections=${tlsConnections}`,
+    `${scenario}: first-funded=200 M=${maximum} completed=${expected.count} charge=${expected.charge} unresolved=0 receipt-v2=${finalLiability.releases} released=${finalLiability.released} H=0 TLS-connections=${tlsConnections}`,
   );
 });
