@@ -186,6 +186,7 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
   private closed = false;
   private workerStarted = false;
   private wakeRequested = false;
+  private workerFailed = false;
   private idleDelay = 25;
   private pollDueAt = 0;
 
@@ -232,21 +233,28 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
       this.timer = undefined;
       const base = this.options.workerPollMs ?? 25;
       let next = base;
+      let madeProgress = false;
       this.running = this.runOnce(this.options.workerBatchSize ?? 128);
       void this.running
         .then(
           (count) => {
+            this.workerFailed = false;
+            madeProgress = count > 0;
             this.idleDelay = count ? base : Math.min(Math.max(1000, base), this.idleDelay * 2);
             next = count >= (this.options.workerBatchSize ?? 128) ? 0 : this.idleDelay;
           },
           () => {
+            this.workerFailed = true;
             this.reportBackgroundError('FAST_JOURNAL_WORKER_FAILED');
             next = Math.max(1000, base);
           },
         )
         .finally(() => {
           this.running = undefined;
-          if (this.wakeRequested) next = base;
+          // A durable receipt arriving during a successful batch may be newer
+          // than its claim. Catch up without delaying a full batch; an empty
+          // poll still waits at least base, and failures retain their backoff.
+          if (this.wakeRequested && !this.workerFailed) next = madeProgress ? 0 : Math.min(next, base);
           this.wakeRequested = false;
           this.scheduleWorker(next);
         });
@@ -256,11 +264,12 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
 
   private wakeWorker(): void {
     if (!this.workerStarted || this.closed) return;
-    this.idleDelay = this.options.workerPollMs ?? 25;
     if (this.running) {
       this.wakeRequested = true;
       return;
     }
+    if (this.workerFailed) return;
+    this.idleDelay = this.options.workerPollMs ?? 25;
     if (this.timer && this.pollDueAt <= Date.now() + this.idleDelay) return;
     if (this.timer) clearTimeout(this.timer);
     this.timer = undefined;
