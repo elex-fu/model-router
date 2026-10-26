@@ -277,6 +277,10 @@ class FakeHealthDatabase implements SaasDatabase {
     return new FakeExecutor(this, false).query(sql, values);
   }
 
+  async queryReadCommitted<Row>(sql: string, values: readonly unknown[] = []): Promise<SqlResult<Row>> {
+    return this.query<Row>(sql, values);
+  }
+
   async transaction<T>(work: (tx: SqlExecutor) => Promise<T>): Promise<T> {
     const priorHealth = structuredClone(this.health);
     this.transactionCount += 1;
@@ -456,9 +460,9 @@ test('a persisted successful runtime outcome is fresh and eligible', async () =>
   seedLease(database, account, '10');
   const health = store(database);
   assert.equal(await record(health, account, '10', { source: 'gateway', result: 'success' }), 'applied');
-  assert.equal(database.transactionCount, 1);
-  assert.equal(database.commitCount, 1);
-  assert.equal(database.calls.at(-1)?.inTransaction, true);
+  assert.equal(database.transactionCount, 0);
+  assert.equal(database.commitCount, 0);
+  assert.equal(database.calls.at(-1)?.inTransaction, false);
   const decision = await health.get({ caller: caller(), candidate: account, now: NOW });
   assert.deepEqual(decision, {
     decision: 'allow',
@@ -919,7 +923,7 @@ function nextToken(database: FakeHealthDatabase): string {
   return token;
 }
 
-test('runtime outcomes update the EMA health score in the same transaction while binary semantics stay unchanged', async () => {
+test('runtime outcomes update the EMA health score in one atomic statement while binary semantics stay unchanged', async () => {
   const database = new FakeHealthDatabase();
   const account = candidate();
   const health = store(database);
@@ -928,8 +932,8 @@ test('runtime outcomes update the EMA health score in the same transaction while
     await record(health, account, '70', { source: 'gateway', result: 'retryable_failure', failureKind: 'network' }),
     'applied',
   );
-  assert.equal(database.transactionCount, 1);
-  assert.equal(database.calls.at(-1)?.inTransaction, true);
+  assert.equal(database.transactionCount, 0);
+  assert.equal(database.calls.at(-1)?.inTransaction, false);
   let row = healthRow(database, account);
   assert.equal(row?.state, 'cooldown');
   assert.equal(row?.failureCount, 1);
@@ -1663,4 +1667,15 @@ test('batch 2.3: the model rate limit cools the (account, model) pair for 30 min
   // Whitespace and malformed models record nothing.
   modelLimits.recordModelRateLimit({ candidate: account, model: '  ' });
   assert.equal(modelLimits.isModelExcluded({ candidate: account, model: '  ', now: new Date(clockMs) }), false);
+});
+
+test('custom databases without the atomic capability retain the explicit health transaction', async () => {
+  const database = new FakeHealthDatabase();
+  Object.defineProperty(database, 'queryReadCommitted', { value: undefined });
+  const account = candidate();
+  seedLease(database, account, '10');
+  assert.equal(await record(store(database), account, '10', { source: 'gateway', result: 'success' }), 'applied');
+  assert.equal(database.transactionCount, 1);
+  assert.equal(database.commitCount, 1);
+  assert.equal(database.calls.at(-1)?.inTransaction, true);
 });

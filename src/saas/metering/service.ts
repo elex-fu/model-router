@@ -2311,7 +2311,18 @@ export class SaasMeteringService {
     const tenantId = asIdentifier(input.tenantId);
     const requestId = asIdentifier(input.requestId);
     const attemptId = asIdentifier(input.attemptId);
-    return this.write(input.executor, async (tx) => {
+    // A standalone transition is a single atomic CAS. With the adapter's
+    // checked READ COMMITTED capability, omit the redundant explicit
+    // transaction. Coordinated billing/settlement callers still supply an
+    // executor and retain their surrounding rollback boundary.
+    //
+    // As with a lost COMMIT acknowledgement, a result decode failure after
+    // this standalone statement is NOT evidence of rollback. Return storage
+    // failure and never retry the mutation: dispatch must stop/reconcile.
+    const atomicQuery = this.database.queryReadCommitted;
+    const standalone = input.executor === undefined && atomicQuery !== undefined;
+    const executor = input.executor ?? (atomicQuery ? { query: atomicQuery.bind(this.database) } : undefined);
+    return this.write(executor, async (tx) => {
       // Evidence claim writes PostgreSQL microsecond timestamps. Derive this
       // transition's time in the same authority and clamp it to the current
       // row, so host clock skew or JS millisecond truncation cannot move the
@@ -2356,9 +2367,16 @@ export class SaasMeteringService {
         ],
       );
       const row = rows[0];
-      if (row) return mapAttempt(row);
+      if (row) {
+        try {
+          return mapAttempt(row);
+        } catch (error) {
+          if (standalone) throw new SaasMeteringError('METERING_STORAGE_ERROR', error);
+          throw error;
+        }
+      }
       const existing = await this.one<Row>(
-        tx,
+        standalone ? this.database : tx,
         `SELECT ${attemptColumns}
          FROM saas_attempts
          WHERE tenant_id = $1 AND request_id = $2 AND id = $3`,

@@ -242,7 +242,8 @@ export class PostgresCapacityStatePersistence extends PostgresQuotaStatePersiste
 
 export class RedisPreparationCapacity {
   private timer?: NodeJS.Timeout;
-  private recovering = false;
+  private recoveryRun?: Promise<void>;
+  private closing?: Promise<void>;
   private readonly localAdmissions = new Set<string>();
   constructor(
     readonly state: RedisQuotaState,
@@ -393,13 +394,14 @@ export class RedisPreparationCapacity {
     this.localAdmissions.delete(id);
   }
   startRecovery(): void {
+    if (this.timer || this.closing) return;
     this.timer = setInterval(() => void this.recover().catch(() => {}), 1000);
     this.timer.unref();
   }
-  private async recover(): Promise<void> {
-    if (this.recovering) return;
-    this.recovering = true;
-    try {
+  private recover(): Promise<void> {
+    if (this.closing) return Promise.resolve();
+    if (this.recoveryRun) return this.recoveryRun;
+    const operation = (async () => {
       const rows = await this.database.query<{ id: string }>(
         `SELECT s.value->>'requestId' AS id FROM saas_redis_quota_state s
         LEFT JOIN saas_requests q ON q.tenant_id=(s.value->>'tenantId')::uuid AND q.id=(s.value->>'requestId')::uuid
@@ -408,12 +410,21 @@ export class RedisPreparationCapacity {
         [this.namespace, Date.now()],
       );
       for (const row of rows.rows) await this.complete(row.id, true);
-    } finally {
-      this.recovering = false;
-    }
+    })();
+    this.recoveryRun = operation;
+    void operation.finally(() => { this.recoveryRun = undefined; }).catch(() => {});
+    return operation;
   }
-  async close(): Promise<void> {
+  close(): Promise<void> {
+    if (this.closing) return this.closing;
     clearInterval(this.timer);
-    await this.state.close();
+    this.timer = undefined;
+    this.closing = (async () => {
+      // A recovery scan can still mutate quota state after its SQL read.
+      // Drain it before Redis flush/close and before its owned DB lane closes.
+      await this.recoveryRun?.catch(() => {});
+      await this.state.close();
+    })();
+    return this.closing;
   }
 }

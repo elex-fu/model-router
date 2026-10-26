@@ -287,6 +287,8 @@ export interface PostgresProviderAccountSchedulerOptions extends ProviderAccount
    * Absent keeps the selection byte-identical.
    */
   readonly modelCooldown?: ProviderAccountSchedulerModelCooldownPort;
+  /** Optional request-scoped, batched non-authoritative hint observations. */
+  readonly hintScope?: <T>(input: ProviderAccountSchedulerInput, work: () => Promise<T>) => Promise<T>;
   /**
    * G-B1 (window three-state): forwarded to the core scheduler verbatim —
    * the composition wires the PG facts reader
@@ -2106,6 +2108,7 @@ const SCHEDULER_SELECTION_AUDIT_ACTION = 'provider_account_scheduler.selection';
  */
 export class PostgresProviderAccountScheduler implements ProviderAccountSchedulerPort {
   private readonly scheduler: ProviderAccountScheduler;
+  private readonly hintScope: PostgresProviderAccountSchedulerOptions['hintScope'];
   private readonly healthAuthorityConfigured: boolean;
   private readonly database: SaasDatabase;
   private readonly now: () => Date;
@@ -2119,6 +2122,7 @@ export class PostgresProviderAccountScheduler implements ProviderAccountSchedule
   private readonly redisSlotAcquisitions = new Map<string, { ownerScopeKey: string; accounts: Set<string> }>();
 
   constructor(options: PostgresProviderAccountSchedulerOptions) {
+    this.hintScope = options.hintScope;
     if (
       !options?.database ||
       typeof options.database.query !== 'function' ||
@@ -2239,9 +2243,9 @@ export class PostgresProviderAccountScheduler implements ProviderAccountSchedule
       if (hasCandidates) {
         schedulingInput = await this.applySchedulingThresholdPause(schedulingInput);
       }
-      const decision = await (bindAffinity
-        ? this.scheduler.selectAndBindCandidate(schedulingInput)
-        : this.scheduler.select(schedulingInput));
+      const select = () =>
+        bindAffinity ? this.scheduler.selectAndBindCandidate(schedulingInput) : this.scheduler.select(schedulingInput);
+      const decision = await (this.hintScope ? this.hintScope(schedulingInput, select) : select());
       if (
         !isRecord(decision) ||
         !['allow', 'block', 'reject'].includes(decision.decision) ||

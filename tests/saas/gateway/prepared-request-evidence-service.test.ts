@@ -847,7 +847,7 @@ test('register verifies a real Ed25519 statement and locks authorities before in
   assert.ok(fake.stages.indexOf('clock') > fake.stages.indexOf('authority-batch'));
   assert.ok(fake.batchStages[0]?.includes('customer-price'));
   const authorityStages = fake.stages.filter((stage) => !stage.startsWith('fence-'));
-  assert.deepEqual(authorityStages, ['authority-batch', 'request', 'attempt', 'clock', 'clock']);
+  assert.deepEqual(authorityStages, ['authority-batch', 'request', 'attempt', 'clock']);
   const firstAuthorityRead = fake.statements.findIndex((sql) => /FROM saas_tenants/i.test(sql));
   const lastFence = Math.max(...fake.statements.map((sql, index) => (sql.includes('pg_advisory') ? index : -1)));
   assert.ok(lastFence >= 0 && lastFence < firstAuthorityRead);
@@ -1608,7 +1608,7 @@ test('each registration, preflight and claim reads one fresh scoped authority ba
       assert.equal(sql.filter((statement) => statement.includes('prepared-evidence:fence-batch')).length, 1);
       assert.ok(batchIndex > lastFence && lastFence >= 0);
       assert.equal(sql.filter((statement) => statement.includes('prepared-evidence:authority-batch')).length, 1);
-      assert.equal(sql.filter((statement) => statement.includes('prepared-evidence:clock')).length, 2);
+      assert.equal(sql.filter((statement) => statement.includes('prepared-evidence:clock')).length, 1);
       const batch = sql[batchIndex];
       assert.ok(batch);
       assert.doesNotMatch(batch, /SELECT \*|FOR (?:UPDATE|SHARE)|key_digest|ciphertext|wrapped_dek/i);

@@ -1828,8 +1828,7 @@ export class SaasPreparedRequestEvidenceService {
     const normalized = normalizeInput(input, true);
     const statementSha256 = verifyEvidenceSignature(normalized, this.options.trustedVerifierPublicKeys);
     const work = async (tx: SqlExecutor): Promise<PreparedRequestEvidenceRecord> => {
-      await this.revalidateAuthorities(tx, normalized, 'UPDATE');
-      const lockedAt = await this.databaseClock(tx);
+      const lockedAt = await this.revalidateAuthorities(tx, normalized, 'UPDATE');
       this.assertWindow(normalized, lockedAt);
       const placeholders = EVIDENCE_COLUMNS.map((_, index) => `$${String(index + 1)}`).join(', ');
       const result = await tx.query<EvidenceRow>(
@@ -1904,12 +1903,11 @@ export class SaasPreparedRequestEvidenceService {
           fail('SIGNATURE_INVALID', 'stored prepared evidence statement digest changed');
         }
         this.assertPayloadMatches(normalized, options);
-        await this.revalidateAuthorities(tx, normalized, null, {
+        const lockedAt = await this.revalidateAuthorities(tx, normalized, null, {
           prelockedRequest: request,
           prelockedAttempt: attempt,
           fencesAlreadyHeld: true,
         });
-        const lockedAt = await this.databaseClock(tx);
         this.assertWindow(normalized, lockedAt);
         return this.recordFromRow(stored, normalized, statementSha256);
       });
@@ -1963,12 +1961,11 @@ export class SaasPreparedRequestEvidenceService {
           fail('SIGNATURE_INVALID', 'stored prepared evidence statement digest changed');
         }
         this.assertPayloadMatches(normalized, options);
-        await this.revalidateAuthorities(tx, normalized, 'UPDATE', {
+        const lockedAt = await this.revalidateAuthorities(tx, normalized, 'UPDATE', {
           prelockedRequest: request,
           prelockedAttempt: attempt,
           fencesAlreadyHeld: true,
         });
-        const lockedAt = await this.databaseClock(tx);
         this.assertWindow(normalized, lockedAt);
         const attemptVersion = integer(
           normalizedRowValue(attempt, 'state_version', 'locked attempt version'),
@@ -2052,7 +2049,7 @@ export class SaasPreparedRequestEvidenceService {
       readonly prelockedAttempt?: EvidenceRow;
       readonly fencesAlreadyHeld?: boolean;
     } = {},
-  ): Promise<void> {
+  ): Promise<Date> {
     if (!options.fencesAlreadyHeld) await acquireEvidenceAdvisoryFences(tx, input);
     const authority = await loadEvidenceAuthority(tx, input);
     const tenant = authority.one('tenant');
@@ -2293,6 +2290,9 @@ export class SaasPreparedRequestEvidenceService {
       customerPrice,
       supplierCost,
     );
+    // The last database operation is this post-lock clock. No await occurs
+    // between its authority-window checks and the caller's evidence-window check.
+    return lockedAt;
   }
 
   private assertAuthorityWindows(

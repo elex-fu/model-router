@@ -383,9 +383,9 @@ test('restricted PG dispatch authority batches retain exact reads, claim effects
           const batchIndex = trace.findIndex((sql) => sql.includes('prepared-evidence:authority-batch'));
           assert.equal(trace.filter((sql) => sql.includes('prepared-evidence:authority-batch')).length, 1);
           assert.ok(batchIndex > trace.findLastIndex((sql) => sql.includes('pg_advisory_xact_lock_shared')));
-          assert.equal(trace.filter((sql) => sql.includes('prepared-evidence:clock')).length, 2);
+          assert.equal(trace.filter((sql) => sql.includes('prepared-evidence:clock')).length, 1);
           assert.equal(trace.filter((sql) => sql.includes(FENCE_BATCH_MARKER)).length, 1);
-          assert.equal(trace.length, method === 'preflightForDispatch' ? 8 : 11);
+          assert.equal(trace.length, method === 'preflightForDispatch' ? 7 : 10);
           const batch = trace[batchIndex];
           assert.ok(batch);
           assert.doesNotMatch(batch, /SELECT \*|FOR (?:UPDATE|SHARE)|ciphertext|key_digest/i);
@@ -415,7 +415,7 @@ test('restricted PG dispatch authority batches retain exact reads, claim effects
           });
           assert.deepEqual({ ...baselineRecord, claimedAt: null }, { ...record, claimedAt: null });
           assert.deepEqual(baselineKeys, fixture.fenceBatch.keys);
-          assert.equal(baselineTrace.length, method === 'preflightForDispatch' ? 19 : 22);
+          assert.equal(baselineTrace.length, method === 'preflightForDispatch' ? 18 : 21);
           assert.equal(baselineTrace.length - trace.length, fixture.fenceBatch.keys.length - 1);
           assert.equal(baselineTrace.filter((sql) => sql === SINGLE_FENCE_BASELINE_SQL).length, 12);
           assert.equal(baselineTrace.filter((sql) => sql.includes('prepared-evidence:authority-batch')).length, 1);

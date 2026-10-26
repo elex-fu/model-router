@@ -101,7 +101,7 @@ class FakeAdmissionExecutor implements SqlExecutor {
   async query<Row>(sql: string, values: readonly unknown[] = []): Promise<SqlResult<Row>> {
     this.statements.push({ sql, values });
     const statement = sql.trim().toLowerCase();
-    if (statement.startsWith('insert into saas_request_admission_outbox')) {
+    if (statement.startsWith('with admitted_event as (')) {
       if (this.state.failOutbox) throw new Error('injected outbox failure');
       this.state.events.push('outbox');
       this.state.outbox.push({
@@ -142,17 +142,17 @@ class FakeAdmissionExecutor implements SqlExecutor {
         });
       }
     }
-    if (statement.startsWith('insert into saas_audit_events')) {
+    if (statement.startsWith('with admitted_event as (')) {
       if (this.state.failAudit) throw new Error('injected audit failure');
       this.state.events.push('audit');
       this.state.audits.push({
-        id: String(values[0]),
+        id: String(values[10]),
         tenantId: String(values[1]),
-        actorUserId: values[2] === null || values[2] === undefined ? null : String(values[2]),
+        actorUserId: values[11] === null || values[11] === undefined ? null : String(values[11]),
         action: 'request.admitted',
         targetType: 'saas_request',
         targetId: String(values[3]),
-        occurredAt: String(values[4]),
+        occurredAt: String(values[9]),
         entryPoint: 'gateway_admission',
         requestId: String(values[3]),
       });
@@ -641,6 +641,12 @@ test('platform admission prelocks first and uses one executor for all admission 
   assert.equal(database.state.reservations.length, 1);
   assert.equal(database.state.outbox.length, 1);
   assert.equal(database.state.audits.length, 1);
+  const bookkeeping = database.executors[0]?.statements.filter(
+    ({ sql }) => sql.includes('saas_request_admission_outbox') || sql.includes('saas_audit_events'),
+  );
+  assert.equal(bookkeeping?.length, 1, 'outbox and audit must use one round trip');
+  assert.match(bookkeeping?.[0]?.sql ?? '', /RETURNING 1 AS inserted/);
+  assert.match(bookkeeping?.[0]?.sql ?? '', /FROM admitted_event/);
   assert.deepEqual(database.state.audits[0], {
     id: database.state.audits[0]?.id,
     tenantId: 'tenant-a',

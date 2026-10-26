@@ -26,6 +26,77 @@ test('PostgreSQL attempt time remains monotonic under a behind service clock and
   await gateway.verifySchema();
 
   for (const mode of ['byok', 'platform'] as const) {
+    await t.test(
+      `${mode} standalone concurrent CAS has one winner and unusable committed results retain finance`,
+      async () => {
+        const fixture = await seedFixture(migrator.database, gateway, mode);
+        const identity = [fixture.tenantId, fixture.input.requestId, fixture.sent.id];
+        const financialSnapshot = async () => ({
+          wallets: (
+            await migrator.database.query(
+              'SELECT to_jsonb(w) AS fact FROM saas_wallets w WHERE tenant_id = $1 ORDER BY id',
+              [fixture.tenantId],
+            )
+          ).rows,
+          reservations: (
+            await migrator.database.query(
+              'SELECT to_jsonb(r) AS fact FROM saas_billing_reservations r WHERE tenant_id = $1 ORDER BY id',
+              [fixture.tenantId],
+            )
+          ).rows,
+        });
+        const beforeFinance = await financialSnapshot();
+        const transition = {
+          tenantId: fixture.tenantId,
+          requestId: fixture.input.requestId,
+          attemptId: fixture.sent.id,
+          expectedDispatchState: 'sent' as const,
+          expectedResultState: 'pending' as const,
+          expectedResponseStarted: true,
+          expectedStateVersion: fixture.sent.stateVersion,
+          dispatchState: 'unknown' as const,
+          resultState: 'unknown' as const,
+          unknownReason: 'atomic-result-uncertain',
+        };
+        let corruptResults = 0;
+        const uncertain = new SaasMeteringService({
+          ...gateway,
+          async queryReadCommitted<Row>(sql: string, values?: readonly unknown[]) {
+            const result = await gateway.queryReadCommitted!<Row>(sql, values);
+            if (result.rows.length) {
+              corruptResults++;
+              return { ...result, rows: result.rows.map((row) => ({ ...row, state_version: '9007199254740993' })) };
+            }
+            return result;
+          },
+        });
+        const results = await Promise.allSettled([
+          uncertain.transitionAttempt(transition),
+          uncertain.transitionAttempt(transition),
+        ]);
+        assert.equal(corruptResults, 1, 'only one concurrent CAS may change the row');
+        assert.ok(results.every((result) => result.status === 'rejected'));
+        const codes = results
+          .map((result) => {
+            assert.equal(result.status, 'rejected');
+            if (result.status !== 'rejected') throw new Error('expected failure');
+            assert.ok(result.reason instanceof SaasMeteringError);
+            return result.reason.code;
+          })
+          .sort();
+        assert.deepEqual(codes, ['ATTEMPT_TRANSITION_INVALID', 'METERING_STORAGE_ERROR']);
+        const stored = await new SaasMeteringService(gateway).getAttempt(...(identity as [string, string, string]));
+        assert.equal(stored?.dispatchState, 'unknown');
+        assert.equal(stored?.resultState, 'unknown');
+        assert.equal(stored?.stateVersion, fixture.sent.stateVersion + 1);
+        assert.equal(stored?.preparedEvidenceId, fixture.sent.preparedEvidenceId);
+        assert.deepEqual(
+          await financialSnapshot(),
+          beforeFinance,
+          'uncertain metering result cannot free or consume the hold',
+        );
+      },
+    );
     await t.test(`${mode} retains the persisted microsecond floor and rejects stale versions`, async () => {
       // Seed through the real claim/dispatch path with the default service
       // clock. No test clock advances or guard changes make this setup pass.

@@ -837,7 +837,6 @@ export class SaasRequestAdmissionService {
       await this.recordAccountRateConsumption(tx, initialAttempt, holdEvidenceSnapshot);
 
       const outboxEvent = await this.enqueueAdmissionEvent(tx, admission, normalized.supplyMode, initialAttempt);
-      await this.appendAdmissionAuditEvent(tx, admission, outboxEvent.createdAt);
 
       let reservation: BillingReservationResult | null = null;
       if (normalized.supplyMode === 'platform') {
@@ -896,26 +895,6 @@ export class SaasRequestAdmissionService {
     );
   }
 
-  private async appendAdmissionAuditEvent(
-    tx: SqlExecutor,
-    admission: RequestAdmissionCreated,
-    occurredAt: string,
-  ): Promise<void> {
-    await tx.query(
-      `INSERT INTO saas_audit_events
-         (id, tenant_id, actor_user_id, action, target_type, target_id, occurred_at, entry_point, request_id)
-       VALUES ($1, $2, $3, '${REQUEST_ADMISSION_AUDIT_ACTION}', '${REQUEST_ADMISSION_AUDIT_TARGET_TYPE}', $4, $5,
-               '${REQUEST_ADMISSION_AUDIT_ENTRY_POINT}', $4)`,
-      [
-        randomUUID(),
-        admission.request.tenantId,
-        admission.request.principalKind === 'member' ? admission.request.principalId : null,
-        admission.request.id,
-        occurredAt,
-      ],
-    );
-  }
-
   private async enqueueAdmissionEvent(
     tx: SqlExecutor,
     admission: RequestAdmissionCreated,
@@ -934,14 +913,26 @@ export class SaasRequestAdmissionService {
       schema_version: REQUEST_ADMISSION_OUTBOX_SCHEMA_VERSION,
     };
 
+    // The dependent INSERT preserves the outbox-before-audit order. Returning
+    // only a constant retains the gateway's INSERT-only outbox privilege. Both
+    // durable facts use the same identity/time parameters and transaction;
+    // neither becomes a lossy async write.
     await tx.query(
-      `INSERT INTO saas_request_admission_outbox
+      `WITH admitted_event AS (
+       INSERT INTO saas_request_admission_outbox
          (id, tenant_id, project_id, request_id, attempt_id, supply_mode, event_key,
           event_type, schema_version, payload, delivery_state, delivery_attempts,
           available_at, lease_token, lease_expires_at, last_error_code, delivered_at,
           created_at, updated_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, '${REQUEST_ADMISSION_OUTBOX_EVENT_TYPE}', $8, $9::jsonb,
-               'pending', 0, $10, NULL, NULL, NULL, NULL, $10, $10)`,
+               'pending', 0, $10, NULL, NULL, NULL, NULL, $10, $10)
+       RETURNING 1 AS inserted
+       )
+       INSERT INTO saas_audit_events
+         (id, tenant_id, actor_user_id, action, target_type, target_id, occurred_at, entry_point, request_id)
+       SELECT $11, $2, $12, '${REQUEST_ADMISSION_AUDIT_ACTION}', '${REQUEST_ADMISSION_AUDIT_TARGET_TYPE}',
+              $4::text, $10, '${REQUEST_ADMISSION_AUDIT_ENTRY_POINT}', $4::text
+         FROM admitted_event`,
       [
         id,
         admission.request.tenantId,
@@ -953,6 +944,8 @@ export class SaasRequestAdmissionService {
         REQUEST_ADMISSION_OUTBOX_SCHEMA_VERSION,
         JSON.stringify(payload),
         createdAt,
+        randomUUID(),
+        admission.request.principalKind === 'member' ? admission.request.principalId : null,
       ],
     );
 

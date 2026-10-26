@@ -152,6 +152,49 @@ test('admission statement budget: one fresh platform member admission stays with
   assert.equal(capacityDecision, 'allow', 'the capacity reservation must be admitted');
   assert.ok(afterAdmission > 0);
 
+  const bookkeeping = sqlTrace.filter((sql) => sql.includes('WITH admitted_event AS ('));
+  assert.equal(bookkeeping.length, 1, 'one statement must persist both outbox and audit');
+  const facts = await migrator.database.query<{ outbox_count: string; audit_count: string; same_time: boolean }>(
+    `SELECT (SELECT count(*)::text FROM saas_request_admission_outbox WHERE request_id = $1) AS outbox_count,
+            (SELECT count(*)::text FROM saas_audit_events WHERE request_id = $1::text AND action = 'request.admitted') AS audit_count,
+            EXISTS (SELECT 1 FROM saas_request_admission_outbox o JOIN saas_audit_events a
+                      ON a.request_id = o.request_id::text AND a.tenant_id = o.tenant_id
+                     AND a.occurred_at = o.created_at
+                    WHERE o.request_id = $1 AND a.action = 'request.admitted') AS same_time`,
+    [requestId],
+  );
+  assert.deepEqual(facts.rows, [{ outbox_count: '1', audit_count: '1', same_time: true }]);
+
+  await t.test('audit insert failure rolls back the combined outbox and all admission state', async () => {
+    const failedRequestId = randomUUID();
+    const failedAttemptId = randomUUID();
+    await assert.rejects(
+      gateway.transaction(async (tx) => {
+        const rejectingAudit: SqlExecutor = {
+          query<Row>(sql: string, values?: readonly unknown[]) {
+            if (sql.includes('WITH admitted_event AS (')) {
+              const rejected = [...(values ?? [])];
+              // A valid UUID with no user row reaches the audit FK check,
+              // after the dependent outbox INSERT has executed.
+              rejected[11] = randomUUID();
+              return tx.query<Row>(sql, rejected);
+            }
+            return tx.query<Row>(sql, values);
+          },
+        };
+        await harness.admit(rejectingAudit, failedRequestId, failedAttemptId, `audit-failure-${failedRequestId}`);
+      }),
+      (error: unknown) => typeof error === 'object' && error !== null && 'code' in error && error.code === '23503',
+    );
+    const residue = await migrator.database.query<{ requests: string; outbox: string; audits: string }>(
+      `SELECT (SELECT count(*)::text FROM saas_requests WHERE id = $1) AS requests,
+              (SELECT count(*)::text FROM saas_request_admission_outbox WHERE request_id = $1) AS outbox,
+              (SELECT count(*)::text FROM saas_audit_events WHERE request_id = $1::text AND action = 'request.admitted') AS audits`,
+      [failedRequestId],
+    );
+    assert.deepEqual(residue.rows, [{ requests: '0', outbox: '0', audits: '0' }]);
+  });
+
   const profile = profileStatements(sqlTrace);
   t.diagnostic(
     `admission statements=${afterAdmission} total=${profile.total} ` +
@@ -178,6 +221,8 @@ test('admission statement budget: one fresh platform member admission stays with
   // - 2026-10-21 section 15.5: fenced authority facts share one fresh PG
   //   snapshot, without caching mutable state: total=49, admission=43,
   //   guard reads=8 (the catalog/price service reads remain additional).
+  // - 2026-10-26: outbox + audit dependent INSERT CTE saves one round trip:
+  //   total=48, admission=42, with both facts still synchronous and atomic.
   // The counts are deterministic for this fixture (no key expiry, no group
   // RPM ceiling), so any increase is a real regression or a deliberate
   // statement-count change that must raise this budget consciously.
@@ -191,11 +236,11 @@ test('admission statement budget: one fresh platform member admission stays with
     `admission guard authority reads must stay within the statement budget (got ${profile.guardReads})`,
   );
   assert.ok(
-    afterAdmission <= 43,
+    afterAdmission <= 42,
     `admission phase (prelock+metering+guard+billing) must stay within the statement budget (got ${afterAdmission})`,
   );
   assert.ok(
-    profile.total <= 49,
+    profile.total <= 48,
     `full admission transaction must stay within the statement budget (got ${profile.total})`,
   );
 });

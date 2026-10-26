@@ -1,3 +1,4 @@
+import { queryReadCommitted } from '../db/atomic-statement.js';
 import type { SaasDatabase, SqlExecutor } from '../db/types.js';
 import { parseHealthScoreColumn } from './health-score.js';
 import {
@@ -781,20 +782,21 @@ export class PostgresProviderAccountRuntimeHealthStore
     const evidence = normalizedEvidence(input?.evidence);
     if (!scope || !nonEmpty(input?.attemptId) || !validFence(input?.fencingToken) || !evidence) invalidInput();
     try {
-      const result = await this.database.transaction((tx: SqlExecutor) =>
-        tx.query<RevisionRow>(WRITE_HEALTH_SQL, [
-          scope.tenantId,
-          scope.ownerKind,
-          scope.ownerTenantId,
-          scope.accountId,
-          scope.upstreamId,
-          input.attemptId,
-          input.fencingToken,
-          scope.ownerScopeKey,
-          evidence.state,
-          evidence.outcome,
-        ]),
-      );
+      // One fenced UPSERT. The adapter may elide BEGIN/COMMIT only when
+      // this checked-out session is READ COMMITTED; other defaults retain
+      // the explicit transaction so concurrent writes do not gain 40001s.
+      const result = await queryReadCommitted<RevisionRow>(this.database, WRITE_HEALTH_SQL, [
+        scope.tenantId,
+        scope.ownerKind,
+        scope.ownerTenantId,
+        scope.accountId,
+        scope.upstreamId,
+        input.attemptId,
+        input.fencingToken,
+        scope.ownerScopeKey,
+        evidence.state,
+        evidence.outcome,
+      ]);
       // Any completed statement (including a fenced-out no-op) proves the
       // storage path works; H5b: the bounded latch resets immediately.
       this.storageRecovered();

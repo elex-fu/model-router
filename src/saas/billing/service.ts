@@ -344,13 +344,8 @@ export class PlatformWalletLedgerService {
         return this.result(executor, current, wallet);
       }
 
-      const wallet = await this.lockWallet(executor, normalized.tenantId, normalized.currency);
-      // The wallet advisory fence (see lockWallet) is the transaction fence for
-      // every spending-freeze writer. Read the immutable freeze without
-      // requesting UPDATE privilege. The row is read once here and threaded
-      // through walletSummary so the fenced critical section issues no
-      // redundant queries.
-      const freeze = await this.readFreeze(executor, normalized.tenantId);
+      const snapshot = await this.lockReservationWalletSnapshot(executor, normalized.tenantId, normalized.currency);
+      const { wallet, freeze } = snapshot;
       if (freeze) throw new SaasBillingError('SPENDING_FROZEN');
 
       const raced = await this.findReservation(executor, normalized.identity, true, normalized.tenantId);
@@ -359,7 +354,12 @@ export class PlatformWalletLedgerService {
         return this.result(executor, raced, wallet, freeze);
       }
 
-      const before = await this.walletSummary(executor, wallet, undefined, freeze);
+      const before = this.walletSummaryFromFacts(
+        wallet,
+        snapshot.activeHoldMinorUnits,
+        snapshot.activeRefundFreezeMinorUnits,
+        freeze,
+      );
       if (before.availableMinorUnits < normalized.amountMinorUnits) {
         throw new SaasBillingError('INSUFFICIENT_FUNDS');
       }
@@ -378,7 +378,22 @@ export class PlatformWalletLedgerService {
         expiresAt: normalized.expiresAt,
         createdAt,
       });
-      if (inserted) return this.result(executor, inserted, wallet, freeze);
+      if (inserted) {
+        // All reservation writers and refund-freeze inserts use this wallet
+        // fence. A failed refund may delete its existing freeze without the
+        // fence, so only the zero-refund case can reuse the complete snapshot.
+        // Nonzero refund freezes retain the original post-insert observation.
+        if (before.activeRefundFreezesMinorUnits === 0n) {
+          const after = this.walletSummaryFromFacts(
+            wallet,
+            before.activeHoldsMinorUnits + this.amount(inserted),
+            0n,
+            freeze,
+          );
+          return this.resultFromSummary(inserted, after);
+        }
+        return this.result(executor, inserted, wallet, freeze);
+      }
 
       const winner = await this.findReservation(executor, normalized.identity, true, normalized.tenantId);
       if (!winner) throw new SaasBillingError('BILLING_STORAGE_ERROR');
@@ -1034,6 +1049,92 @@ export class PlatformWalletLedgerService {
     return row;
   }
 
+  /** One fresh snapshot after (never in the statement acquiring) the fence. */
+  private async lockReservationWalletSnapshot(
+    executor: BillingTransactionExecutor,
+    tenantId: string,
+    currency: string,
+  ): Promise<{
+    wallet: WalletRow;
+    freeze: FreezeRow | null;
+    activeHoldMinorUnits: StoredMinorUnits;
+    activeRefundFreezeMinorUnits: StoredMinorUnits;
+  }> {
+    await executor.query(WALLET_FENCE_SQL, [saasAdvisoryKey.walletFence(tenantId, currency)]);
+    const selected = await executor.query<
+      WalletRow & {
+        freeze_tenant_id: string | null;
+        freeze_reason_ref: string | null;
+        freeze_frozen_at: StoredTimestamp | null;
+        active_hold_minor_units: StoredMinorUnits;
+        active_refund_freeze_minor_units: StoredMinorUnits;
+      }
+    >(
+      `/* billing:reserve-wallet-snapshot */
+       SELECT wallet.id, wallet.tenant_id, wallet.currency, wallet.posted_balance_minor_units,
+              wallet.created_at, wallet.updated_at,
+              frozen.tenant_id AS freeze_tenant_id, frozen.reason_ref AS freeze_reason_ref,
+              frozen.frozen_at AS freeze_frozen_at,
+              (SELECT COALESCE(SUM(amount_minor_units), 0)::text
+                 FROM saas_billing_reservations
+                WHERE tenant_id = $1 AND currency = $2 AND state IN ('reserved', 'reconciliation_pending'))
+                AS active_hold_minor_units,
+              (SELECT COALESCE(SUM(amount_minor_units), 0)::text
+                 FROM saas_refund_wallet_freezes WHERE tenant_id = $1 AND currency = $2)
+                AS active_refund_freeze_minor_units
+         FROM saas_wallets wallet
+         LEFT JOIN LATERAL (
+           SELECT tenant_id, reason_ref, frozen_at FROM saas_billing_spending_freezes WHERE tenant_id = $1
+         ) frozen ON true
+        WHERE wallet.tenant_id = $1 AND wallet.currency = $2`,
+      [tenantId, currency],
+    );
+    const wallet = selected.rows[0];
+    if (!wallet) throw new SaasBillingError('WALLET_NOT_FOUND');
+    if (wallet.tenant_id !== tenantId || wallet.currency !== currency)
+      throw new SaasBillingError('BILLING_STORAGE_ERROR');
+    mapWalletRow(wallet);
+    let freeze: FreezeRow | null = null;
+    if (wallet.freeze_tenant_id !== null) {
+      if (
+        wallet.freeze_tenant_id !== tenantId ||
+        wallet.freeze_reason_ref === null ||
+        wallet.freeze_frozen_at === null
+      ) {
+        throw new SaasBillingError('BILLING_STORAGE_ERROR');
+      }
+      freeze = { tenant_id: tenantId, reason_ref: wallet.freeze_reason_ref, frozen_at: wallet.freeze_frozen_at };
+    }
+    return {
+      wallet,
+      freeze,
+      activeHoldMinorUnits: wallet.active_hold_minor_units,
+      activeRefundFreezeMinorUnits: wallet.active_refund_freeze_minor_units,
+    };
+  }
+
+  private walletSummaryFromFacts(
+    wallet: WalletRow,
+    activeHolds: StoredMinorUnits,
+    activeRefundFreezes: StoredMinorUnits,
+    freeze: FreezeRow | null,
+  ): WalletRecord {
+    const base = mapWalletRow(wallet);
+    const activeHoldsMinorUnits = parseStoredMinorUnits(activeHolds);
+    const activeRefundFreezesMinorUnits = parseStoredMinorUnits(activeRefundFreezes);
+    if (activeHoldsMinorUnits + activeRefundFreezesMinorUnits > base.postedBalanceMinorUnits) {
+      throw new SaasBillingError('BILLING_STORAGE_ERROR');
+    }
+    return {
+      ...base,
+      activeHoldsMinorUnits,
+      activeRefundFreezesMinorUnits,
+      availableMinorUnits: base.postedBalanceMinorUnits - activeHoldsMinorUnits - activeRefundFreezesMinorUnits,
+      spendingFrozen: freeze !== null,
+      spendingFreezeReference: freeze?.reason_ref ?? null,
+    };
+  }
+
   private async readFreeze(executor: BillingTransactionExecutor, tenantId: string): Promise<FreezeRow | null> {
     const result = await executor.query<FreezeRow>(
       `SELECT tenant_id, reason_ref, frozen_at
@@ -1098,8 +1199,11 @@ export class PlatformWalletLedgerService {
     wallet: WalletRow,
     freezeRow?: FreezeRow | null,
   ): Promise<BillingReservationResult> {
+    return this.resultFromSummary(row, await this.walletSummary(executor, wallet, undefined, freezeRow));
+  }
+
+  private resultFromSummary(row: ReservationRow, walletSummary: WalletRecord): BillingReservationResult {
     const record = mapReservationRow(row);
-    const walletSummary = await this.walletSummary(executor, wallet, undefined, freezeRow);
     return {
       ...record,
       outcome: record.state,

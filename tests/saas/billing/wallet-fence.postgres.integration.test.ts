@@ -103,16 +103,31 @@ test('wallet advisory fence: no tuple lock while fenced, mutual exclusion under 
         // Take the wallet fence the billing service would take, then a
         // reservation — exactly what an admission does after billing.reserve.
         await fenced.query(WALLET_FENCE_SQL, [saasAdvisoryKey.walletFence(tenantId, currency)]);
-        await ledger.reserve(fenced, {
-          supplyMode: 'platform',
-          tenantId,
-          requestId: randomUUID(),
-          currency,
-          amountMinorUnits: 10n,
-          priceSnapshotRef: 'wallet-fence-tuple-lock-proof',
-          expiresAt: new Date(Date.now() + 60_000).toISOString(),
-          businessKey: wireLabel('reserve'),
-        });
+        const reserveStatements: string[] = [];
+        await ledger.reserve(
+          {
+            query: (sql, values) => {
+              reserveStatements.push(sql);
+              return fenced.query(sql, values);
+            },
+          },
+          {
+            supplyMode: 'platform',
+            tenantId,
+            requestId: randomUUID(),
+            currency,
+            amountMinorUnits: 10n,
+            priceSnapshotRef: 'wallet-fence-tuple-lock-proof',
+            expiresAt: new Date(Date.now() + 60_000).toISOString(),
+            businessKey: wireLabel('reserve'),
+          },
+        );
+        assert.equal(
+          reserveStatements.length,
+          5,
+          'fresh reserve keeps only five SQL operations inside the transaction',
+        );
+        assert.equal(reserveStatements.filter((sql) => sql.includes('AS active_hold_minor_units')).length, 1);
         // While this fenced transaction is open, another session can take a
         // NO KEY UPDATE tuple lock on the wallet row: the fence is advisory.
         // (The old row-FOR-UPDATE design blocked exactly this probe. The

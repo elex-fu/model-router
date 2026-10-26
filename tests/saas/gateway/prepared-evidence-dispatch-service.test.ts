@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { test } from 'node:test';
-import { RequestDiagnosticTrace, withRequestDiagnosticTrace } from '../../../src/saas/gateway/request-diagnostic-trace.js';
 import type { ModelResolutionProvenance } from '../../../src/saas/gateway/contracts.js';
 import type {
   NormalSuccessSettlementPort,
@@ -28,6 +27,10 @@ import type {
   PreparedEvidenceTransportResponse,
 } from '../../../src/saas/gateway/prepared-evidence-dispatch-service.js';
 import { ProviderHttpTransportError } from '../../../src/saas/gateway/provider-http-transport.js';
+import {
+  RequestDiagnosticTrace,
+  withRequestDiagnosticTrace,
+} from '../../../src/saas/gateway/request-diagnostic-trace.js';
 import type { AttemptRecord, AttemptTransitionInput } from '../../../src/saas/metering/types.js';
 
 const audit: PreparedRequestEvidenceAudit = {
@@ -172,6 +175,7 @@ class FakeMetering {
   failDispatchFence = false;
   failSentTransition = false;
   failUnknownTransition = false;
+  failAfterCommittedTransition?: 'dispatching' | 'sent';
   readOverride?: (read: number, snapshot: AttemptRecord) => AttemptRecord | null;
   beforeTransition?: (input: AttemptTransitionInput) => void;
 
@@ -244,6 +248,9 @@ class FakeMetering {
       unknownReason: input.unknownReason ?? null,
       resultHttpStatus: input.resultHttpStatus ?? null,
     };
+    if (input.dispatchState === this.failAfterCommittedTransition) {
+      throw new Error('committed transition returned an unusable result');
+    }
     return this.current;
   }
 
@@ -595,101 +602,103 @@ test('a model-unavailable outcome awaits the durable (account, model) cooldown r
 });
 
 for (const settlementKind of ['settled', 'replayed', 'reconciliation_pending'] as const) {
-test(`successful execution exposes server completion ${settlementKind} without inferring settlement from sent`, async () => {
-  const proof = new FakeEvidence();
-  const metering = new FakeMetering();
-  const client = new FakeClientStream();
-  const events: PreparedEvidenceDispatchObservation[] = [];
-  proof.metering = metering;
-  const successAttempt = attempt({
-    preparedEvidenceId: 'evidence-1',
-    dispatchState: 'sent',
-    resultState: 'succeeded',
-    responseStarted: true,
-    responseStartedAt: '2026-09-28T00:00:00.000Z',
-    resultHttpStatus: 200,
-    stateVersion: 4,
+  test(`successful execution exposes server completion ${settlementKind} without inferring settlement from sent`, async () => {
+    const proof = new FakeEvidence();
+    const metering = new FakeMetering();
+    const client = new FakeClientStream();
+    const events: PreparedEvidenceDispatchObservation[] = [];
+    proof.metering = metering;
+    const successAttempt = attempt({
+      preparedEvidenceId: 'evidence-1',
+      dispatchState: 'sent',
+      resultState: 'succeeded',
+      responseStarted: true,
+      responseStartedAt: '2026-09-28T00:00:00.000Z',
+      resultHttpStatus: 200,
+      stateVersion: 4,
+    });
+    const settlement: NormalSuccessSettlementPort = {
+      async complete() {
+        assert.equal(client.endCount, 1, 'body delivery completes before settlement starts');
+        return { kind: settlementKind, attempt: successAttempt };
+      },
+      async retainUnknown() {
+        throw new Error('verified execution must not be reclassified as unknown');
+      },
+    };
+    const transport: PreparedEvidenceTransport = {
+      async send() {
+        return {
+          responseStarted: true,
+          resultHttpStatus: 200,
+          providerUsage: {
+            inputTotal: 5,
+            inputUncached: 5,
+            cacheRead: 0,
+            cacheWrite: 0,
+            cacheWrite5m: 0,
+            cacheWrite1h: 0,
+            outputTotal: 2,
+            reasoningOutput: 0,
+            status: 'reported',
+            source: 'upstream',
+            semanticsVersion: 'v1',
+            billingMode: 'token',
+            units: null,
+            sizeTier: null,
+          },
+        };
+      },
+    };
+    const snapshot: NormalSuccessSettlementSnapshot = {
+      supplyMode: 'platform',
+      providerProtocol: 'openai',
+      customerPriceVersion: 'price-v1',
+      reservationId: 'hold-1',
+      priceSnapshotRef: 'snapshot-1',
+      currency: 'USD',
+      holdAmountMinorUnits: '1',
+      publicModelId: 'public-model-1',
+      publicModelVersion: '1',
+      providerId: 'provider-1',
+      productId: 'product-1',
+      endpoint: '/v1/chat/completions',
+      usageEstimatorVersion: 'estimator-v1',
+    };
+
+    const trace = new RequestDiagnosticTrace();
+    const result = await withRequestDiagnosticTrace(trace, () =>
+      new SaasPreparedEvidenceDispatchService(
+        proof,
+        metering,
+        new FakeLeaseProvider(),
+        transport,
+        settlement,
+        undefined,
+        undefined,
+        undefined,
+        (event) => events.push(event),
+      ).dispatch({
+        evidenceId: 'evidence-1',
+        payloadBytes: payload,
+        audit,
+        normalSuccessSnapshot: snapshot,
+        client,
+      }),
+    );
+
+    assert.equal(result.kind, 'sent');
+    assert.ok(result.kind === 'sent');
+    assert.equal(result.settlementOutcome, settlementKind);
+    assert.equal(typeof trace.snapshot().markers.settled === 'number', settlementKind === 'settled');
+    assert.equal(trace.snapshot().pendingSpans, 0);
+    assert.equal(result.attempt.resultState, 'succeeded');
+    assert.ok(
+      events.findIndex(({ stage }) => stage === 'response-delivery') <
+        events.findIndex(({ stage }) => stage === 'settlement'),
+    );
+    assert.equal(events.find(({ stage }) => stage === 'settlement')?.outcome, 'ok');
   });
-  const settlement: NormalSuccessSettlementPort = {
-    async complete() {
-      assert.equal(client.endCount, 1, 'body delivery completes before settlement starts');
-      return { kind: settlementKind, attempt: successAttempt };
-    },
-    async retainUnknown() {
-      throw new Error('verified execution must not be reclassified as unknown');
-    },
-  };
-  const transport: PreparedEvidenceTransport = {
-    async send() {
-      return {
-        responseStarted: true,
-        resultHttpStatus: 200,
-        providerUsage: {
-          inputTotal: 5,
-          inputUncached: 5,
-          cacheRead: 0,
-          cacheWrite: 0,
-          cacheWrite5m: 0,
-          cacheWrite1h: 0,
-          outputTotal: 2,
-          reasoningOutput: 0,
-          status: 'reported',
-          source: 'upstream',
-          semanticsVersion: 'v1',
-          billingMode: 'token',
-          units: null,
-          sizeTier: null,
-        },
-      };
-    },
-  };
-  const snapshot: NormalSuccessSettlementSnapshot = {
-    supplyMode: 'platform',
-    providerProtocol: 'openai',
-    customerPriceVersion: 'price-v1',
-    reservationId: 'hold-1',
-    priceSnapshotRef: 'snapshot-1',
-    currency: 'USD',
-    holdAmountMinorUnits: '1',
-    publicModelId: 'public-model-1',
-    publicModelVersion: '1',
-    providerId: 'provider-1',
-    productId: 'product-1',
-    endpoint: '/v1/chat/completions',
-    usageEstimatorVersion: 'estimator-v1',
-  };
-
-  const trace = new RequestDiagnosticTrace();
-  const result = await withRequestDiagnosticTrace(trace, () => new SaasPreparedEvidenceDispatchService(
-    proof,
-    metering,
-    new FakeLeaseProvider(),
-    transport,
-    settlement,
-    undefined,
-    undefined,
-    undefined,
-    (event) => events.push(event),
-  ).dispatch({
-    evidenceId: 'evidence-1',
-    payloadBytes: payload,
-    audit,
-    normalSuccessSnapshot: snapshot,
-    client,
-  }));
-
-  assert.equal(result.kind, 'sent');
-  assert.ok(result.kind === 'sent');
-  assert.equal(result.settlementOutcome, settlementKind);
-  assert.equal(typeof trace.snapshot().markers.settled === 'number', settlementKind === 'settled');
-  assert.equal(trace.snapshot().pendingSpans, 0);
-  assert.equal(result.attempt.resultState, 'succeeded');
-  assert.ok(
-    events.findIndex(({ stage }) => stage === 'response-delivery') <
-      events.findIndex(({ stage }) => stage === 'settlement'),
-  );
-  assert.equal(events.find(({ stage }) => stage === 'settlement')?.outcome, 'ok');
-});
 }
 
 test('dispatch records retryable provider failures and ignores caller errors', async () => {
@@ -2509,4 +2518,56 @@ test('dispatch feeds account-attributable outcomes to the in-process failure fee
   await dispatchWithStatus(null, new ProviderHttpTransportError('NETWORK_ERROR', 'provider network failure'));
 
   assert.deepEqual(feedback, ['auth_or_permission_failure', 'rate_limited', 'success']);
+});
+
+test('committed but unusable dispatch fence stops before upstream and never replays', async () => {
+  const proof = new FakeEvidence();
+  const metering = new FakeMetering();
+  const lease = new FakeLeaseProvider();
+  metering.failAfterCommittedTransition = 'dispatching';
+  let sends = 0;
+  const dispatcher = service(proof, metering, lease, {
+    async send() {
+      sends++;
+      return { responseStarted: true, resultHttpStatus: 200 };
+    },
+  });
+  const input = { evidenceId: 'evidence-1', payloadBytes: payload, audit };
+  await assert.rejects(
+    dispatcher.dispatch(input),
+    (error: unknown) => error instanceof SaasPreparedEvidenceDispatchError && error.code === 'DISPATCH_STATE_CONFLICT',
+  );
+  assert.equal(metering.current.dispatchState, 'dispatching', 'the durable fence is not rolled back');
+  assert.equal(sends, 0);
+  assert.equal(lease.releaseCount, 1);
+  await assert.rejects(dispatcher.dispatch(input));
+  assert.equal(sends, 0, 'reusing claimed evidence cannot redispatch');
+  assert.equal(metering.transitionInputs.length, 1);
+});
+
+test('committed but unusable sent result retains durable sent state without settlement port and never replays', async () => {
+  const proof = new FakeEvidence();
+  const metering = new FakeMetering();
+  const lease = new FakeLeaseProvider();
+  metering.failAfterCommittedTransition = 'sent';
+  let sends = 0;
+  const dispatcher = service(proof, metering, lease, {
+    async send() {
+      sends++;
+      return { responseStarted: true, resultHttpStatus: 200 };
+    },
+  });
+  const input = { evidenceId: 'evidence-1', payloadBytes: payload, audit };
+  await assert.rejects(
+    dispatcher.dispatch(input),
+    (error: unknown) =>
+      error instanceof SaasPreparedEvidenceDispatchError && error.code === 'UNKNOWN_STATE_UPDATE_FAILED',
+  );
+  assert.equal(sends, 1);
+  assert.equal(metering.current.dispatchState, 'sent');
+  assert.equal(metering.current.resultState, 'pending', 'unsettled work remains visible to reconciliation');
+  assert.equal(metering.current.responseStarted, true);
+  assert.equal(lease.releaseCount, 1);
+  await assert.rejects(dispatcher.dispatch(input));
+  assert.equal(sends, 1, 'uncertain result must never become a second upstream send');
 });

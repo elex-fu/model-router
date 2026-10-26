@@ -336,6 +336,52 @@ test('FIN-01: bounded real PostgreSQL wallet financial invariants under restrict
       assert.equal(wallet.availableMinorUnits, 20n);
     });
 
+    await t.test(
+      'reserve re-reads a nonzero refund freeze deleted by another session without the wallet fence',
+      async () => {
+        const fixture = await seedFixture(migrator, true);
+        let snapshotReads = 0;
+        let deleted = false;
+        const reserved = await transaction(gateway, (tx) =>
+          service.reserve(
+            {
+              async query<Row>(sql: string, values?: readonly unknown[]) {
+                const result = await tx.query<Row>(sql, values);
+                if (sql.includes('AS active_refund_freeze_minor_units')) snapshotReads++;
+                if (sql.startsWith('INSERT INTO saas_billing_reservations')) {
+                  // Failed wallet refunds may remove their freeze without acquiring
+                  // the wallet fence. This separate session must complete while the
+                  // reservation still owns that fence, before its result is built.
+                  const removal = await transaction(controlPlane, async (other) => {
+                    await other.query(
+                      `UPDATE saas_refund_orders SET state = 'failed', completed_at = clock_timestamp(),
+                updated_at = clock_timestamp() WHERE tenant_id = $1`,
+                      [fixture.tenantId],
+                    );
+                    return other.query('DELETE FROM saas_refund_wallet_freezes WHERE tenant_id = $1', [
+                      fixture.tenantId,
+                    ]);
+                  });
+                  assert.equal(removal.rowCount, 1);
+                  deleted = true;
+                }
+                return result;
+              },
+            },
+            reserveInput(fixture, 'refund-cleared-during-reserve', '40'),
+          ),
+        );
+        assert.equal(deleted, true);
+        assert.equal(snapshotReads, 2);
+        assert.equal(reserved.activeHoldsMinorUnits, 40n);
+        assert.equal(reserved.availableMinorUnits, 60n);
+        const state = await snapshot(migrator, fixture);
+        assert.equal(state.holds, '40');
+        assert.equal(state.refund_freezes, '0');
+        assert.equal(state.posted, '100');
+      },
+    );
+
     await t.test('reserve and settlement replay preserve the snapshot and post only one settlement pair', async () => {
       const fixture = await seedFixture(migrator);
       const input = reserveInput(fixture, 'replay');

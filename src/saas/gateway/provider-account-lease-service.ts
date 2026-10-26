@@ -236,24 +236,30 @@ export class PostgresProviderAccountLeaseService implements PreparedEvidenceLeas
     const databaseNow = await this.databaseClock(tx);
     const heldRows = heldResult.rows;
     const occupiedSlots = new Set<number>();
+    let hasExpired = false;
     for (const row of heldRows) {
       const slot = asSlot(row.slot);
       if (occupiedSlots.has(slot)) fail('STORAGE_ERROR', 'duplicate active lease slot');
       if (asDate(row.lease_expires_at, 'lease_expires_at').getTime() > databaseNow.getTime()) {
         occupiedSlots.add(slot);
+      } else {
+        hasExpired = true;
       }
     }
 
-    await tx.query(
-      `UPDATE ${LEASE_TABLE}
+    // The account fence prevents new acquisitions and the held rows are locked.
+    // Avoid an empty write when the post-lock clock found no expired holder.
+    if (hasExpired)
+      await tx.query(
+        `UPDATE ${LEASE_TABLE}
           SET status = 'expired', released_at = $4, updated_at = $4
         WHERE owner_kind = $1
           AND owner_tenant_id IS NOT DISTINCT FROM $2
           AND account_id = $3
           AND status = 'held'
           AND lease_expires_at <= $4`,
-      [input.ownerKind, input.ownerTenantId, input.accountId, databaseNow],
-    );
+        [input.ownerKind, input.ownerTenantId, input.accountId, databaseNow],
+      );
 
     if (occupiedSlots.size >= this.maxConcurrency) return null;
     let slot: number | null = null;
@@ -265,19 +271,14 @@ export class PostgresProviderAccountLeaseService implements PreparedEvidenceLeas
     }
     if (slot === null) return null;
 
-    const sequenceResult = await tx.query<{ fencing_token: unknown }>(
-      `SELECT nextval('saas_provider_account_lease_fencing_seq') AS fencing_token`,
-    );
-    const fencingToken = asFencingToken(
-      exactlyOne(sequenceResult.rows, 'STORAGE_ERROR', 'fencing sequence failed').fencing_token,
-    );
     const leaseId = randomUUID();
     const inserted = await tx.query<{ id: string; fencing_token: unknown }>(
       `INSERT INTO ${LEASE_TABLE}
         (id, tenant_id, owner_kind, owner_tenant_id, account_id, upstream_id, attempt_id,
          slot, fencing_token, status, lease_expires_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'held',
-               clock_timestamp() + ($10 * interval '1 millisecond'))
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
+               nextval('saas_provider_account_lease_fencing_seq'), 'held',
+               clock_timestamp() + ($9 * interval '1 millisecond'))
        RETURNING id, fencing_token`,
       [
         leaseId,
@@ -288,12 +289,12 @@ export class PostgresProviderAccountLeaseService implements PreparedEvidenceLeas
         input.upstreamId,
         input.attemptId,
         slot,
-        fencingToken,
         this.leaseTtlMs,
       ],
     );
     const insertedRow = exactlyOne(inserted.rows, 'STORAGE_ERROR', 'lease insert did not return exactly one row');
-    if (insertedRow.id !== leaseId || asFencingToken(insertedRow.fencing_token) !== fencingToken) {
+    const fencingToken = asFencingToken(insertedRow.fencing_token);
+    if (insertedRow.id !== leaseId) {
       fail('STORAGE_ERROR', 'lease insert returned an unexpected identity');
     }
 
@@ -382,8 +383,9 @@ export class PostgresProviderAccountLeaseService implements PreparedEvidenceLeas
     try {
       await this.database.transaction(async (tx) => {
         const row = await this.loadLease(tx, identity);
-        const databaseNow = await this.databaseClock(tx);
-        if (row.status !== 'held' || asDate(row.lease_expires_at, 'lease_expires_at') <= databaseNow) {
+        // The conditional UPDATE samples the DB clock after loadLease acquired
+        // the row lock; a separate clock query and JS expiry comparison add no safety.
+        if (row.status !== 'held') {
           fail('STALE_LEASE', 'expired or terminal provider account lease cannot be renewed');
         }
         const updated = await tx.query<{ id: string }>(
@@ -410,9 +412,9 @@ export class PostgresProviderAccountLeaseService implements PreparedEvidenceLeas
     try {
       await this.database.transaction(async (tx) => {
         const row = await this.loadLease(tx, identity);
-        const databaseNow = await this.databaseClock(tx);
         if (row.status === 'released') return;
-        if (row.status !== 'held' || asDate(row.lease_expires_at, 'lease_expires_at') <= databaseNow) {
+        // Check expiry inside the UPDATE, after the row lock, not with host time.
+        if (row.status !== 'held') {
           fail('STALE_LEASE', 'expired or terminal provider account lease cannot be released');
         }
         const updated = await tx.query<{ id: string }>(

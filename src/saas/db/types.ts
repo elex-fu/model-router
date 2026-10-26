@@ -25,6 +25,13 @@ export interface SaasDatabasePool extends SqlExecutor {
 }
 
 export interface SaasDatabase extends SqlExecutor {
+  /**
+   * Execute one atomic statement at READ COMMITTED. Implementations may omit
+   * an explicit transaction only after checking the same checked-out session.
+   * Result decoding happens after commit; callers must treat an unusable
+   * result as uncertain, never as proof that the write rolled back.
+   */
+  queryReadCommitted?<Row>(sql: string, values?: readonly unknown[]): Promise<SqlResult<Row>>;
   transaction<T>(work: (tx: SqlExecutor) => Promise<T>): Promise<T>;
   migrate(): Promise<void>;
   verifySchema(): Promise<void>;

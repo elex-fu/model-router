@@ -26,6 +26,7 @@ export class RequestDiagnosticTrace {
   private readonly started: number;
   private readonly spans: { phase: RequestDiagnosticPhase; interval: Interval }[] = [];
   private readonly markers: Partial<Record<RequestDiagnosticMarker, number>> = {};
+  private readonly counts = new Map<RequestDiagnosticPhase, { started: number; beforeUpstreamSend: number }>();
   private accepted = 0;
   private dropped = 0;
 
@@ -39,6 +40,10 @@ export class RequestDiagnosticTrace {
   private elapsed(): number { return Math.max(0, this.now() - this.started); }
 
   begin(phase: RequestDiagnosticPhase): () => void {
+    const count = this.counts.get(phase) ?? { started: 0, beforeUpstreamSend: 0 };
+    count.started++;
+    if (this.markers['upstream-send'] === undefined) count.beforeUpstreamSend++;
+    this.counts.set(phase, count);
     if (this.accepted >= this.limit) { this.dropped++; return () => {}; }
     this.accepted++;
     const start = this.elapsed();
@@ -62,7 +67,12 @@ export class RequestDiagnosticTrace {
       const combined = union([...covered, ...intervals]);
       const exclusiveMs = Math.max(0, duration(combined) - duration(covered));
       covered = combined;
-      return { phase, inclusiveMs, exclusiveMs };
+      const count = this.counts.get(phase);
+      return { phase, inclusiveMs, exclusiveMs,
+        // Attempted client operations, including pending/dropped timing spans;
+        // never PostgreSQL nested statements or a count of distinct SQL text.
+        startedCount: count?.started ?? 0,
+        beforeUpstreamSendCount: count?.beforeUpstreamSend ?? 0 };
     });
     return {
       elapsedMs: this.elapsed(),

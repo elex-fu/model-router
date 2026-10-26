@@ -33,6 +33,13 @@ test('runtime health writes sample the database clock after the actual conflict 
     await t.test('failure F2 waits then applies exactly one EMA vote and an exact shared-clock cooldown', () =>
       proof(() => proveRuntimeHealthWaitClock(migrator, gateway, 'network-failure')),
     );
+    for (const isolation of ['read committed', 'repeatable read', 'serializable'] as const) {
+      for (const outcome of ['success', 'network-failure'] as const) {
+        await t.test(`atomic adapter under ${isolation}: concurrent ${outcome} keeps post-lock clock and fences`, () =>
+          proof(() => proveRuntimeHealthWaitClock(migrator, gateway, outcome, isolation)),
+        );
+      }
+    }
     await t.test('a genuinely future stored observation still rejects a legitimate newer lease with 55000', () =>
       proof(() => proveRuntimeHealthFutureRejected(migrator, gateway)),
     );

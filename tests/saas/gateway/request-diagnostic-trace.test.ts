@@ -55,3 +55,16 @@ test('same-request context survives await and stays isolated across requests', a
   })));
   assert.equal(currentRequestDiagnosticTrace(), undefined);
 });
+
+test('operation counts preserve starts across timing cap and equal-time send marker', () => {
+  const trace = new RequestDiagnosticTrace(() => 10, 1);
+  const first = trace.begin('query');
+  trace.begin('query')();
+  trace.mark('upstream-send');
+  trace.begin('query')();
+  first(); first();
+  const phase = trace.snapshot().phases.find((value) => value.phase === 'query');
+  assert.equal(phase?.startedCount, 3);
+  assert.equal(phase?.beforeUpstreamSendCount, 2);
+  assert.equal(trace.snapshot().droppedSpans, 2);
+});

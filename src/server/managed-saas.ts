@@ -16,6 +16,7 @@ import { createSaasConsoleHandler, type SaasConsoleHttpHandler } from '../saas/c
 import { SaasConsoleUsageQueryService } from '../saas/console/index.js';
 import { verifyCredentialValidationWorkerSchemaReadiness } from '../saas/db/credential-validation-worker-schema-readiness.js';
 import { resolveSaasDatabasePoolSettings } from '../saas/db/database.js';
+import { managedQuotaPoolBudget } from './managed-saas-quota-pool.js';
 import {
   closeSaasDatabase,
   createSaasDatabase,
@@ -1156,7 +1157,7 @@ export function createGatewayHandler(
 }
 
 function defaultCreateDatabase(
-  options: { connectionString: string },
+  options: { connectionString: string; max?: number },
   environment: DeploymentEnvironment,
 ): ManagedSaasDatabase {
   return createSaasDatabase({ ...options, env: environment });
@@ -1824,22 +1825,61 @@ export function createDeploymentRequestDiagnostics(environment: Readonly<Record<
   let writing = false;
   const drain = (): void => {
     const next = queue.shift();
-    if (next === undefined) { writing = false; return; }
-    try { sink(next, () => { setImmediate(drain); }); }
-    catch { setImmediate(drain); }
+    if (next === undefined) {
+      writing = false;
+      return;
+    }
+    try {
+      sink(next, () => {
+        setImmediate(drain);
+      });
+    } catch {
+      setImmediate(drain);
+    }
   };
-  const number = (value: number): number => Number.isFinite(value) && value >= 0 ? Math.min(value, 1e12) : 0;
+  const number = (value: number): number => (Number.isFinite(value) && value >= 0 ? Math.min(value, 1e12) : 0);
   return Object.freeze({
-    select: (_requestId: string): boolean => { count = (count + 1) % every; return count === 0; },
-    observe: (sample: { readonly requestId: string; readonly trace: ReturnType<RequestDiagnosticTrace['snapshot']> }): void => {
+    select: (_requestId: string): boolean => {
+      count = (count + 1) % every;
+      return count === 0;
+    },
+    observe: (sample: {
+      readonly requestId: string;
+      readonly trace: ReturnType<RequestDiagnosticTrace['snapshot']>;
+    }): void => {
       if (queue.length >= 32) return;
       const trace = sample.trace;
-      const markers = Object.fromEntries((['upstream-send', 'first-byte', 'eof', 'settled'] as const).filter(key => trace.markers[key] !== undefined).map(key => [key, number(trace.markers[key]!)]));
-      const phases = REQUEST_DIAGNOSTIC_PHASES.map(phase => { const value = trace.phases.find(item => item.phase === phase); return { phase, inclusiveMs: number(value?.inclusiveMs ?? 0), exclusiveMs: number(value?.exclusiveMs ?? 0) }; });
-      const line = JSON.stringify({ kind: 'request-diagnostic-v1', requestId: /^[A-Za-z0-9_.:-]{1,128}$/u.test(sample.requestId) ? sample.requestId : 'invalid', elapsedMs: number(trace.elapsedMs), observedExclusiveMs: number(trace.observedExclusiveMs), pendingSpans: number(trace.pendingSpans), droppedSpans: number(trace.droppedSpans), markers, phases });
+      const markers = Object.fromEntries(
+        (['upstream-send', 'first-byte', 'eof', 'settled'] as const)
+          .filter((key) => trace.markers[key] !== undefined)
+          .map((key) => [key, number(trace.markers[key]!)]),
+      );
+      const phases = REQUEST_DIAGNOSTIC_PHASES.map((phase) => {
+        const value = trace.phases.find((item) => item.phase === phase);
+        return {
+          phase,
+          inclusiveMs: number(value?.inclusiveMs ?? 0),
+          exclusiveMs: number(value?.exclusiveMs ?? 0),
+          startedCount: number(value?.startedCount ?? 0),
+          beforeUpstreamSendCount: number(value?.beforeUpstreamSendCount ?? 0),
+        };
+      });
+      const line = JSON.stringify({
+        kind: 'request-diagnostic-v1',
+        requestId: /^[A-Za-z0-9_.:-]{1,128}$/u.test(sample.requestId) ? sample.requestId : 'invalid',
+        elapsedMs: number(trace.elapsedMs),
+        observedExclusiveMs: number(trace.observedExclusiveMs),
+        pendingSpans: number(trace.pendingSpans),
+        droppedSpans: number(trace.droppedSpans),
+        markers,
+        phases,
+      });
       if (line.length > 4096) return;
       queue.push(`${line}\n`);
-      if (!writing) { writing = true; setImmediate(drain); }
+      if (!writing) {
+        writing = true;
+        setImmediate(drain);
+      }
     },
   });
 }
@@ -1879,6 +1919,10 @@ export async function startManagedSaasServer(
   const environment = options.environment ?? process.env;
   const commercialTrust = await loadCommercialAttestationTrust(deployment, environment);
   const effectiveControlPlanePoolMax = resolveSaasDatabasePoolSettings({}, environment).max;
+  const gatewayPoolBudget = managedQuotaPoolBudget(
+    effectiveControlPlanePoolMax,
+    deployment.workloadRole === 'gateway' && deployment.gatewayRedisUrl !== undefined && options.createDatabase === undefined,
+  );
   const requestDiagnostics = createDeploymentRequestDiagnostics(environment);
   const httpInFlightRaw = environment.MODEL_ROUTER_SAAS_GATEWAY_MAX_HTTP_IN_FLIGHT;
   let maxHttpInFlight: number | undefined;
@@ -2003,7 +2047,9 @@ export async function startManagedSaasServer(
   // Gateway-scoped Redis (optional MODEL_ROUTER_SAAS_GATEWAY_REDIS_URL):
   // one core-owned RESP connection for the sticky-session hot path.
   let gatewayRedis: RedisProvider | undefined;
+  let gatewayHintRedis: RedisProvider | undefined;
   let gatewayQuota: RedisPreparationCapacity | undefined;
+  let gatewayQuotaDatabase: ManagedSaasDatabase | undefined;
   let unknownOutcomeScanner: UnknownOutcomeScannerHandle | undefined;
   let channelStatusWorker: ChannelStatusWorkerHandle | undefined;
   let alertEvaluatorWorker: AlertEvaluatorWorkerHandle | undefined;
@@ -2072,27 +2118,35 @@ export async function startManagedSaasServer(
       const closingGatewayRuntimeModule = gatewayRuntimeModule;
       const closingProviders = providers;
       const closingGatewayQuota = gatewayQuota;
+      const closingGatewayQuotaDatabase = gatewayQuotaDatabase;
       const closingDatabase = database;
       const closingGatewayRedis = gatewayRedis;
+      const closingGatewayHintRedis = gatewayHintRedis;
       const closingPaymentDeployment = paymentDeployment;
       const closingResponsesHistoryDeployment = responsesHistoryDeployment;
-      await closeManagedSaasResources([
-        ...(!gateway && closingGatewayKms ? [() => closingGatewayKms.close()] : []),
-        ...(closingGatewayRuntimeModule ? [() => closingGatewayRuntimeModule.close()] : []),
-        ...(closingProviders ? [() => closingProviders.close()] : []),
-        ...(closingGatewayQuota ? [() => closingGatewayQuota.close()] : []),
-        ...(closingDatabase ? [() => closeDatabase(closingDatabase)] : []),
-        ...(closingGatewayRedis ? [() => closingGatewayRedis.close()] : []),
-        ...(closingPaymentDeployment ? [() => closingPaymentDeployment.close()] : []),
-        ...(closingResponsesHistoryDeployment ? [() => closingResponsesHistoryDeployment.close()] : []),
-      ], options.shutdownCleanupMs);
-
+      await closeManagedSaasResources(
+        [
+          ...(!gateway && closingGatewayKms ? [() => closingGatewayKms.close()] : []),
+          ...(closingGatewayRuntimeModule ? [() => closingGatewayRuntimeModule.close()] : []),
+          ...(closingProviders ? [() => closingProviders.close()] : []),
+          ...(closingGatewayQuota ? [() => closingGatewayQuota.close()] : []),
+          ...(closingGatewayQuotaDatabase ? [() => closeSaasDatabase(closingGatewayQuotaDatabase)] : []),
+          ...(closingDatabase ? [() => closeDatabase(closingDatabase)] : []),
+          ...(closingGatewayRedis ? [() => closingGatewayRedis.close()] : []),
+          ...(closingGatewayHintRedis ? [() => closingGatewayHintRedis.close()] : []),
+          ...(closingPaymentDeployment ? [() => closingPaymentDeployment.close()] : []),
+          ...(closingResponsesHistoryDeployment ? [() => closingResponsesHistoryDeployment.close()] : []),
+        ],
+        options.shutdownCleanupMs,
+      );
     })();
     return closePromise;
   };
 
   try {
-    database = createDatabase({ connectionString: deployment.postgresUrl });
+    database = gatewayPoolBudget.quota > 0
+      ? defaultCreateDatabase({ connectionString: deployment.postgresUrl, max: gatewayPoolBudget.business }, environment)
+      : createDatabase({ connectionString: deployment.postgresUrl });
     const historyMode = environment.MODEL_ROUTER_SAAS_RESPONSES_HISTORY_MODE ?? 'disabled';
     if (!gatewayEnabled && historyMode !== 'disabled') throw new TypeError('RESPONSES_HISTORY_ROLE_FORBIDDEN');
     if (gatewayEnabled) responsesHistoryDeployment = await loadResponsesContinuationDeployment({ database, env: environment });
@@ -2190,6 +2244,22 @@ export async function startManagedSaasServer(
             keyPrefix: MANAGED_SAAS_REDIS_KEY_PREFIX,
           });
           await gatewayRedis.checkReady();
+          if (process.env.MODEL_ROUTER_SCHEDULER_HINT_CACHE !== 'off') {
+            // Separate bounded hint traffic from sticky/limiter and quota queues.
+            try {
+              gatewayHintRedis = await createRedisProvider({
+                url: deployment.gatewayRedisUrl,
+                keyPrefix: `${MANAGED_SAAS_REDIS_KEY_PREFIX}:hints`,
+              });
+              await gatewayHintRedis.checkReady();
+            } catch {
+              // This extra cache is dispensable; the original provider's
+              // mandatory readiness check above remains unchanged.
+              const failedHintRedis = gatewayHintRedis;
+              gatewayHintRedis = undefined;
+              try { await failedHintRedis?.close(); } catch { /* Optional cache cleanup is best effort. */ }
+            }
+          }
         } catch {
           throw new Error('Managed SaaS gateway Redis provider is unavailable');
         }
@@ -2224,14 +2294,22 @@ export async function startManagedSaasServer(
       const billingLedger = new PlatformWalletLedgerService();
       if (deployment.gatewayRedisUrl !== undefined) {
         const namespace = 'managed-saas-capacity';
-        const persistence = new PostgresCapacityStatePersistence(database, namespace);
+        // Only core-owned pools are split. The sum of both maxima is exactly
+        // the configured budget; quota recovery never waits behind wallet locks.
+        if (gatewayPoolBudget.quota > 0) {
+          gatewayQuotaDatabase = defaultCreateDatabase(
+            { connectionString: deployment.postgresUrl, max: gatewayPoolBudget.quota }, environment,
+          );
+        }
+        const quotaDatabase = gatewayQuotaDatabase ?? database;
+        const persistence = new PostgresCapacityStatePersistence(quotaDatabase, namespace);
         gatewayQuota = new RedisPreparationCapacity(
           await RedisQuotaState.open({
             url: deployment.gatewayRedisUrl,
             namespace,
             persistence,
           }),
-          database,
+          quotaDatabase,
           namespace,
         );
         gatewayQuota.startRecovery();
@@ -2371,6 +2449,7 @@ export async function startManagedSaasServer(
         },
 
         schedulerAffinity,
+        ...(gatewayHintRedis ? { schedulerHintRedisCache: await gatewayHintRedis.createCacheClient() } : {}),
         ...(gatewayStickyCache ? { schedulerAffinityStickyCache: gatewayStickyCache } : {}),
         // F3: settlement terminal commits enqueue customer webhook events.
         ...(options.customerWebhooks?.enabled ? { customerWebhooks: { enabled: true } } : {}),

@@ -36,7 +36,7 @@ class FakeLeaseDatabase {
   nowMs = Date.parse('2026-09-28T00:00:00.000Z');
   accountAvailable = true;
   failOn: RegExp | null = null;
-  private nextFencingToken = 0n;
+  nextFencingToken = 0n;
   // Serializes this unit fixture only. Real lock exclusion and MVCC visibility
   // are proved separately by provider-account-lease-postgres.integration.test.
   private transactionTail = Promise.resolve();
@@ -127,15 +127,11 @@ class FakeLeaseDatabase {
       }
       return { rows: [], rowCount } as SqlResult<Row>;
     }
-    if (normalized.startsWith("SELECT nextval('saas_provider_account_lease_fencing_seq')")) {
-      this.events.push('next-fencing-token');
-      this.nextFencingToken += 1n;
-      return result([{ fencing_token: this.nextFencingToken.toString() }]) as SqlResult<Row>;
-    }
     if (normalized.startsWith('INSERT INTO saas_provider_account_leases')) {
       this.events.push('insert-lease');
-      const [id, tenantId, ownerKind, ownerTenantId, accountId, upstreamId, attemptId, slot, fencingToken, ttl] =
-        values;
+      const [id, tenantId, ownerKind, ownerTenantId, accountId, upstreamId, attemptId, slot, ttl] = values;
+      assert.match(normalized, /nextval\('saas_provider_account_lease_fencing_seq'\)/);
+      const fencingToken = (++this.nextFencingToken).toString();
       this.leases.push({
         id: String(id),
         tenant_id: String(tenantId),
@@ -406,6 +402,101 @@ test('an unavailable account fails after its fence and before touching lease sta
     );
     assert.deepEqual(database.events, ['account-fence', 'account-read']);
     assert.equal(database.calls.length, 2);
+    assert.equal(database.leases.length, 0);
+  }
+});
+
+test('uncontended acquire uses five statements without an empty expiry write or separate nextval', async () => {
+  const database = new FakeLeaseDatabase();
+  database.nextFencingToken = 9_007_199_254_740_992n;
+  const lease = await service(database).acquire(request());
+  assert.ok(lease);
+  assert.equal(lease.fencingToken, '9007199254740993');
+  assert.equal(database.calls.length, 5);
+  assert.equal(database.calls.filter(({ sql }) => sql.startsWith('UPDATE ')).length, 0);
+  assert.equal(database.calls.filter(({ sql }) => sql.startsWith('SELECT nextval')).length, 0);
+});
+
+test('expired held rows are still transitioned before their slot is reused', async () => {
+  const database = new FakeLeaseDatabase();
+  const provider = service(database, 1);
+  assert.ok(await provider.acquire(request('platform', 'account-1', 'attempt-a')));
+  database.nowMs += 1_000;
+  database.calls.length = 0;
+  assert.ok(await provider.acquire(request('platform', 'account-1', 'attempt-b')));
+  assert.equal(database.calls.length, 6);
+  assert.match(database.calls[4]!.sql, /^UPDATE .*SET status = 'expired'/);
+  assert.match(database.calls[5]!.sql, /^INSERT /);
+  assert.deepEqual(
+    database.leases.map(({ status, slot }) => [status, slot]),
+    [
+      ['expired', 0],
+      ['held', 0],
+    ],
+  );
+});
+
+test('renew and release keep identity lock then fresh conditional update without a separate clock read', async () => {
+  const database = new FakeLeaseDatabase();
+  const lease = await service(database).acquire(request());
+  assert.ok(lease);
+  for (const operation of [() => lease.renew(), () => lease.release()]) {
+    database.calls.length = 0;
+    await operation();
+    assert.equal(database.calls.length, 2);
+    assert.match(database.calls[0]!.sql, /FOR UPDATE$/);
+    assert.match(database.calls[1]!.sql, /lease_expires_at > clock_timestamp\(\)/);
+  }
+  database.calls.length = 0;
+  await lease.release();
+  assert.equal(database.calls.length, 1, 'released identity remains idempotent without a clock query');
+});
+
+test('identity mismatch rejects renew and release before their conditional update', async () => {
+  const database = new FakeLeaseDatabase();
+  const lease = await service(database).acquire(request());
+  assert.ok(lease);
+  database.leases[0]!.tenant_id = 'another-tenant';
+  for (const operation of [() => lease.renew(), () => lease.release()]) {
+    database.calls.length = 0;
+    await assert.rejects(
+      operation(),
+      (error: unknown) => error instanceof ProviderAccountLeaseError && error.code === 'STALE_LEASE',
+    );
+    assert.equal(database.calls.length, 1);
+  }
+});
+
+test('full capacity returns after four reads without an expiry write or consuming a sequence value', async () => {
+  const database = new FakeLeaseDatabase();
+  const provider = service(database, 1);
+  assert.ok(await provider.acquire(request('platform', 'account-1', 'attempt-a')));
+  database.calls.length = 0;
+  assert.equal(await provider.acquire(request('platform', 'account-1', 'attempt-b')), null);
+  assert.equal(database.calls.length, 4);
+  assert.equal(database.nextFencingToken, 1n);
+  assert.equal(
+    database.calls.some(({ sql }) => /^(UPDATE|INSERT)/.test(sql)),
+    false,
+  );
+});
+
+test('invalid INSERT RETURNING identity or fencing token rolls back the acquired row', async () => {
+  for (const replacement of [{ id: 'wrong-id' }, { fencing_token: '0' }, { fencing_token: 9_007_199_254_740_992 }]) {
+    class InvalidReturningDatabase extends FakeLeaseDatabase {
+      override async query<Row>(sql: string, values: readonly unknown[] = []): Promise<SqlResult<Row>> {
+        const original = await super.query<Row>(sql, values);
+        if (sql.trim().startsWith('INSERT INTO saas_provider_account_leases')) {
+          return { ...original, rows: original.rows.map((row) => ({ ...row, ...replacement })) };
+        }
+        return original;
+      }
+    }
+    const database = new InvalidReturningDatabase();
+    await assert.rejects(
+      service(database).acquire(request()),
+      (error: unknown) => error instanceof ProviderAccountLeaseError && error.code === 'STORAGE_ERROR',
+    );
     assert.equal(database.leases.length, 0);
   }
 });

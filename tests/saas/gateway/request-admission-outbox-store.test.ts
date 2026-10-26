@@ -236,6 +236,10 @@ class FakeSaasDatabase implements SaasDatabase {
     return new FakeSqlExecutor(this, false).query(sql, values);
   }
 
+  async queryReadCommitted<Row>(sql: string, values: readonly unknown[] = []): Promise<SqlResult<Row>> {
+    return this.query<Row>(sql, values);
+  }
+
   async transaction<T>(work: (tx: SqlExecutor) => Promise<T>): Promise<T> {
     this.transactionCount += 1;
     const snapshot = clone(this.rows);
@@ -447,7 +451,9 @@ test('acknowledges and reschedules through lease-token and active-lease CAS pred
     failedUpdate.sql,
     /WHERE id = \$1 AND lease_token = \$2 AND delivery_state = 'leased' AND lease_expires_at > clock_timestamp\(\)/,
   );
-  assert.equal(database.transactionCount, 3);
+  assert.equal(database.transactionCount, 1);
+  assert.equal(deliveredUpdate.inTransaction, false);
+  assert.equal(failedUpdate.inTransaction, false);
 });
 
 test('returns false for expired leases and stale tokens without changing the claimed row', async () => {

@@ -106,7 +106,8 @@ const baseEnvironment = { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR
 // Version-key cache kill switches pass through so paired cache-off/on
 // diagnostic runs (same-load T1 quantification) stay controllable.
 for (const cacheSwitch of ['MODEL_ROUTER_PREPARATION_AUTHORITY_CACHE',
-  'MODEL_ROUTER_PREPARATION_ENTITLEMENT_CACHE', 'MODEL_ROUTER_SCHEDULER_STATIC_CACHE']) {
+  'MODEL_ROUTER_PREPARATION_ENTITLEMENT_CACHE', 'MODEL_ROUTER_SCHEDULER_STATIC_CACHE',
+  'MODEL_ROUTER_SCHEDULER_HINT_CACHE']) {
   if (process.env[cacheSwitch] !== undefined) baseEnvironment[cacheSwitch] = process.env[cacheSwitch];
 }
 
@@ -126,7 +127,15 @@ function projectRequestDiagnostic(source) {
   const projectedPhases = phases.map((phase) => {
     const matches = source.phases.filter((entry) => entry?.phase === phase);
     assert.ok(matches.length === 1 && number(matches[0].inclusiveMs) && number(matches[0].exclusiveMs));
-    return { phase, inclusiveMs: matches[0].inclusiveMs, exclusiveMs: matches[0].exclusiveMs };
+    const counts = {};
+    if (matches[0].startedCount !== undefined || matches[0].beforeUpstreamSendCount !== undefined) {
+      assert.ok(Number.isSafeInteger(matches[0].startedCount) && number(matches[0].startedCount));
+      assert.ok(Number.isSafeInteger(matches[0].beforeUpstreamSendCount) && number(matches[0].beforeUpstreamSendCount));
+      assert.ok(matches[0].beforeUpstreamSendCount <= matches[0].startedCount);
+      counts.startedCount = matches[0].startedCount;
+      counts.beforeUpstreamSendCount = matches[0].beforeUpstreamSendCount;
+    }
+    return { phase, inclusiveMs: matches[0].inclusiveMs, exclusiveMs: matches[0].exclusiveMs, ...counts };
   });
   return { requestId: source.requestId.toLowerCase(), elapsedMs: source.elapsedMs, observedExclusiveMs: source.observedExclusiveMs,
     pendingSpans: source.pendingSpans, droppedSpans: source.droppedSpans, markers, phases: projectedPhases };

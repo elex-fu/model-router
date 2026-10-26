@@ -163,6 +163,33 @@ export class FakeBillingDatabase {
       return result<Row>();
     }
 
+    if (statement.startsWith('/* billing:reserve-wallet-snapshot */')) {
+      const wallet = this.state.wallets.find((row) => row.tenant_id === a && row.currency === b);
+      if (!wallet) return result<Row>();
+      const freeze = this.state.freezes.find((row) => row.tenant_id === a);
+      const activeHolds = this.state.reservations
+        .filter(
+          (row) =>
+            row.tenant_id === a &&
+            row.currency === b &&
+            (row.state === 'reserved' || row.state === 'reconciliation_pending'),
+        )
+        .reduce((sum, row) => sum + asBigInt(row.amount_minor_units), 0n);
+      const activeRefunds = this.state.refundWalletFreezes
+        .filter((row) => row.tenant_id === a && row.currency === b)
+        .reduce((sum, row) => sum + asBigInt(row.amount_minor_units), 0n);
+      return result<Row>([
+        {
+          ...wallet,
+          freeze_tenant_id: freeze?.tenant_id ?? null,
+          freeze_reason_ref: freeze?.reason_ref ?? null,
+          freeze_frozen_at: freeze?.frozen_at ?? null,
+          active_hold_minor_units: activeHolds.toString(),
+          active_refund_freeze_minor_units: activeRefunds.toString(),
+        } as Row,
+      ]);
+    }
+
     if (statement.startsWith('select id, tenant_id, currency, posted_balance_minor_units')) {
       const wallet = this.state.wallets.find((row) => row.tenant_id === a && row.currency === b);
       return result<Row>(wallet ? [wallet as Row] : []);

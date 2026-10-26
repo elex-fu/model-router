@@ -696,4 +696,52 @@ test('restricted PostgreSQL account fences serialize lease acquisition without a
       },
     );
   }
+
+  for (const mode of ['byok', 'platform'] as const) {
+    for (const operation of ['renew', 'release'] as const) {
+      await t.test(`${mode}: ${operation} rejects a lease that expires while waiting for its row lock`, async () => {
+        const fixture = await seedFixture(seed);
+        const lease = await service(gatewayA, 1_000).acquire(request(fixture, mode));
+        assert.ok(lease);
+        const before = (await leaseRows(gatewayC, fixture, mode))[0]!;
+        const waiterPid = await pid(gatewayA);
+        let pending: Promise<{ error: unknown } | { error: null }> | undefined;
+        try {
+          await withControlTransaction(gatewayPools[1]!, async (client, commit) => {
+            const holderPid = await pid(clientExecutor(client));
+            await client.query('SELECT id FROM saas_provider_account_leases WHERE id = $1 FOR UPDATE', [before.id]);
+            pending = lease[operation]().then(
+              () => ({ error: null }),
+              (error: unknown) => ({ error }),
+            );
+            const deadline = Date.now() + 5_000;
+            let blocked = false;
+            do {
+              const witness = await gatewayC.query<{ blocked: boolean }>(
+                'SELECT $2::int = ANY(pg_blocking_pids($1::int)) AS blocked',
+                [waiterPid, holderPid],
+              );
+              if (witness.rows[0]?.blocked) {
+                blocked = true;
+                break;
+              }
+              await delay(10);
+            } while (Date.now() < deadline);
+            assert.ok(blocked, 'the actual PostgreSQL row lock must block the operation');
+            await waitForExpiry(gatewayC, lease.fencingToken);
+            await commit();
+          });
+          assert.ok(pending);
+          const outcome = await within(pending, 'post-lock expired lease operation');
+          assertLeaseError(outcome.error, 'STALE_LEASE');
+          const after = (await leaseRows(gatewayC, fixture, mode))[0]!;
+          assert.equal(after.status, 'held', 'failed operation cannot change lease state');
+          assert.equal(after.lease_expires_at.getTime(), before.lease_expires_at.getTime());
+          assert.equal(after.released_at, null);
+        } finally {
+          if (pending) await within(pending, 'expired lease waiter cleanup');
+        }
+      });
+    }
+  }
 });

@@ -298,7 +298,7 @@ async function databaseClock(executor: SqlExecutor): Promise<bigint> {
   return BigInt(row.clock_us);
 }
 
-async function backendPid(executor: SqlExecutor): Promise<number> {
+async function backendPid(executor: SqlExecutor, isolation = 'read committed'): Promise<number> {
   const result = await executor.query<{ pid: number; role: string; isolation: string }>(
     `SELECT pg_backend_pid() AS pid, current_user AS role,
             current_setting('transaction_isolation') AS isolation`,
@@ -307,7 +307,7 @@ async function backendPid(executor: SqlExecutor): Promise<number> {
   assert.equal(result.rows.length, 1);
   assert.ok(row && Number.isSafeInteger(row.pid) && row.pid > 0);
   assert.equal(row.role, 'model_router_saas_gateway');
-  assert.equal(row.isolation, 'read committed');
+  assert.equal(row.isolation, isolation);
   return row.pid;
 }
 
@@ -343,8 +343,17 @@ export async function proveRuntimeHealthWaitClock(
   migrator: SaasDatabase,
   gateway: SaasDatabase,
   outcome: 'success' | 'network-failure',
+  atomicIsolation?: 'read committed' | 'repeatable read' | 'serializable',
 ) {
   const fixture = await seedFixture(migrator, gateway);
+  const atomicGateway = atomicIsolation
+    ? createSaasDatabase({ connectionString: disposableRoleTargets().gateway, max: 1 })
+    : undefined;
+  if (atomicGateway) {
+    // One connection ensures the observed session is the writer session;
+    // the production capability itself still checks on every checkout.
+    await atomicGateway.query(`SET default_transaction_isolation = '${atomicIsolation}'`);
+  }
   const before = await readHealth(migrator, fixture);
   assert.equal(before.revision, 1n);
   assert.equal(before.state, 'healthy');
@@ -405,13 +414,22 @@ export async function proveRuntimeHealthWaitClock(
       holderLocked.promise,
       held.then(() => assert.fail('H must reach the real row-lock barrier')),
     ]);
-    const database = scopedDatabase(gateway, (work) =>
-      gateway.transaction(async (tx) => {
-        const pid = await backendPid(tx);
-        waiterBackend.resolve(pid);
-        return work(observedExecutor(tx, waiterInput, waiterObservation));
-      }),
-    );
+    const database: SaasDatabase = atomicGateway
+      ? {
+          ...atomicGateway,
+          async queryReadCommitted<Row>(sql: string, values?: readonly unknown[]): Promise<SqlResult<Row>> {
+            waiterBackend.resolve(await backendPid(atomicGateway, atomicIsolation));
+            const executor: SqlExecutor = { query: atomicGateway.queryReadCommitted!.bind(atomicGateway) };
+            return observedExecutor(executor, waiterInput, waiterObservation).query<Row>(sql, values);
+          },
+        }
+      : scopedDatabase(gateway, (work) =>
+          gateway.transaction(async (tx) => {
+            const pid = await backendPid(tx);
+            waiterBackend.resolve(pid);
+            return work(observedExecutor(tx, waiterInput, waiterObservation));
+          }),
+        );
     waiter = new PostgresProviderAccountRuntimeHealthStore({ database }).recordRuntimeOutcome(waiterInput).then(
       (result) => ({ result, publicCode: null }),
       (error: unknown) => ({
@@ -476,6 +494,7 @@ export async function proveRuntimeHealthWaitClock(
   } finally {
     allowHolderWrite.resolve(undefined);
     await Promise.allSettled([held, ...(waiter ? [waiter] : [])]);
+    await atomicGateway?.close();
   }
 }
 

@@ -35,6 +35,20 @@ function result<RowType>(rows: RowType[]): SqlResult<RowType> {
 
 class MemoryDatabase implements SaasDatabase {
   private state: MemoryState = emptyState();
+  transactionCount = 0;
+  atomicQueryCount = 0;
+  corruptNextAttemptResult = false;
+
+  async queryReadCommitted<RowType>(sql: string, values: readonly unknown[] = []): Promise<SqlResult<RowType>> {
+    this.atomicQueryCount++;
+    const result = await this.query<RowType>(sql, values);
+    if (this.corruptNextAttemptResult && compact(sql).startsWith('UPDATE saas_attempts') && result.rows.length) {
+      this.corruptNextAttemptResult = false;
+      // Corrupt only the transport result, not the persisted row.
+      return { ...result, rows: result.rows.map((row) => ({ ...row, state_version: '9007199254740993' })) };
+    }
+    return result;
+  }
 
   dump(): MemoryState {
     return structuredClone(this.state);
@@ -47,6 +61,7 @@ class MemoryDatabase implements SaasDatabase {
   }
 
   async transaction<T>(work: (tx: SqlExecutor) => Promise<T>): Promise<T> {
+    this.transactionCount++;
     const snapshot = structuredClone(this.state);
     try {
       return await work(this);
@@ -1767,4 +1782,77 @@ test('F3: a terminally failed request emits request.completed inside the same tr
 
 test('F3: the metering service rejects a producer that does not implement the contract', () => {
   assert.throws(() => new SaasMeteringService(new MemoryDatabase(), { webhookEvents: {} as never }), TypeError);
+});
+
+test('standalone attempt CAS uses one atomic statement; caller executor retains rollback', async () => {
+  const { service, database } = createService();
+  const admission = await service.admitRequest(requestInput({ initialAttempt: preparedByokAttempt() }));
+  if (admission.kind !== 'created' || !admission.initialAttempt) throw new Error('expected attempt');
+  const transition = {
+    tenantId: 'tenant-a',
+    requestId: admission.request.id,
+    attemptId: admission.initialAttempt.id,
+    expectedDispatchState: 'not_sent' as const,
+    expectedResultState: 'pending' as const,
+    expectedResponseStarted: false,
+    expectedStateVersion: admission.initialAttempt.stateVersion,
+    dispatchState: 'dispatching' as const,
+  };
+  const transactions = database.transactionCount;
+  const atomic = database.atomicQueryCount;
+  const dispatching = await service.transitionAttempt(transition);
+  assert.equal(database.transactionCount, transactions);
+  assert.equal(database.atomicQueryCount, atomic + 1);
+  const before = database.dump();
+  const failure = new Error('outer settlement failed');
+  await assert.rejects(
+    database.transaction(async (executor) => {
+      await service.transitionAttempt({
+        ...transition,
+        executor,
+        expectedDispatchState: 'dispatching',
+        expectedStateVersion: dispatching.stateVersion,
+        dispatchState: 'sent',
+        responseStarted: true,
+      });
+      throw failure;
+    }),
+    (error) => error === failure,
+  );
+  assert.deepEqual(database.dump(), before, 'joined transaction still rolls back the state update');
+  assert.equal(database.atomicQueryCount, atomic + 1, 'joined transaction must not use standalone capability');
+});
+
+test('unusable standalone CAS result is storage uncertainty, never mutation rollback or replay', async () => {
+  const { service, database } = createService();
+  const admission = await service.admitRequest(requestInput({ initialAttempt: preparedByokAttempt() }));
+  if (admission.kind !== 'created' || !admission.initialAttempt) throw new Error('expected attempt');
+  const transition = {
+    tenantId: 'tenant-a',
+    requestId: admission.request.id,
+    attemptId: admission.initialAttempt.id,
+    expectedDispatchState: 'not_sent' as const,
+    expectedResultState: 'pending' as const,
+    expectedResponseStarted: false,
+    expectedStateVersion: admission.initialAttempt.stateVersion,
+    dispatchState: 'dispatching' as const,
+  };
+  database.corruptNextAttemptResult = true;
+  const atomic = database.atomicQueryCount;
+  await assert.rejects(service.transitionAttempt(transition), (error) => {
+    assertMeteringError('METERING_STORAGE_ERROR', error);
+    return true;
+  });
+  assert.equal(database.atomicQueryCount, atomic + 1, 'decode error must not trigger a second mutation');
+  const persisted = await service.getAttempt(transition.tenantId, transition.requestId, transition.attemptId);
+  assert.equal(persisted?.dispatchState, 'dispatching');
+  assert.equal(persisted?.stateVersion, admission.initialAttempt.stateVersion + 1);
+  await assert.rejects(service.transitionAttempt(transition), (error) => {
+    assertMeteringError('ATTEMPT_TRANSITION_INVALID', error);
+    return true;
+  });
+  assert.deepEqual(
+    await service.getAttempt(transition.tenantId, transition.requestId, transition.attemptId),
+    persisted,
+  );
 });

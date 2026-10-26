@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { queryReadCommitted } from '../db/atomic-statement.js';
 import type { SaasDatabase } from '../db/types.js';
 
 const REQUEST_ADMISSION_OUTBOX_TABLE = 'saas_request_admission_outbox';
@@ -265,9 +266,12 @@ export class PostgresRequestAdmissionOutboxStore {
     assertId(id, 'id');
     assertLeaseToken(leaseToken);
 
-    return this.database.transaction(async (tx) => {
-      const result = await tx.query(
-        `UPDATE ${REQUEST_ADMISSION_OUTBOX_TABLE}
+    // The token/state/expiry predicates and the update are one atomic
+    // PostgreSQL statement. The adapter preserves READ COMMITTED even for
+    // sessions with a stricter default isolation level.
+    const result = await queryReadCommitted(
+      this.database,
+      `UPDATE ${REQUEST_ADMISSION_OUTBOX_TABLE}
          SET delivery_state = 'delivered',
              delivered_at = clock_timestamp(),
              lease_token = NULL,
@@ -278,10 +282,9 @@ export class PostgresRequestAdmissionOutboxStore {
            AND lease_token = $2
            AND delivery_state = 'leased'
            AND lease_expires_at > clock_timestamp()`,
-        [id, leaseToken],
-      );
-      return result.rowCount === 1;
-    });
+      [id, leaseToken],
+    );
+    return result.rowCount === 1;
   }
 
   async rescheduleFailure(id: string, leaseToken: string, availableAt: Date, safeErrorCode: string): Promise<boolean> {
@@ -292,9 +295,12 @@ export class PostgresRequestAdmissionOutboxStore {
       throw new TypeError('safeErrorCode must match ^[A-Z][A-Z0-9_]{0,63}$');
     }
 
-    return this.database.transaction(async (tx) => {
-      const result = await tx.query(
-        `UPDATE ${REQUEST_ADMISSION_OUTBOX_TABLE}
+    // The token/state/expiry predicates and the update are one atomic
+    // PostgreSQL statement. The adapter preserves READ COMMITTED even for
+    // sessions with a stricter default isolation level.
+    const result = await queryReadCommitted(
+      this.database,
+      `UPDATE ${REQUEST_ADMISSION_OUTBOX_TABLE}
          SET delivery_state = 'failed',
              available_at = $3,
              last_error_code = $4,
@@ -306,9 +312,8 @@ export class PostgresRequestAdmissionOutboxStore {
            AND lease_token = $2
            AND delivery_state = 'leased'
            AND lease_expires_at > clock_timestamp()`,
-        [id, leaseToken, availableAt, safeErrorCode],
-      );
-      return result.rowCount === 1;
-    });
+      [id, leaseToken, availableAt, safeErrorCode],
+    );
+    return result.rowCount === 1;
   }
 }

@@ -24,10 +24,16 @@ class FakeClient implements SaasDatabaseClient {
   readonly statements: string[] = [];
   releases: Array<Error | boolean | undefined> = [];
   beginFailure?: Error;
+  isolation?: string;
+  queryFailure?: { sql: string; error: Error };
 
   async query<Row>(sql: string): Promise<SqlResult<Row>> {
     this.statements.push(sql);
     if (sql.startsWith('BEGIN') && this.beginFailure) throw this.beginFailure;
+    if (this.queryFailure?.sql === sql) throw this.queryFailure.error;
+    if (sql === 'SHOW default_transaction_isolation' && this.isolation) {
+      return { rows: [{ default_transaction_isolation: this.isolation } as Row], rowCount: 1 };
+    }
     return { rows: [], rowCount: 0 };
   }
 
@@ -385,5 +391,56 @@ test('native capability is discovered independently for an injected pool and its
     });
     assert.equal(pool.prepared.length, poolHasCapability ? 1 : 0);
     assert.equal(pool.client.prepared.length, poolHasCapability ? 0 : 1);
+  }
+});
+
+test('atomic statement checks the same session and skips explicit transaction only for READ COMMITTED', async () => {
+  const pool = new FakePool();
+  pool.client.isolation = 'read committed';
+  const database = createSaasDatabase(options(pool));
+  await database.queryReadCommitted!('UPDATE example SET value = 1');
+  assert.deepEqual(pool.client.statements, ['SHOW default_transaction_isolation', 'UPDATE example SET value = 1']);
+  assert.equal(pool.connectCalls, 1);
+  assert.deepEqual(pool.queries, []);
+  assert.deepEqual(pool.client.releases, [false]);
+
+  // Do not cache session defaults between checkouts.
+  pool.client.isolation = 'repeatable read';
+  pool.client.statements.length = 0;
+  await database.queryReadCommitted!('UPDATE example SET value = 2');
+  assert.deepEqual(pool.client.statements, [
+    'SHOW default_transaction_isolation',
+    'BEGIN ISOLATION LEVEL READ COMMITTED',
+    'UPDATE example SET value = 2',
+    'COMMIT',
+  ]);
+});
+
+test('atomic statement retains explicit READ COMMITTED for serializable or unknown session defaults', async () => {
+  for (const isolation of ['serializable', undefined]) {
+    const pool = new FakePool();
+    pool.client.isolation = isolation;
+    const database = createSaasDatabase(options(pool));
+    await database.queryReadCommitted!('UPDATE example SET value = 1');
+    assert.deepEqual(pool.client.statements, [
+      'SHOW default_transaction_isolation',
+      'BEGIN ISOLATION LEVEL READ COMMITTED',
+      'UPDATE example SET value = 1',
+      'COMMIT',
+    ]);
+  }
+});
+
+test('atomic statement failures never replay the write and release an uncertain autocommit connection', async () => {
+  for (const isolation of ['read committed', 'repeatable read']) {
+    const pool = new FakePool();
+    pool.client.isolation = isolation;
+    const failure = new Error('injected statement failure');
+    pool.client.queryFailure = { sql: 'UPDATE example SET value = 1', error: failure };
+    const database = createSaasDatabase(options(pool));
+    await assert.rejects(database.queryReadCommitted!('UPDATE example SET value = 1'), (error) => error === failure);
+    assert.equal(pool.client.statements.filter((sql) => sql.startsWith('UPDATE')).length, 1);
+    assert.equal(pool.client.statements.includes('ROLLBACK'), isolation !== 'read committed');
+    assert.deepEqual(pool.client.releases, [isolation === 'read committed']);
   }
 });

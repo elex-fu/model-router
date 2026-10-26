@@ -7,6 +7,7 @@ import type { SaasDatabase } from '../saas/db/index.js';
 import { BEDROCK_ENDPOINT } from '../saas/gateway/bedrock/catalog-identity.js';
 import { CachedRequestPreparationAuthority } from '../saas/gateway/cached-request-preparation-authority.js';
 import { CachedRequestPreparationEntitlement } from '../saas/gateway/cached-request-preparation-entitlement.js';
+import { CachedSchedulerHints } from '../saas/gateway/cached-scheduler-hints.js';
 import { CLAUDE_ENDPOINT, CLAUDE_MESSAGES_ENDPOINT } from '../saas/gateway/claude/catalog-identity.js';
 import {
   MINIMAX_ENDPOINT,
@@ -221,6 +222,7 @@ import {
   ProviderSupplyHttpCredentialResolver,
 } from '../saas/runtime/provider-supply-http-credential-resolver.js';
 import type { ProviderTarget, ProviderTargetResolver } from '../saas/runtime/provider-target-resolver.js';
+import type { RedisRuntimeCache } from '../saas/runtime/redis-concurrency-slots.js';
 import {
   type RequestPreparationSigner,
   RequestPreparationSignerAdapter,
@@ -1321,6 +1323,8 @@ export interface ManagedSaasGatewayProductionOptions {
    * topologies that hold a Redis connection should provide it — the
    * dedicated gateway workload cannot, by deployment contract.
    */
+  /** Dedicated, optional Redis connection for bounded scheduler snapshots. */
+  readonly schedulerHintRedisCache?: RedisRuntimeCache;
   readonly schedulerRedisConcurrencySlots?: PostgresProviderAccountSchedulerOptions['redisConcurrencySlots'];
   /**
    * F2 (task #35): when set, the scheduler affinity port is decorated with
@@ -2104,6 +2108,10 @@ export function createManagedSaasGatewayProductionComposition(
   const schedulerAffinityPort = options.schedulerAffinityStickyCache
     ? createRedisStickyProviderAccountAffinity(options.schedulerAffinity, options.schedulerAffinityStickyCache)
     : options.schedulerAffinity;
+  const schedulerHints =
+    process.env.MODEL_ROUTER_SCHEDULER_HINT_CACHE === 'off'
+      ? undefined
+      : new CachedSchedulerHints(database, modelRateLimitRegistry, { redis: options.schedulerHintRedisCache });
   const scheduler = new PostgresProviderAccountScheduler({
     database,
     health: runtimeHealthStore,
@@ -2112,16 +2120,33 @@ export function createManagedSaasGatewayProductionComposition(
     healthProbe: { store: runtimeHealthStore, leaseProvider },
     // H5c (P8): fast fail-away from accounts returning 401/403/429.
     failureFeedback: dispatchFailureFeedback,
-    modelCooldown: modelCooldownRegistry,
+    modelCooldown: {
+      isModelExcluded: (input) =>
+        schedulerHints?.cooldown(input.candidate, input.model, input.now) ??
+        modelCooldownRegistry.isModelExcluded(input),
+    },
+    ...(schedulerHints
+      ? {
+          hintScope: <T>(
+            input: import('../saas/gateway/provider-account-scheduler.js').ProviderAccountSchedulerInput,
+            work: () => Promise<T>,
+          ) => schedulerHints.run(input, work),
+        }
+      : {}),
     // G-B1 (window three-state): the migration-130 gate — batch PG facts
     // (policy columns + exact supplier-cost window aggregation) feeding the
     // pure three-state judgment. Fail-open on any read failure.
     windowCost: {
       resolveWindowCostSchedulability: async ({ candidate, now }) => {
         try {
-          const facts = await getAccountWindowCostFactsBatch(database, [candidate.accountId], now.getTime());
-          const fact = facts.get(candidate.accountId);
-          if (fact === undefined) return 'admit'; // no frozen policy — the gate is OFF
+          const cached = schedulerHints?.window(candidate.accountId);
+          const fact =
+            cached === undefined
+              ? (await getAccountWindowCostFactsBatch(database, [candidate.accountId], now.getTime())).get(
+                  candidate.accountId,
+                )
+              : cached;
+          if (fact == null) return 'admit'; // no frozen policy — the gate is OFF
           return evaluateWindowCostSchedulability({
             usageMinorUnits: fact.usageMinorUnits ?? 0n,
             limitMinorUnits: fact.limitMinorUnits,

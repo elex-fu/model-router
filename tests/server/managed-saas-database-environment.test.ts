@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
+import { Pool } from 'pg';
 import {
   DEFAULT_SAAS_DATABASE_POOL_ACQUISITION_TIMEOUT_MILLIS,
   DEFAULT_SAAS_DATABASE_POOL_MAX,
@@ -83,6 +85,7 @@ test('the standard database factory receives the supplied runtime environment be
 
 test('an injected managed database factory keeps its connectionString-only call shape', async () => {
   const environment = gatewayEnvironment('native');
+  environment[DEPLOYMENT_ENV_VARS.saas.gatewayRedisUrl] = 'redis://127.0.0.1:16379';
   const deployment = parseDeploymentConfig(environment);
   if (deployment.mode !== 'managed-saas') assert.fail('managed deployment required');
   const calls: unknown[] = [];
@@ -123,6 +126,30 @@ test('an injected managed database factory keeps its connectionString-only call 
   );
   assert.deepEqual(calls, [{ connectionString: deployment.postgresUrl }]);
   assert.equal(closed, true);
+});
+
+test('the standard Redis gateway allocates 14 business slots and closes them on early startup failure', async (t) => {
+  const environment = gatewayEnvironment('off');
+  environment[DEPLOYMENT_ENV_VARS.saas.gatewayRedisUrl] = 'redis://127.0.0.1:16379';
+  environment[SAAS_DATABASE_POOL_MAX_ENV] = '16';
+  const deployment = parseDeploymentConfig(environment);
+  if (deployment.mode !== 'managed-saas') assert.fail('managed deployment required');
+  const pools: Pool[] = [];
+  const closed: Pool[] = [];
+  const originalOn = EventEmitter.prototype.on;
+  t.mock.method(Pool.prototype, 'on', function (this: Pool, event: string, listener: (...args: unknown[]) => void) {
+    if (event === 'error') pools.push(this);
+    originalOn.call(this, event, listener);
+    return this;
+  });
+  t.mock.method(Pool.prototype, 'end', async function (this: Pool) { closed.push(this); });
+  await assert.rejects(startManagedSaasServer(deployment, {
+    environment,
+    async pingDatabase() { throw new Error('stop before SQL'); },
+  }), /PostgreSQL ping failed/);
+  assert.equal(pools.length, 1, 'quota lane is constructed only after business schema readiness');
+  assert.equal(pools[0]?.options.max, 14);
+  assert.deepEqual(closed, pools);
 });
 
 test('gateway deployment examples forward database pool controls with the runtime defaults', () => {

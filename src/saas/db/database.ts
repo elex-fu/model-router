@@ -199,8 +199,9 @@ class NodePostgresClient implements SaasDatabaseClient {
       onError = reject;
       this.client.once('error', onError);
     });
-    try { return await Promise.race([work(), connectionError]); }
-    finally {
+    try {
+      return await Promise.race([work(), connectionError]);
+    } finally {
       if (onError) this.client.removeListener('error', onError);
       finish();
     }
@@ -255,7 +256,9 @@ class NodePostgresPool implements SaasDatabasePool {
         const result = await client.query<Row>(sql, values);
         discard = false;
         return result;
-      } finally { client.release(discard); }
+      } finally {
+        client.release(discard);
+      }
     }
     const result = await this.pool.query(sql, values ? [...values] : undefined);
     return asSqlResult<Row>(result);
@@ -269,7 +272,9 @@ class NodePostgresPool implements SaasDatabasePool {
         const result = await client.queryPrepared!<Row>(statement, values);
         discard = false;
         return result;
-      } finally { client.release(discard); }
+      } finally {
+        client.release(discard);
+      }
     }
     const result = await this.pool.query({
       name: statement.name,
@@ -281,8 +286,11 @@ class NodePostgresPool implements SaasDatabasePool {
 
   async connect(): Promise<SaasDatabaseClient> {
     const finish = currentRequestDiagnosticTrace()?.begin('pool-checkout');
-    try { return new NodePostgresClient(await this.pool.connect()); }
-    finally { finish?.(); }
+    try {
+      return new NodePostgresClient(await this.pool.connect());
+    } finally {
+      finish?.();
+    }
   }
 
   async end(): Promise<void> {
@@ -319,6 +327,50 @@ export function createSaasDatabase(options: SaasDatabaseOptions): SaasDatabase {
 
   return {
     ...executor,
+    async queryReadCommitted<Row>(sql: string, values?: readonly unknown[]): Promise<SqlResult<Row>> {
+      const client = await pool.connect();
+      let finishTransaction: (() => void) | undefined;
+      let transactionStarted = false;
+      let discardClient = false;
+      try {
+        // Never cache this fact: a session setting can change while the pooled
+        // connection is reused. The observation and write use this same client.
+        const isolation = await client.query<{ default_transaction_isolation: string }>(
+          'SHOW default_transaction_isolation',
+        );
+        if (isolation.rows[0]?.default_transaction_isolation === 'read committed') {
+          return await client.query<Row>(sql, values);
+        }
+        // Unknown/custom session settings retain the original explicit-RC
+        // semantics rather than exposing serialization failures to callers.
+        finishTransaction = currentRequestDiagnosticTrace()?.begin('transaction');
+        await client.query('BEGIN ISOLATION LEVEL READ COMMITTED');
+        transactionStarted = true;
+        const result = await client.query<Row>(sql, values);
+        await client.query('COMMIT');
+        transactionStarted = false;
+        return result;
+      } catch (error) {
+        if (transactionStarted) {
+          try {
+            await client.query('ROLLBACK');
+          } catch {
+            discardClient = true;
+          }
+        } else {
+          // A failed autocommit/connection observation must not return a
+          // possibly disconnected or protocol-uncertain client to the pool.
+          discardClient = true;
+        }
+        throw error;
+      } finally {
+        try {
+          client.release(discardClient);
+        } finally {
+          finishTransaction?.();
+        }
+      }
+    },
     async transaction<T>(work: (tx: SqlExecutor) => Promise<T>): Promise<T> {
       const client = await pool.connect();
       const finishTransaction = currentRequestDiagnosticTrace()?.begin('transaction');
@@ -345,8 +397,11 @@ export function createSaasDatabase(options: SaasDatabaseOptions): SaasDatabase {
         }
         throw error;
       } finally {
-        try { client.release(discardClient); }
-        finally { finishTransaction?.(); }
+        try {
+          client.release(discardClient);
+        } finally {
+          finishTransaction?.();
+        }
       }
     },
     async migrate(): Promise<void> {
