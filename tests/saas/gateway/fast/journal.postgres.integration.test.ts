@@ -1073,6 +1073,202 @@ test('fast money journal real PostgreSQL: atomic reserve, durable completion, ex
     },
   );
   await t.test(
+    'two acknowledged real EPQ conflicts can back off and reserve a third stripe exactly once',
+    { timeout: 15000 },
+    async () => {
+      function latch() {
+        let release!: () => void;
+        const promise = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        return { promise, release };
+      }
+      const held = [latch(), latch()],
+        commits = [latch(), latch()];
+      const holders: string[] = [],
+        holderPids: number[] = [];
+      let probeRequest = '',
+        probePid = 0,
+        lookups = 0;
+      const outcomes: Array<{ id: string | null; credit_busy: boolean }> = [];
+      const parameters: Array<readonly unknown[]> = [];
+      const measured: SaasDatabase = {
+        ...gateway,
+        query: async <Row>(sql: string, values?: readonly unknown[]): Promise<SqlResult<Row>> => {
+          if (sql.startsWith('SELECT i.request_id, i.intent_digest') && values?.[0] === probeRequest) lookups++;
+          if (!sql.includes('fast-journal:reserve-intent')) return gateway.query<Row>(sql, values);
+          const holder = holders.indexOf(String(values?.[1]));
+          if (holder >= 0)
+            return gateway.transaction(async (tx) => {
+              holderPids[holder] = (await tx.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0].pid;
+              const result = await tx.query<Row>(sql, values);
+              held[holder].release();
+              await commits[holder].promise;
+              return result;
+            });
+          if (values?.[1] !== probeRequest) return gateway.query<Row>(sql, values);
+          assert.ok(values);
+          parameters.push(values);
+          const result = await gateway.transaction(async (tx) => {
+            probePid = (await tx.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0].pid;
+            const candidate = [...values];
+            // Force only the non-authoritative stripe hint, not the SQL result.
+            candidate[17] = outcomes.length;
+            return tx.query<Row>(sql, candidate);
+          });
+          outcomes.push(result.rows[0] as (typeof outcomes)[number]);
+          return result;
+        },
+      };
+      const scope = await setup('1280', '1280', randomUUID(), measured, 4);
+      for (let index = 0; index < 12; index++) await reserve(scope.journal, intentFixture(scope.tenantId, scope.owner));
+      const aInput = intentFixture(scope.tenantId, scope.owner),
+        bInput = intentFixture(scope.tenantId, scope.owner);
+      holders.push(aInput.requestId, bInput.requestId);
+      const a = scope.journal.reserveIntent(aInput);
+      await held[0].promise;
+      const b = scope.journal.reserveIntent(bInput);
+      await held[1].promise;
+      const input = intentFixture(scope.tenantId, scope.owner);
+      probeRequest = input.requestId;
+      const probe = scope.journal.reserveIntent(input);
+      try {
+        for (let holder = 0; holder < 2; holder++) {
+          let blocked = false;
+          for (let check = 0; check < 100 && !blocked; check++) {
+            if (probePid)
+              blocked = (
+                await migrator.query<{ blocked: boolean }>(
+                  'SELECT $2::integer=ANY(pg_blocking_pids($1::integer)) AS blocked',
+                  [probePid, holderPids[holder]],
+                )
+              ).rows[0].blocked;
+            if (!blocked) await new Promise((resolve) => setTimeout(resolve, 1));
+          }
+          assert.equal(
+            blocked,
+            true,
+            `CAS ${holder + 1} must really wait on the selected stripe before depletion commits`,
+          );
+          commits[holder].release();
+          await (holder === 0 ? a : b);
+        }
+        assert.equal((await probe).kind, 'created');
+        assert.deepEqual(
+          outcomes.slice(0, 2).map(({ id, credit_busy }) => ({ id, credit_busy })),
+          [
+            { id: null, credit_busy: true },
+            { id: null, credit_busy: true },
+          ],
+        );
+        assert.equal(outcomes.length, 3);
+        assert.equal(lookups, 2, 'both acknowledged failures retain their replay lookup SQL');
+        assert.ok(
+          parameters.every(
+            (values) => JSON.stringify(values.slice(0, 17)) === JSON.stringify(parameters[0].slice(0, 17)),
+          ),
+          'immutable intent identity and authority never change',
+        );
+        assert.deepEqual(await facts(scope.tenantId), {
+          balance: '1280',
+          backing: '1280',
+          available: '80',
+          intents: '15',
+          charges: '0',
+          completed: '0',
+        });
+        assert.equal((await scope.journal.reserveIntent(input)).kind, 'existing');
+        assert.equal(outcomes.length, 3, 'a unique conflict uses lookup, never a further guarded CAS');
+      } finally {
+        for (const commit of commits) commit.release();
+        await Promise.allSettled([a, b, probe]);
+        await scope.journal.close();
+      }
+      assert.equal((await facts(scope.tenantId)).backing, '1200', 'all unresolved maxima remain backed');
+    },
+  );
+  await t.test(
+    'scripted acknowledged BUSY pressure has a fixed SQL ceiling, positive backoff and unchanged terminal boundaries',
+    async (t) => {
+      for (const mode of ['exhausted', 'combined', 'cancelled', 'unknown', 'unique', 'lost_commit_ack'] as const) {
+        await t.test(mode, async () => {
+          const controller = new AbortController();
+          let watched = '',
+            lookups = 0;
+          const starts: number[] = [];
+          const measured: SaasDatabase = {
+            ...gateway,
+            query: async <Row>(sql: string, values?: readonly unknown[]): Promise<SqlResult<Row>> => {
+              if (sql.startsWith('SELECT i.request_id, i.intent_digest') && values?.[0] === watched) lookups++;
+              if (!sql.includes('fast-journal:reserve-intent') || values?.[1] !== watched)
+                return gateway.query<Row>(sql, values);
+              starts.push(performance.now());
+              if (starts.length === 2) {
+                if (mode === 'cancelled') controller.abort();
+                if (mode === 'unknown') throw new Error('injected unknown reserve ACK');
+                if (mode === 'unique') throw Object.assign(new Error('injected concurrent unique'), { code: '23505' });
+              }
+              if (mode === 'lost_commit_ack' && starts.length === 3) {
+                const committed = await gateway.query<Row>(sql, values);
+                assert.equal((committed.rows[0] as { id: unknown }).id, values?.[0]);
+                throw new Error('injected unknown reserve ACK after real committed recovery');
+              }
+              // This policy-only injection fabricates acknowledged no-write
+              // pressure, never successful intent authority or account money.
+              return {
+                rows: [
+                  {
+                    id: null,
+                    credit_busy: !(mode === 'combined' && starts.length === 3),
+                    credit_recoverable: true,
+                  } as Row,
+                ],
+                rowCount: 1,
+              };
+            },
+          };
+          const scope = await setup('640', '640', randomUUID(), measured, 2);
+          const input = { ...intentFixture(scope.tenantId, scope.owner), signal: controller.signal };
+          watched = input.requestId;
+          try {
+            if (mode === 'unknown' || mode === 'lost_commit_ack')
+              await assert.rejects(scope.journal.reserveIntent(input), /unknown reserve ACK/);
+            else
+              assert.deepEqual(await scope.journal.reserveIntent(input), {
+                kind: 'denied',
+                reason:
+                  mode === 'cancelled' ? 'send_deadline' : mode === 'unique' ? 'identity_conflict' : 'credit_busy',
+              });
+            if (mode === 'exhausted' || mode === 'combined') {
+              assert.ok(
+                starts.length >= (mode === 'combined' ? 4 : 3) && starts.length <= (mode === 'combined' ? 9 : 8),
+                'at most seven BUSY reselections plus one NOT_READY recovery; the original time budget may stop earlier',
+              );
+              for (let attempt = 2; attempt < starts.length; attempt++) {
+                const floor = (mode === 'combined' ? [1, 0, 2, 4, 8, 16, 25] : [1, 2, 4, 8, 16, 25])[attempt - 2];
+                assert.ok(
+                  starts[attempt] - starts[attempt - 1] >= floor,
+                  `attempt ${attempt + 1} cannot spin or bypass its ${floor}ms floor`,
+                );
+              }
+              assert.equal(lookups, starts.length, 'count every failed attempt lookup, not only reserve SQL');
+            } else if (mode === 'lost_commit_ack') {
+              assert.equal(starts.length, 3, 'the committed third CAS with lost ACK is never retried');
+              assert.equal(lookups, 2);
+            } else {
+              assert.equal(starts.length, 2, 'no backoff CAS follows cancellation, unknown ACK or unique conflict');
+              assert.equal(lookups, mode === 'unknown' ? 1 : 2);
+            }
+            assert.equal((await facts(scope.tenantId)).intents, mode === 'lost_commit_ack' ? '1' : '0');
+            assert.equal((await facts(scope.tenantId)).available, mode === 'lost_commit_ack' ? '560' : '640');
+          } finally {
+            await scope.journal.close();
+          }
+        });
+      }
+    },
+  );
+  await t.test(
     'credit busy waits for captured matching settlement before its one fresh CAS instead of racing the same depletion window twice',
     { timeout: 15000 },
     async () => {

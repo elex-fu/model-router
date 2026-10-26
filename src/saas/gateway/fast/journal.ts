@@ -6,7 +6,12 @@ import type { SaasDatabase, SqlExecutor } from '../../db/types.js';
 import { calculatePriceVersion } from '../../pricing/calculator.js';
 import type { CustomerPriceVersionRecord, TokenUsageInput } from '../../pricing/types.js';
 import { calculateConservativePriceHold, INPUT_BILLING_BUCKETS } from '../hold-calculator.js';
-import { type FastCreditWaitResult, waitForFastCreditWork } from './credit-wait.js';
+import { type FastCreditWaitResult, waitForFastCreditDelay, waitForFastCreditWork } from './credit-wait.js';
+
+// At most seven BUSY reselections (eight intent statements), plus the separate
+// one-shot NOT_READY recovery. Positive floors prevent repeated completed worker
+// hints from turning a 100ms budget into an unbounded number of SQL attempts.
+const CREDIT_BUSY_BACKOFF_MS = [0, 1, 2, 4, 8, 16, 25] as const;
 
 export interface FastReserveIntentInput {
   readonly requestId: string;
@@ -387,12 +392,12 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
     }
     const id = randomUUID();
     let unavailable: 'credit_busy' | 'credit_not_ready' = 'credit_not_ready';
-    let retriedBusy = false;
+    let busyReselections = 0;
     let retriedNotReady = false;
     let recoveryDeadline = 0;
     // Success still uses exactly one intent SQL. Only an acknowledged id:null
     // means this statement created no intent/debit and permits a fresh snapshot.
-    // Each failure kind gets one recovery, never an open-ended admission queue.
+    // BUSY has a fixed, backed-off attempt limit; NOT_READY has one recovery.
     for (;;) {
       if (this.closed) return { kind: 'denied', reason: 'closed' };
       if (input.sendDeadlineMs <= Date.now() || input.signal?.aborted)
@@ -487,9 +492,9 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
         }
       }
       if (unavailable === 'credit_busy') {
-        if (retriedBusy) break;
-        retriedBusy = true;
-        // Spending the sole reselection before a known credit return simply
+        const backoff = CREDIT_BUSY_BACKOFF_MS[busyReselections++];
+        if (backoff === undefined) break;
+        // Spending a reselection before a known credit return simply
         // races the same depleted window twice. Wait only for captured, matching
         // work; no matching batch retains the original immediate reselection.
         if (creditWorker && !(creditHint && creditHint.restoreGeneration !== beforeRestore)) {
@@ -510,6 +515,18 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
           // revoke the original safe reselection after this acknowledged no-write.
           // Do not claim progress or rerun that worker; the fresh CAS must pay
           // from whichever independently available allocation it can guard.
+        }
+        if (backoff > 0) {
+          // Keep a positive lower bound, add up to 2ms jitter, cap at one poll.
+          // Even a previously completed matching worker cannot bypass this wait.
+          const prepared = await waitForFastCreditDelay(
+            Math.min(25, backoff + Math.random() * 2),
+            input,
+            recoveryDeadline,
+          );
+          if (prepared === 'cancelled' || prepared === 'authority_expired')
+            return { kind: 'denied', reason: 'send_deadline' };
+          if (prepared !== 'completed') break;
         }
       } else {
         const worker = creditWorker;

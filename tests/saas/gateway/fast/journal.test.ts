@@ -5,6 +5,7 @@ import type { SaasDatabase, SqlResult } from '../../../../src/saas/db/types.js';
 import {
   type FastCreditWaitClock,
   type FastCreditWaitResult,
+  waitForFastCreditDelay,
   waitForFastCreditWork,
 } from '../../../../src/saas/gateway/fast/credit-wait.js';
 import {
@@ -318,4 +319,45 @@ test('credit wait completion rechecks boundaries; cancellation and rejection cle
   failed.fail(error);
   await assert.rejects(waiting, (caught) => caught === error);
   assert.equal(failed.timers.size, 0);
+});
+
+test('credit backoff preserves its positive monotonic floor on early wake and cleans up both timers', async () => {
+  const f = creditWaitFixture();
+  let result: FastCreditWaitResult | undefined;
+  const waiting = waitForFastCreditDelay(2.5, { sendDeadlineMs: 2000 }, 100, f.clock).then((value) => {
+    result = value;
+    return value;
+  });
+  assert.deepEqual(f.delays, [3, 100]);
+  f.state.monotonic = 2.4;
+  f.fire();
+  await Promise.resolve();
+  assert.equal(result, undefined);
+  assert.deepEqual(f.delays, [3, 100, 1]);
+  f.state.monotonic = 2.5;
+  const delay = [...f.timers].find(([, timer]) => timer.delay === 1);
+  assert.ok(delay);
+  f.timers.delete(delay[0]);
+  delay[1].callback();
+  assert.equal(await waiting, 'completed');
+  assert.equal(f.timers.size, 0);
+});
+
+test('credit backoff cancellation, authority and shared budget win without leaving delay timers', async () => {
+  for (const stop of ['cancelled', 'authority_expired', 'budget_exhausted'] as const) {
+    const f = creditWaitFixture();
+    const controller = new AbortController();
+    const waiting = waitForFastCreditDelay(25, { sendDeadlineMs: 1010, signal: controller.signal }, 10, f.clock);
+    if (stop === 'cancelled') controller.abort();
+    else {
+      f.state.monotonic = 10;
+      if (stop === 'authority_expired') f.state.wall = 1010;
+      const deadline = [...f.timers].find(([, timer]) => timer.delay === 10);
+      assert.ok(deadline);
+      f.timers.delete(deadline[0]);
+      deadline[1].callback();
+    }
+    assert.equal(await waiting, stop);
+    assert.equal(f.timers.size, 0);
+  }
 });

@@ -18,6 +18,26 @@ const systemClock: FastCreditWaitClock = {
   },
 };
 
+/** Scheduling only: even an early timer cannot shorten the minimum backoff. */
+export function waitForFastCreditDelay(
+  delayMs: number,
+  input: { readonly sendDeadlineMs: number; readonly signal?: AbortSignal },
+  recoveryDeadline: number,
+  clock: FastCreditWaitClock = systemClock,
+): Promise<FastCreditWaitResult> {
+  const until = clock.monotonicNow() + delayMs;
+  let cancelDelay: (() => void) | undefined;
+  const delay = new Promise<void>((resolve) => {
+    const wake = () => {
+      const remaining = until - clock.monotonicNow();
+      if (remaining <= 0) resolve();
+      else cancelDelay = clock.schedule(wake, Math.max(1, Math.ceil(remaining)));
+    };
+    wake();
+  });
+  return waitForFastCreditWork(delay, input, recoveryDeadline, clock).finally(() => cancelDelay?.());
+}
+
 /** Stop waiting, never cancel or reinterpret the tracked durable transaction. */
 export function waitForFastCreditWork(
   work: Promise<void>,
