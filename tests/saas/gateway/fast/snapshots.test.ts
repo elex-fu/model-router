@@ -225,6 +225,159 @@ function fixture(
 function errorCode(code: string): (error: unknown) => boolean {
   return (error) => error instanceof FastGatewaySnapshotError && error.code === code;
 }
+
+test('warm lookup crossing handoff headroom joins one fresh load without renewing the old lease', async () => {
+  const { input, snapshot } = fixture();
+  const clock = clocks();
+  let loads = 0;
+  let crossed = false;
+  let finish!: () => void;
+  const barrier = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  const cache = new CachedFastGatewaySnapshots(
+    {
+      async resolve() {
+        if (++loads > 1) await barrier;
+        return { ...snapshot, observedAtMs: clock.wall, validUntilMs: clock.wall + 5000 };
+      },
+    },
+    {
+      minimumValidityMs: 1000,
+      refreshAheadMs: 1500,
+      maxEntries: 1,
+      wallNow: () => clock.wall,
+      monotonicNow: () => clock.mono,
+      observe(metric) {
+        // A deterministic 2ms pause after the first usable check, still 999ms
+        // before the immutable authority lease expires. No storage failed.
+        if (metric === 'l1_hit' && !crossed) {
+          crossed = true;
+          clock.wall += 2;
+          clock.mono += 2;
+        }
+      },
+    },
+  );
+  const old = await cache.resolve(input);
+  assert.ok(old);
+  clock.wall += 3999;
+  clock.mono += 3999;
+  let returned = 0;
+  const pending = Array.from({ length: 64 }, () =>
+    cache.resolve(input).then((value) => {
+      returned++;
+      return value;
+    }),
+  );
+  await Promise.resolve();
+  assert.equal(returned, 0, 'no waiter receives the insufficient-headroom old object');
+  assert.equal(loads, 2, 'join the single refresh; never issue a blanket retry');
+  finish();
+  const values = await Promise.all(pending);
+  const current = values[0];
+  assert.ok(current);
+  assert.ok(values.every((value) => value === current));
+  assert.notEqual(current, old);
+  assert.equal(old.validUntilMs, 105000);
+  assert.equal(current.validUntilMs, 109001);
+  authorizeFastGatewaySnapshot(current, input, clock.wall);
+  clock.wall += 999;
+  clock.mono += 999;
+  assert.throws(() => authorizeFastGatewaySnapshot(old, input, clock.wall), errorCode('SNAPSHOT_UNAVAILABLE'));
+  authorizeFastGatewaySnapshot(current, input, clock.wall);
+});
+
+for (const result of ['deny', 'unsupported', 'unavailable', 'expired'] as const) {
+  test(`crossed handoff joins refresh ${result} without stale fallback or another source attempt`, async () => {
+    const { input, snapshot } = fixture();
+    const clock = clocks();
+    let loads = 0;
+    let crossed = false;
+    const cache = new CachedFastGatewaySnapshots(
+      {
+        async resolve() {
+          if (++loads === 1) return snapshot;
+          if (result === 'deny') throw new FastGatewaySnapshotError('SNAPSHOT_DENIED');
+          if (result === 'unavailable') throw new FastGatewaySnapshotError('SNAPSHOT_UNAVAILABLE');
+          if (result === 'unsupported') return null;
+          return { ...snapshot, observedAtMs: clock.wall - 5000, validUntilMs: clock.wall };
+        },
+      },
+      {
+        minimumValidityMs: 1000,
+        refreshAheadMs: 1500,
+        wallNow: () => clock.wall,
+        monotonicNow: () => clock.mono,
+        observe(metric) {
+          if (metric === 'l1_hit' && !crossed) {
+            crossed = true;
+            clock.wall += 2;
+            clock.mono += 2;
+          }
+        },
+      },
+    );
+    const old = await cache.resolve(input);
+    assert.ok(old);
+    clock.wall += 3999;
+    clock.mono += 3999;
+    if (result === 'unsupported') assert.equal(await cache.resolve(input), null);
+    else
+      await assert.rejects(
+        cache.resolve(input),
+        errorCode(result === 'deny' ? 'SNAPSHOT_DENIED' : 'SNAPSHOT_UNAVAILABLE'),
+      );
+    assert.equal(loads, 2);
+    assert.equal(old.validUntilMs, 105000);
+    if (result === 'deny' || result === 'unsupported') {
+      assert.throws(() => authorizeFastGatewaySnapshot(old, input, clock.wall), errorCode('SNAPSHOT_UNAVAILABLE'));
+    }
+    clock.wall += 999;
+    clock.mono += 999;
+    assert.throws(() => authorizeFastGatewaySnapshot(old, input, clock.wall), errorCode('SNAPSHOT_UNAVAILABLE'));
+  });
+}
+
+for (const fence of ['expired', 'invalidated', 'unavailable'] as const) {
+  test(`warm handoff never retries an authority that became ${fence} after selection`, async () => {
+    const { input, snapshot } = fixture();
+    const clock = clocks();
+    let loads = 0;
+    let crossed = false;
+    const cache = new CachedFastGatewaySnapshots(
+      {
+        async resolve() {
+          loads++;
+          return snapshot;
+        },
+      },
+      {
+        minimumValidityMs: 1000,
+        refreshAheadMs: 1500,
+        wallNow: () => clock.wall,
+        monotonicNow: () => clock.mono,
+        observe(metric) {
+          if (metric !== 'l1_hit' || crossed) return;
+          crossed = true;
+          if (fence === 'expired') {
+            clock.wall += 1001;
+            clock.mono += 1001;
+          } else if (fence === 'invalidated') cache.invalidate(1n);
+          else cache.markUnavailable();
+        },
+      },
+    );
+    const old = await cache.resolve(input);
+    assert.ok(old);
+    clock.wall += 3999;
+    clock.mono += 3999;
+    await assert.rejects(cache.resolve(input), errorCode('SNAPSHOT_UNAVAILABLE'));
+    assert.equal(loads, 2, 'only the already-started prefetch; no catch-and-retry');
+    assert.throws(() => authorizeFastGatewaySnapshot(old, input, clock.wall), errorCode('SNAPSHOT_UNAVAILABLE'));
+  });
+}
+
 function clocks() {
   return { wall: 100_000, mono: 0 };
 }

@@ -458,6 +458,62 @@ test('one cancelled snapshot waiter cannot cancel a surviving executor or shared
   assert.equal(surviving.intents.length, 1);
 });
 
+test('cancellation during crossed-headroom refresh never admits the canceled waiter or retries the shared load', async (t) => {
+  let now = Date.now();
+  let mono = 0;
+  t.mock.method(Date, 'now', () => now);
+  const aborted = setup();
+  const surviving = setup();
+  const barrier = deferred<void>();
+  let loads = 0;
+  let crossed = false;
+  const snapshots = new CachedFastGatewaySnapshots(
+    {
+      resolve: async () => {
+        if (++loads > 1) await barrier.promise;
+        return { ...aborted.snapshot, observedAtMs: now, validUntilMs: now + 5000 };
+      },
+    },
+    {
+      minimumValidityMs: 1000,
+      refreshAheadMs: 1500,
+      wallNow: () => now,
+      monotonicNow: () => mono,
+      observe(metric) {
+        if (metric === 'l1_hit' && !crossed) {
+          crossed = true;
+          now += 2;
+          mono += 2;
+        }
+      },
+    },
+  );
+  await snapshots.resolve({ ...aborted.input, protocol: 'openai', clientOperation: 'chat.completions' });
+  now += 3999;
+  mono += 3999;
+  const first = new FastGatewayExecutor({ ...aborted.options, snapshots }).execute(aborted.input);
+  const firstDenied = assert.rejects(
+    first,
+    (error: unknown) => error instanceof Error && 'code' in error && error.code === 'FAST_AUTHORITY_EXPIRED',
+  );
+  const second = new FastGatewayExecutor({ ...surviving.options, snapshots }).execute({
+    ...surviving.input,
+    requestId: 'request-b',
+  });
+  assert.equal(loads, 2);
+  assert.equal(aborted.calls.includes('admit'), false);
+  assert.equal(surviving.calls.includes('admit'), false);
+  aborted.controller.abort();
+  barrier.resolve();
+  await firstDenied;
+  assert.equal(await second, true);
+  assert.equal(loads, 2);
+  assert.equal(aborted.calls.includes('admit'), false);
+  assert.equal(aborted.intents.length, 0);
+  assert.equal(surviving.calls.filter((value) => value === 'admit').length, 1);
+  assert.equal(surviving.intents.length, 1);
+});
+
 test('unknown costly client and compiler-injected extensions fall back before Redis or money', async () => {
   for (const extension of [
     { best_of: 10 },

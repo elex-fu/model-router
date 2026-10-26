@@ -130,6 +130,9 @@ type Entry = {
   readonly epoch: bigint;
 };
 const MAX_TTL_MS = 5_000;
+// A soft handoff miss is not an authority failure. Only the warm lookup may
+// join its existing refresh; all expiry, revocation and dependency errors throw.
+const HANDOFF_REFRESH_REQUIRED = Symbol('handoff-refresh-required');
 // The immutable object, not a caller-supplied timestamp, carries its local lease.
 // Post-intent authorization can therefore recheck epoch/outage/monotonic expiry
 // without any database or Redis read. Weak keys do not retain evicted snapshots.
@@ -537,12 +540,18 @@ export class CachedFastGatewaySnapshots implements FastGatewaySnapshotProvider {
         // No stale lease is renewed; the old object retains its original deadline.
         void this.startLoad(cacheKey, input, true).catch(() => {});
       }
-      return this.use(entry, input);
+      const value = this.use(entry, input);
+      if (value !== HANDOFF_REFRESH_REQUIRED) return value;
+      // Time can cross minimumValidity while starting refresh-ahead. Join that
+      // single flight before any Redis/financial side effect, never renew the
+      // held lease or retry a thrown denial/outage/invalidation.
     }
     this.entries.delete(cacheKey);
     const work = this.startLoad(cacheKey, input, entry !== undefined);
     entry = await this.wait(work);
-    return this.use(entry, input);
+    const value = this.use(entry, input);
+    if (value === HANDOFF_REFRESH_REQUIRED) fail('SNAPSHOT_UNAVAILABLE');
+    return value;
   }
   private startLoad(cacheKey: string, input: FastGatewaySnapshotInput, bypassL2: boolean): Promise<Entry> {
     let work = this.pending.get(cacheKey);
@@ -614,9 +623,13 @@ export class CachedFastGatewaySnapshots implements FastGatewaySnapshotProvider {
       (this.rejection(entry.cacheKey)?.sequence ?? 0n) <= entry.rejectionSequence
     );
   }
-  private use(entry: Entry, input: FastGatewaySnapshotInput): FastGatewaySnapshot | null {
-    if (!this.usable(entry)) fail('SNAPSHOT_UNAVAILABLE');
+  private use(
+    entry: Entry,
+    input: FastGatewaySnapshotInput,
+  ): FastGatewaySnapshot | null | typeof HANDOFF_REFRESH_REQUIRED {
+    if (!this.live(entry)) fail('SNAPSHOT_UNAVAILABLE');
     if (entry.denied) fail('SNAPSHOT_DENIED');
+    if (entry.value && this.remaining(entry) <= this.minimumValidity) return HANDOFF_REFRESH_REQUIRED;
     if (entry.value) {
       try {
         authorizeFastGatewaySnapshot(entry.value, input, this.wall());
