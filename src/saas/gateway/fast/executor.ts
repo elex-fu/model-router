@@ -168,7 +168,9 @@ export class FastGatewayExecutor implements FastGatewayExecutorPort {
     validate: () => Promise<void>;
   }>();
   readonly #transport: ProviderHttpTransport;
-  constructor(private readonly options: FastGatewayExecutorOptions) {
+  readonly #options: FastGatewayExecutorOptions;
+  constructor(options: FastGatewayExecutorOptions) {
+    this.#options = options;
     this.#transport = new ProviderHttpTransport({
       ...options.transport,
       consumeFastTicket: (ticket) => {
@@ -236,7 +238,7 @@ export class FastGatewayExecutor implements FastGatewayExecutorPort {
       clientAddress: input.clientAddress,
       inputByteLength: Buffer.byteLength(canonical(input.body)),
     };
-    const snapshot = await this.options.snapshots.resolve(snapshotInput);
+    const snapshot = await this.#options.snapshots.resolve(snapshotInput);
     if (!snapshot) {
       input.selected?.('strict', 'snapshot_policy');
       return false;
@@ -266,7 +268,7 @@ export class FastGatewayExecutor implements FastGatewayExecutorPort {
         candidate.authority.resolvedModel,
         authority.modelMappingRules,
       );
-    const compiled = await this.options.payload(candidate).compile({
+    const compiled = await this.#options.payload(candidate).compile({
       caller: snapshot.caller,
       entitlement: snapshot.entitlement,
       authority,
@@ -322,7 +324,7 @@ export class FastGatewayExecutor implements FastGatewayExecutorPort {
         }
       : null;
     assertFresh();
-    const admitted = await this.options.admission.acquire({
+    const admitted = await this.#options.admission.acquire({
       requestId: input.requestId,
       tenantId: snapshot.caller.tenantId,
       projectId: snapshot.caller.projectId,
@@ -331,7 +333,7 @@ export class FastGatewayExecutor implements FastGatewayExecutorPort {
       accountOwnerScope: candidate.authority.accountOwnerKind === 'platform' ? 'platform' : snapshot.caller.tenantId,
       model: payload.resolvedModel,
       tokenUnits: Number(maxInput + maxOutput),
-      ttlMs: this.options.timeoutMs,
+      ttlMs: this.#options.timeoutMs,
       ...(snapshot.limits.group ? { groupId: snapshot.limits.group.id } : {}),
       limits: {
         tenant: snapshot.limits.tenant,
@@ -365,7 +367,7 @@ export class FastGatewayExecutor implements FastGatewayExecutorPort {
     try {
       assertFresh();
       const payloadSha256 = hash(payload.payloadBytes);
-      const reserved = await this.options.journal.reserveIntent({
+      const reserved = await this.#options.journal.reserveIntent({
         requestId: input.requestId,
         attemptId,
         tenantId: snapshot.caller.tenantId,
@@ -386,7 +388,7 @@ export class FastGatewayExecutor implements FastGatewayExecutorPort {
             estimatorVersion: payload.estimatorVersion,
           }),
         ),
-        allocationOwner: this.options.allocationOwner,
+        allocationOwner: this.#options.allocationOwner,
         sendDeadlineMs: snapshot.validUntilMs,
       });
       if (reserved.kind !== 'created')
@@ -491,7 +493,7 @@ export class FastGatewayExecutor implements FastGatewayExecutorPort {
         if (calculated > maxCost) throw new Error('Fast usage exceeds frozen price bound');
         charge = calculated;
       }
-      await this.options.journal.appendReceipt({
+      await this.#options.journal.appendReceipt({
         intentId,
         requestId: input.requestId,
         tenantId: snapshot.caller.tenantId,
@@ -507,7 +509,7 @@ export class FastGatewayExecutor implements FastGatewayExecutorPort {
     } catch (error) {
       if (intentId && !terminalReceipt) {
         const outcome = upstreamStarted ? 'unknown' : 'failed';
-        await this.options.journal
+        await this.#options.journal
           .appendReceipt({
             intentId,
             requestId: input.requestId,

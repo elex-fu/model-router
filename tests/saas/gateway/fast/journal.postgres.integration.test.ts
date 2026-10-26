@@ -231,7 +231,7 @@ test('fast money journal real PostgreSQL: atomic reserve, durable completion, ex
         allocationTrancheMinorUnits: '100',
       });
       const receipt = receiptFixture(intent);
-      await assert.rejects(receipts.appendReceipt(receipt), /lost receipt ACK/);
+      await receipts.appendReceipt(receipt); // exact retry verifies the committed row before returning success
       await receipts.appendReceipt(receipt);
       for (const boundary of [
         'fast-journal:worker-ledger',

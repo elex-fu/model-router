@@ -31,7 +31,7 @@ Response headers identify selection: `x-model-router-execution-mode: fast-reserv
 
 Supported: ordinary OpenAI-compatible `/v1/chat/completions`, text-only message strings, explicit positive output bound, one choice, default service tier, API-key credentials, ordinary token pricing, platform prepaid or BYOK, JSON or SSE.
 
-Before any fast intent, these use strict mode: client idempotency keys; other operations/protocols; tools/audio/images/non-text content; absent output ceiling; multiple choices; special service tiers; per-unit/token-multiplier or advanced group finance; finite key monetary/token budgets; OAuth or special account controls; bound egress proxy/TLS profiles. Native policy denial is not a fallback permission. The current first slice selects the first eligible candidate; it does not claim general multi-account scheduling or safe post-send retries. Completed 429/5xx outcomes update bounded Redis cooldown; ambiguous remote execution retains its slot conservatively.
+Before any fast intent, these use strict mode: client idempotency keys; other operations/protocols; tools/audio/images/non-text content; absent output ceiling; multiple choices; special service tiers; per-unit/token-multiplier or advanced group finance; finite key monetary/token budgets; OAuth or special account controls; bound egress proxy/TLS profiles. Native policy denial is not a fallback permission. Verified active accounts without PG health history are neutral schedulable; a historical probe timestamp does not invalidate a healthy/degraded account. Current cooldown and unhealthy/half-open states still exclude candidates. The current first slice selects the first eligible candidate; it does not claim general multi-account scheduling or safe post-send retries. Completed 429/5xx outcomes update bounded Redis cooldown; ambiguous remote execution retains its slot conservatively.
 
 ## Deliberately changed contracts
 
@@ -46,3 +46,7 @@ Rollback disables the flag for **new requests**, while the durable receipt worke
 ## Validation at the integration checkpoint
 
 Focused tests cover paid JSON/SSE reserve and exact usage; mixed-case SSE media type; durable terminal barrier; duplicate and lost intent acknowledgement; expiry during intent wait; strict pre-intent fallback; receipt storage failure; cold-only callback invocation and exact routing identity; unsafe header rejection. Existing HTTP/composition regressions remain green. Real restricted-role PostgreSQL/Redis tests are separately supplied by the journal, snapshots and admission components. Native paid HTTP, request-scoped SQL census, crash/restart/invalidation and paired throughput are the next acceptance gate, not assumed from unit tests.
+
+## Read-side integration boundary
+
+Fast usage is durable in intents/receipts/jobs, not fabricated legacy request/attempt/usage rows. Existing dashboard/export readers need an explicit fast-journal projection or union before broad feature enablement. Native acceptance counts both formats separately and reconciles their exact ledger effects. This first checkpoint does not claim legacy usage pages already show fast traffic.

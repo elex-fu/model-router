@@ -321,37 +321,50 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
     if (input.outcome === 'unknown' && input.chargeMinorUnits !== null) throw new Error('FAST_JOURNAL_UNKNOWN_CHARGE');
     for (const value of Object.values(input.usage)) if (value !== null) parseMinorUnits(value, { allowZero: true });
     const receiptDigest = fastJournalDigest(input);
-    try {
-      const result = await this.database.query(
-        `/* fast-journal:append-receipt */
-         WITH receipt AS (
-           INSERT INTO saas_fast_gateway_receipts
-             (intent_id, tenant_id, request_id, outcome, charge_minor_units, usage, usage_digest, receipt_digest, http_status)
-           VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9) RETURNING intent_id
-         ) INSERT INTO saas_fast_billing_jobs(intent_id, state)
-           SELECT intent_id, CASE WHEN $4 = 'succeeded' THEN 'pending' ELSE 'blocked' END FROM receipt`,
-        [
-          input.intentId,
-          input.tenantId,
-          input.requestId,
-          input.outcome,
-          input.chargeMinorUnits,
-          fastJournalCanonicalJson(input.usage),
-          input.usageDigest,
-          receiptDigest,
-          input.httpStatus,
-        ],
-      );
-      one(result.rowCount);
-    } catch (error) {
-      if (!isUniqueViolation(error)) throw error;
-      const result = await this.database.query<{ receipt_digest: string }>(
-        'SELECT receipt_digest FROM saas_fast_gateway_receipts WHERE intent_id = $1 AND tenant_id = $2 AND request_id = $3',
-        [input.intentId, input.tenantId, input.requestId],
-      );
-      if (result.rows[0]?.receipt_digest !== receiptDigest) throw new Error('FAST_JOURNAL_RECEIPT_CONFLICT');
+    // Snapshot every parameter before the first await. Retrying a receipt is
+    // safe; retrying an intent/upstream execution is deliberately forbidden.
+    const values = [
+      input.intentId,
+      input.tenantId,
+      input.requestId,
+      input.outcome,
+      input.chargeMinorUnits,
+      fastJournalCanonicalJson(input.usage),
+      input.usageDigest,
+      receiptDigest,
+      input.httpStatus,
+    ];
+    const append = async (): Promise<void> => {
+      try {
+        const result = await this.database.query(
+          `/* fast-journal:append-receipt */
+           WITH receipt AS (
+             INSERT INTO saas_fast_gateway_receipts
+               (intent_id, tenant_id, request_id, outcome, charge_minor_units, usage, usage_digest, receipt_digest, http_status)
+             VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9) RETURNING intent_id
+           ) INSERT INTO saas_fast_billing_jobs(intent_id, state)
+             SELECT intent_id, CASE WHEN $4 = 'succeeded' THEN 'pending' ELSE 'blocked' END FROM receipt`,
+          values,
+        );
+        one(result.rowCount);
+      } catch (error) {
+        if (!isUniqueViolation(error)) throw error;
+        const result = await this.database.query<{ receipt_digest: string }>(
+          'SELECT receipt_digest FROM saas_fast_gateway_receipts WHERE intent_id = $1 AND tenant_id = $2 AND request_id = $3',
+          values.slice(0, 3),
+        );
+        if (result.rows[0]?.receipt_digest !== receiptDigest) throw new Error('FAST_JOURNAL_RECEIPT_CONFLICT');
+      }
+    };
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        await append();
+        this.wakeWorker();
+        return;
+      } catch (error) {
+        if (attempt === 1 || (error instanceof Error && error.message === 'FAST_JOURNAL_RECEIPT_CONFLICT')) throw error;
+      }
     }
-    this.wakeWorker();
   }
 
   private scheduleReplenishment(tenantId: string, currency: string): void {

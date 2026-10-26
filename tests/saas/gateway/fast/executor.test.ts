@@ -275,6 +275,6 @@ test('paid JSON and SSE reserve a real maximum and persist exact charge before E
 
 test('executor send-ticket registry and credential context are runtime-private', () => {
   const s = setup();
-  for (const key of ['tickets', 'credentials', 'transport', '#tickets', '#credentials', '#transport'])
+  for (const key of ['options', 'tickets', 'credentials', 'transport', '#tickets', '#credentials', '#transport'])
     assert.equal(Reflect.get(s.executor, key), undefined);
 });

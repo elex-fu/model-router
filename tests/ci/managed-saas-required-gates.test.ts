@@ -1015,23 +1015,38 @@ test('historical full migration chains use only a test administrator and isolate
   });
   before(job, rootStep(job, WORKER), step);
   const source = read(root);
-  assert.ok(
-    source.includes(
-      "if (!process.env.SAAS_TEST_DATABASE_ADMIN_URL) throw new Error('SAAS_TEST_DATABASE_ADMIN_URL is required for isolated migration fixture provisioning');",
+  // Formatting may wrap these guards, but every condition and diagnostic stays mandatory.
+  const isolationGuards = [
+    /if \(!process\.env\.SAAS_TEST_DATABASE_ADMIN_URL\)\s*throw new Error\(\s*'SAAS_TEST_DATABASE_ADMIN_URL is required for isolated migration fixture provisioning'\s*,?\s*\);/,
+    /if \(decodeURIComponent\(migratorUrl\.username\) !== 'model_router_saas_migrator'\)\s*throw new Error\(\s*'SAAS_TEST_DATABASE_URL must authenticate as the non-superuser model_router_saas_migrator test login'\s*,?\s*\);/,
+    /if \(\s*administratorUrl\.hostname !== migratorUrl\.hostname \|\|\s*\(administratorUrl\.port \|\| '5432'\) !== \(migratorUrl\.port \|\| '5432'\)\s*\)\s*throw new Error\(\s*'Migration fixture administrator and migrator URLs must target the same test PostgreSQL instance'\s*,?\s*\);/,
+  ];
+  const validateIsolationGuards = (candidate: string): void => {
+    for (const guard of isolationGuards) assert.match(candidate, guard);
+  };
+  validateIsolationGuards(source);
+  for (const guard of isolationGuards) {
+    assert.throws(() => validateIsolationGuards(source.replace(guard, '')), 'missing isolation guard must fail');
+  }
+  for (const weakened of [
+    source.replace('!process.env.SAAS_TEST_DATABASE_ADMIN_URL', 'process.env.SAAS_TEST_DATABASE_ADMIN_URL'),
+    source.replace(
+      "migratorUrl.username) !== 'model_router_saas_migrator'",
+      "migratorUrl.username) === 'model_router_saas_migrator'",
     ),
-  );
+    source.replace(
+      'administratorUrl.hostname !== migratorUrl.hostname',
+      'administratorUrl.hostname === migratorUrl.hostname',
+    ),
+    source.replace(
+      "(administratorUrl.port || '5432') !== (migratorUrl.port || '5432')",
+      "(administratorUrl.port || '5432') === (migratorUrl.port || '5432')",
+    ),
+  ]) {
+    assert.throws(() => validateIsolationGuards(weakened), 'inverted isolation condition must fail');
+  }
   assert.ok(source.includes('const administratorUrl = new URL(process.env.SAAS_TEST_DATABASE_ADMIN_URL);'));
   assert.ok(source.includes('const migratorUrl = new URL(realPostgresUrl);'));
-  assert.ok(
-    source.includes(
-      "if (decodeURIComponent(migratorUrl.username) !== 'model_router_saas_migrator') throw new Error('SAAS_TEST_DATABASE_URL must authenticate as the non-superuser model_router_saas_migrator test login');",
-    ),
-  );
-  assert.ok(
-    source.includes(
-      "if (administratorUrl.hostname !== migratorUrl.hostname || (administratorUrl.port || '5432') !== (migratorUrl.port || '5432')) throw new Error('Migration fixture administrator and migrator URLs must target the same test PostgreSQL instance');",
-    ),
-  );
   assert.ok(source.includes('const fixtureUrl = new URL(migratorUrl);'));
   assert.ok(source.includes('fixtureUrl.pathname = `/${databaseName}`;'));
   assert.ok(source.includes('await administrator.query(`CREATE DATABASE "${databaseName}"`);'));

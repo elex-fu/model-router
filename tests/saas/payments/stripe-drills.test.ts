@@ -7,6 +7,7 @@ import { createStripePaymentProvider, STRIPE_PROVIDER_KEY } from '../../../src/s
 import { PaymentRefundService } from '../../../src/saas/payments/refunds.js';
 import { PaymentFulfillmentService } from '../../../src/saas/payments/service.js';
 import type { PaymentRefundOperationsPort } from '../../../src/saas/payments/types.js';
+import { type FakeFastCreditAllocation, REFUND_WALLET_COMMITMENTS_SQL } from './fake-refund-wallet.js';
 import { createFakeFundingLedger, FakePaymentDatabase } from './fake-sql.js';
 import {
   type MockStripe,
@@ -297,6 +298,7 @@ class FakeRefundDatabase {
     ledgerPostings: [] as Array<{ refundOrderId: string; amountMinorUnits: string; transactionId: string }>,
     walletBalance: 1_000n,
     requestHolds: 0n,
+    fastCreditAllocations: [] as FakeFastCreditAllocation[],
   };
 
   readonly walletTopUp: Record<string, unknown> = {
@@ -451,10 +453,11 @@ class FakeRefundDatabase {
           : null;
       return result<Row>(row ? [row as Row] : []);
     }
-    if (
-      statement.startsWith('select coalesce(sum(amount_minor_units), 0)::text as total from saas_billing_reservations')
-    ) {
-      return result<Row>([{ total: this.state.requestHolds.toString() } as Row]);
+    if (statement === REFUND_WALLET_COMMITMENTS_SQL) {
+      const backing = this.state.fastCreditAllocations
+        .filter((allocation) => allocation.tenant_id === a && allocation.currency === b)
+        .reduce((total, allocation) => total + allocation.backing_minor_units, 0n);
+      return result<Row>([{ total: (this.state.requestHolds + backing).toString() } as Row]);
     }
     if (
       statement.startsWith('select coalesce(sum(amount_minor_units), 0)::text as total from saas_refund_wallet_freezes')
@@ -607,6 +610,14 @@ test('C5: a stripe refund settles through the REAL query tri-state — succeeded
       now: () => new Date(now.value),
     });
     const database = new FakeRefundDatabase();
+    database.state.fastCreditAllocations.push({
+      tenant_id: REFUND_TENANT_ID,
+      currency: 'USD',
+      state: 'active',
+      backing_minor_units: 200n,
+      available_minor_units: 25n,
+    });
+    const allocations = clone(database.state.fastCreditAllocations);
     const service = createRefundService(database, provider.refundAdapter, now);
     const walletRefund = (clientRequestId: string) => ({
       actorId: REFUND_ACTOR_ID,
@@ -686,6 +697,16 @@ test('C5: a stripe refund settles through the REAL query tri-state — succeeded
     assert.equal(database.state.ledgerPostings.length, 1, 'a failed refund never posts the wallet ledger');
     assert.equal(database.state.walletBalance, 600n);
     assert.equal(database.state.refunds[1]?.state, 'failed');
+    await assert.rejects(
+      service.requestWalletTopUpRefund({ ...walletRefund('stripe-refund-escrow'), amountMinorUnits: '401' }),
+      (error: unknown) => error instanceof PaymentError && error.code === 'REFUND_AMOUNT_EXCEEDS_AVAILABLE',
+    );
+    assert.equal(stripe.calls.refundsCreate.length, 2, 'refund rejection never submits protected escrow to the PSP');
+    assert.equal(database.state.refunds.length, 2);
+    assert.equal(database.state.walletFreezes.length, 0);
+    assert.equal(database.state.ledgerPostings.length, 1);
+    assert.equal(database.state.walletBalance, 600n);
+    assert.deepEqual(database.state.fastCreditAllocations, allocations);
   } finally {
     await stripe.close();
   }

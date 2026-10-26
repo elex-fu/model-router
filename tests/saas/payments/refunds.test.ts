@@ -18,6 +18,7 @@ import type {
   CustomerWebhookEventProducer,
   RefundStatusChangedTransition,
 } from '../../../src/saas/webhooks/producers.js';
+import { type FakeFastCreditAllocation, REFUND_WALLET_COMMITMENTS_SQL } from './fake-refund-wallet.js';
 import { startMockPsp } from './mock-psp.js';
 
 const TENANT_ID = '00000000-0000-4000-8000-000000000001';
@@ -83,6 +84,7 @@ interface FakeRefundState {
   ledgerPostings: Array<{ refundOrderId: string; amountMinorUnits: string; transactionId: string }>;
   walletBalance: bigint;
   requestHolds: bigint;
+  fastCreditAllocations: FakeFastCreditAllocation[];
 }
 
 function clone<T>(value: T): T {
@@ -134,6 +136,7 @@ class FakeRefundDatabase {
     ledgerPostings: [],
     walletBalance: 1_000n,
     requestHolds: 0n,
+    fastCreditAllocations: [] as FakeFastCreditAllocation[],
   };
   walletReads = 0;
   failServicePlanEffectInsert = false;
@@ -459,10 +462,11 @@ class FakeRefundDatabase {
           : null;
       return result<Row>(row ? [row as Row] : []);
     }
-    if (
-      statement.startsWith('select coalesce(sum(amount_minor_units), 0)::text as total from saas_billing_reservations')
-    ) {
-      return result<Row>([{ total: this.state.requestHolds.toString() } as Row]);
+    if (statement === REFUND_WALLET_COMMITMENTS_SQL) {
+      const backing = this.state.fastCreditAllocations
+        .filter((allocation) => allocation.tenant_id === a && allocation.currency === b)
+        .reduce((total, allocation) => total + allocation.backing_minor_units, 0n);
+      return result<Row>([{ total: (this.state.requestHolds + backing).toString() } as Row]);
     }
     if (
       statement.startsWith('select coalesce(sum(amount_minor_units), 0)::text as total from saas_refund_wallet_freezes')
@@ -986,6 +990,98 @@ test('wallet refund admission subtracts request holds before freezing PSP refund
   assert.equal(database.state.walletFreezes.length, 0);
 });
 
+for (const [label, state, available] of [
+  ['unused active', 'active', 750n],
+  ['partly admitted active', 'active', 50n],
+  ['retired with unsettled intents', 'retired', 0n],
+] as const) {
+  test(`wallet refund cannot consume ${label} fast-credit backing`, async () => {
+    const database = new FakeRefundDatabase();
+    database.state.fastCreditAllocations.push({
+      tenant_id: TENANT_ID,
+      currency: 'USD',
+      state,
+      backing_minor_units: 750n,
+      available_minor_units: available,
+    });
+    const allocations = clone(database.state.fastCreditAllocations);
+    const provider = new FakeRefundProvider();
+    const service = createService(database, provider);
+
+    await assert.rejects(
+      service.requestWalletTopUpRefund(walletRefund('refund-escrow-over-boundary', '251')),
+      (error: unknown) => (error as { code?: string }).code === 'REFUND_AMOUNT_EXCEEDS_AVAILABLE',
+    );
+    assert.equal(provider.submitCalls.length, 0);
+    assert.equal(database.state.refunds.length, 0);
+    assert.equal(database.state.walletFreezes.length, 0);
+    assert.equal(database.state.ledgerPostings.length, 0);
+    assert.equal(database.state.walletBalance, 1_000n);
+    assert.deepEqual(database.state.fastCreditAllocations, allocations);
+
+    const refund = await service.requestWalletTopUpRefund(walletRefund('refund-escrow-exact-boundary', '250'));
+    assert.equal(refund.status, 'succeeded');
+    assert.equal(database.state.walletBalance, 750n);
+    assert.equal(database.state.ledgerPostings.length, 1);
+    assert.equal(database.state.walletFreezes.length, 0);
+    assert.deepEqual(
+      database.state.fastCreditAllocations,
+      allocations,
+      'PSP refund never releases fast-credit backing',
+    );
+  });
+}
+
+test('wallet refund subtracts holds, pending refund freezes and scoped fast-credit backing together', async () => {
+  const database = new FakeRefundDatabase();
+  database.state.requestHolds = 150n;
+  database.state.fastCreditAllocations.push(
+    { tenant_id: TENANT_ID, currency: 'USD', state: 'active', backing_minor_units: 200n, available_minor_units: 50n },
+    { tenant_id: TENANT_ID, currency: 'USD', state: 'retired', backing_minor_units: 150n, available_minor_units: 0n },
+    {
+      tenant_id: ACTOR_ID,
+      currency: 'USD',
+      state: 'active',
+      backing_minor_units: 5_000n,
+      available_minor_units: 5_000n,
+    },
+    {
+      tenant_id: TENANT_ID,
+      currency: 'CNY',
+      state: 'active',
+      backing_minor_units: 5_000n,
+      available_minor_units: 5_000n,
+    },
+  );
+  const allocations = clone(database.state.fastCreditAllocations);
+  const provider = new FakeRefundProvider();
+  provider.submitResult = 'pending';
+  const service = createService(database, provider);
+  const pending = await service.requestWalletTopUpRefund(walletRefund('refund-escrow-pending', '200'));
+  assert.equal(pending.status, 'pending');
+
+  await assert.rejects(
+    service.requestWalletTopUpRefund(walletRefund('refund-all-commitments-over-boundary', '301')),
+    (error: unknown) => (error as { code?: string }).code === 'REFUND_AMOUNT_EXCEEDS_AVAILABLE',
+  );
+  assert.equal(provider.submitCalls.length, 1, 'escrow rejection performs no additional PSP I/O');
+  assert.equal(database.state.refunds.length, 1);
+  assert.equal(database.state.walletFreezes.length, 1);
+  assert.equal(database.state.walletBalance, 1_000n);
+  assert.equal(database.state.ledgerPostings.length, 0);
+  assert.deepEqual(database.state.fastCreditAllocations, allocations);
+
+  provider.submitResult = 'succeeded';
+  const refund = await service.requestWalletTopUpRefund(walletRefund('refund-all-commitments-exact-boundary', '300'));
+  assert.equal(refund.status, 'succeeded');
+  assert.equal(database.state.walletBalance, 700n);
+  assert.equal(database.state.requestHolds, 150n);
+  assert.equal(database.state.walletFreezes.length, 1);
+  assert.equal(database.state.walletFreezes[0]?.refund_order_id, pending.id);
+  assert.equal(database.state.ledgerPostings.length, 1);
+  assert.deepEqual(database.state.fastCreditAllocations, allocations);
+});
+
 test('provider and merchant snapshot mismatch fails closed before PSP I/O', async () => {
   const database = new FakeRefundDatabase();
   database.walletTopUp.merchant_id = 'different-merchant';
@@ -1409,6 +1505,21 @@ function recordingProducer(database: FakeRefundDatabase) {
     },
     async servicePlanOrderStatusChanged() {
       throw new Error('unexpected plan-order event on the refund path');
+    },
+    async requestCompleted() {
+      throw new Error('unexpected request event on the refund path');
+    },
+    async usageCompleted() {
+      throw new Error('unexpected usage event on the refund path');
+    },
+    async walletLowBalance() {
+      throw new Error('unexpected low-balance event on the refund path');
+    },
+    async apiKeyExpiring() {
+      throw new Error('unexpected key event on the refund path');
+    },
+    async platformMaintenanceAnnouncement() {
+      throw new Error('unexpected maintenance event on the refund path');
     },
   };
   return { producer, transitions };
