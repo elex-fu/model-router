@@ -24,6 +24,7 @@ import {
   type PreparedEvidenceDispatchStage,
 } from './prepared-evidence-dispatch-observer.js';
 import {
+  consumePreparedDispatchGrant,
   getAuthoritativePreparedAttempt,
   type PreparedRequestEvidenceAudit,
   type PreparedRequestEvidenceClaimOptions,
@@ -358,6 +359,7 @@ function assertPostClaimAttempt(
   attempt: AttemptRecord,
   claimed: PreparedRequestEvidenceRecord,
   preflight: PreparedRequestEvidenceRecord,
+  expectedDispatchState: 'not_sent' | 'dispatching' = 'not_sent',
 ): void {
   const stableEvidenceFields = [
     'evidenceId',
@@ -458,7 +460,7 @@ function assertPostClaimAttempt(
       attempt.payloadCompilerVersion !== claimed.payloadCompilerVersion) ||
     (claimed.usageEstimatorVersion !== undefined && attempt.usageEstimatorVersion !== claimed.usageEstimatorVersion) ||
     ((hasProvenance || attempt.payloadSha256 !== undefined) && attempt.payloadSha256 !== claimed.payloadSha256) ||
-    attempt.dispatchState !== 'not_sent' ||
+    attempt.dispatchState !== expectedDispatchState ||
     attempt.resultState !== 'pending' ||
     attempt.responseStarted !== false ||
     attempt.responseStartedAt !== null ||
@@ -882,44 +884,55 @@ export class SaasPreparedEvidenceDispatchService {
     }
 
     let evidence: PreparedRequestEvidenceRecord;
-    let postClaimAttempt: AttemptRecord;
+    let dispatching: AttemptRecord;
     try {
       if (input.client?.signal.aborted) {
         fail('CLIENT_STREAM_ABORTED', 'client response stream was cancelled before evidence claim');
       }
-      evidence = await this.observe('claim', () =>
-        this.evidence.claimForDispatch(input.evidenceId, input.audit, claimOptions),
-      );
-      // Claim is itself a versioned attempt update. Never fence dispatch using
-      // the preflight snapshot or an inferred version increment.
-      const current =
-        getAuthoritativePreparedAttempt(evidence, this.evidence) ??
-        (await this.observe('attempt-read', () =>
-          this.metering.getAttempt(
-            preflightEvidence.tenantId,
-            preflightEvidence.requestId,
-            preflightEvidence.attemptId,
-          ),
-        ));
-      if (!current) fail('ATTEMPT_NOT_FOUND', 'claimed prepared evidence attempt was not found');
-      assertPostClaimAttempt(current, evidence, preflightEvidence);
-      if (input.client?.signal.aborted) {
-        fail('CLIENT_STREAM_ABORTED', 'client response stream was cancelled before dispatch fencing');
+      const claimAndBeginDispatch = this.evidence.claimAndBeginDispatch;
+      if (claimAndBeginDispatch) {
+        const grant = await this.observe('claim', () =>
+          claimAndBeginDispatch.call(this.evidence, input.evidenceId, input.audit, { payloadSha256: digest }),
+        );
+        evidence = consumePreparedDispatchGrant(grant, this.evidence, input.evidenceId, digest);
+        const current = getAuthoritativePreparedAttempt(evidence, this.evidence);
+        if (!current) fail('EVIDENCE_BINDING_MISMATCH', 'dispatch grant has no authoritative attempt');
+        assertPostClaimAttempt(current, evidence, preflightEvidence, 'dispatching');
+        dispatching = current;
+        // Cancellation after COMMIT is handled by the unknown/reconciliation
+        // path below, never by not-sent compensation or a repeated dispatch.
+      } else {
+        evidence = await this.observe('claim', () =>
+          this.evidence.claimForDispatch(input.evidenceId, input.audit, claimOptions),
+        );
+        // Claim is itself a versioned attempt update. Never fence dispatch using
+        // the preflight snapshot or an inferred version increment.
+        const current =
+          getAuthoritativePreparedAttempt(evidence, this.evidence) ??
+          (await this.observe('attempt-read', () =>
+            this.metering.getAttempt(
+              preflightEvidence.tenantId,
+              preflightEvidence.requestId,
+              preflightEvidence.attemptId,
+            ),
+          ));
+        if (!current) fail('ATTEMPT_NOT_FOUND', 'claimed prepared evidence attempt was not found');
+        assertPostClaimAttempt(current, evidence, preflightEvidence);
+        if (input.client?.signal.aborted) {
+          fail('CLIENT_STREAM_ABORTED', 'client response stream was cancelled before dispatch fencing');
+        }
+
+        try {
+          dispatching = await this.observe('attempt-transition', () =>
+            this.metering.transitionAttempt(transitionInput(current, 'dispatching', 'pending', false)),
+          );
+        } catch (error) {
+          fail('DISPATCH_STATE_CONFLICT', 'attempt could not be fenced for dispatch', error);
+        }
       }
-      postClaimAttempt = current;
     } catch (error) {
       await releaseBeforeDispatch(lease, this.observer);
       throw error;
-    }
-
-    let dispatching: AttemptRecord;
-    try {
-      dispatching = await this.observe('attempt-transition', () =>
-        this.metering.transitionAttempt(transitionInput(postClaimAttempt, 'dispatching', 'pending', false)),
-      );
-    } catch (error) {
-      await releaseBeforeDispatch(lease, this.observer);
-      fail('DISPATCH_STATE_CONFLICT', 'attempt could not be fenced for dispatch', error);
     }
 
     let outcome: PreparedEvidenceDispatchResult | undefined;

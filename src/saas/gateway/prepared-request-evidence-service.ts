@@ -193,6 +193,12 @@ export interface PreparedRequestEvidenceRegistrar {
   ): Promise<PreparedRequestEvidenceRecord>;
 }
 
+declare const preparedDispatchGrantBrand: unique symbol;
+/** Opaque, single-use authority minted only after claim+dispatching COMMIT succeeds. */
+export interface PreparedDispatchGrant {
+  readonly [preparedDispatchGrantBrand]: true;
+}
+
 export interface PreparedRequestEvidenceDispatchPort {
   /**
    * Read-only dispatch preflight. This validates the currently registered
@@ -203,6 +209,11 @@ export interface PreparedRequestEvidenceDispatchPort {
     audit: PreparedRequestEvidenceAudit,
     options?: PreparedRequestEvidenceClaimOptions,
   ): Promise<PreparedRequestEvidenceRecord>;
+  claimAndBeginDispatch?(
+    evidenceId: string,
+    audit: PreparedRequestEvidenceAudit,
+    options: PreparedRequestEvidenceClaimOptions & { readonly payloadSha256: string },
+  ): Promise<PreparedDispatchGrant>;
   claimForDispatch(
     evidenceId: string,
     audit: PreparedRequestEvidenceAudit,
@@ -239,6 +250,33 @@ function withAuthoritativeAttempt(
   const result = Object.freeze({ ...record, authoritativeAttemptRecord: attempt });
   authoritativeAttempts.set(result, { issuer, attempt });
   return result;
+}
+
+const dispatchGrants = new WeakMap<
+  PreparedDispatchGrant,
+  {
+    readonly issuer: PreparedRequestEvidenceDispatchPort;
+    readonly evidence: PreparedRequestEvidenceRecord;
+  }
+>();
+
+export function consumePreparedDispatchGrant(
+  grant: PreparedDispatchGrant,
+  issuer: PreparedRequestEvidenceDispatchPort,
+  evidenceId: string,
+  payloadSha256: string,
+): PreparedRequestEvidenceRecord {
+  const context = dispatchGrants.get(grant);
+  if (context) dispatchGrants.delete(grant);
+  if (
+    !context ||
+    context.issuer !== issuer ||
+    context.evidence.evidenceId !== evidenceId ||
+    context.evidence.payloadSha256 !== payloadSha256
+  ) {
+    fail('AUTHORITY_MISMATCH', 'dispatch grant is invalid, foreign, mismatched or already consumed');
+  }
+  return context.evidence;
 }
 
 export type TrustedPreparedRequestVerifierKey = KeyObject | string | Uint8Array;
@@ -1956,6 +1994,31 @@ export class SaasPreparedRequestEvidenceService {
     audit: PreparedRequestEvidenceAudit,
     options: PreparedRequestEvidenceClaimOptions = {},
   ): Promise<PreparedRequestEvidenceRecord> {
+    return this.claim(evidenceId, audit, options, false);
+  }
+
+  async claimAndBeginDispatch(
+    evidenceId: string,
+    audit: PreparedRequestEvidenceAudit,
+    options: PreparedRequestEvidenceClaimOptions & { readonly payloadSha256: string },
+  ): Promise<PreparedDispatchGrant> {
+    if (!options || typeof options.payloadSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(options.payloadSha256)) {
+      fail('INVALID_INPUT', 'dispatch grant requires the exact outbound payload digest');
+    }
+    // Do not issue/retry a grant inside the transaction callback: COMMIT can
+    // succeed while its acknowledgement fails. That outcome must send nothing.
+    const evidence = await this.claim(evidenceId, audit, options, true);
+    const grant = Object.freeze({}) as PreparedDispatchGrant;
+    dispatchGrants.set(grant, { issuer: this, evidence });
+    return grant;
+  }
+
+  private async claim(
+    evidenceId: string,
+    audit: PreparedRequestEvidenceAudit,
+    options: PreparedRequestEvidenceClaimOptions,
+    beginDispatch: boolean,
+  ): Promise<PreparedRequestEvidenceRecord> {
     const id = identifier(evidenceId, 'evidenceId');
     const auditContext = normalizeAudit(audit);
     try {
@@ -2006,9 +2069,45 @@ export class SaasPreparedRequestEvidenceService {
           normalizedRowValue(attempt, 'state_version', 'locked attempt version'),
           'locked attempt version',
         );
+        const claimEvidence = async () => {
+          const result = await tx.query<EvidenceRow>(
+            'UPDATE saas_prepared_request_evidence ' +
+              "SET status = 'claimed', claimed_at = clock_timestamp(), claimed_attempt_id = $3 " +
+              "WHERE tenant_id = $1 AND id = $2 AND status = 'registered' " +
+              'AND expires_at > clock_timestamp() AND dispatch_deadline > clock_timestamp() ' +
+              'AND payload_sha256 = $4 AND statement_sha256 = $5 ' +
+              'RETURNING id, status, claimed_at, claimed_attempt_id, expires_at',
+            [
+              normalized.tenantId,
+              normalized.evidenceId,
+              normalized.attemptId,
+              normalized.payloadSha256,
+              statementSha256,
+            ],
+          );
+          rowCount(result, 1, 'prepared evidence claim');
+          return result;
+        };
+        // Locks remain request -> attempt -> evidence. Only writes move: the
+        // existing dispatch guard requires already-claimed evidence, then one
+        // versioned attempt CAS binds it and begins dispatch atomically.
+        const earlyEvidenceUpdate = beginDispatch ? await claimEvidence() : undefined;
+        const writeClaimAudit = () =>
+          this.audit(
+            tx,
+            normalized,
+            'saas_prepared_request_evidence.claimed',
+            normalized.evidenceId,
+            lockedAt.toISOString(),
+            auditContext,
+          );
+        // The final dispatch CAS must follow any blocking audit work: its
+        // database trigger rechecks expiry immediately before COMMIT.
+        if (beginDispatch) await writeClaimAudit();
         const attemptUpdate = await tx.query<EvidenceRow>(
           'UPDATE saas_attempts ' +
             'SET prepared_evidence_id = $3, state_version = state_version + 1, ' +
+            (beginDispatch ? "dispatch_state = 'dispatching', " : '') +
             'updated_at = GREATEST(updated_at, clock_timestamp()) ' +
             'WHERE tenant_id = $1 AND id = $2 AND prepared_evidence_id IS NULL ' +
             'AND request_id = $4 AND ordinal = $5 AND state_version = $6::bigint ' +
@@ -2026,24 +2125,8 @@ export class SaasPreparedRequestEvidenceService {
           ],
         );
         rowCount(attemptUpdate, 1, 'prepared evidence attempt claim');
-        const evidenceUpdate = await tx.query<EvidenceRow>(
-          'UPDATE saas_prepared_request_evidence ' +
-            "SET status = 'claimed', claimed_at = clock_timestamp(), claimed_attempt_id = $3 " +
-            "WHERE tenant_id = $1 AND id = $2 AND status = 'registered' " +
-            'AND expires_at > clock_timestamp() AND dispatch_deadline > clock_timestamp() ' +
-            'AND payload_sha256 = $4 AND statement_sha256 = $5 ' +
-            'RETURNING id, status, claimed_at, claimed_attempt_id, expires_at',
-          [normalized.tenantId, normalized.evidenceId, normalized.attemptId, normalized.payloadSha256, statementSha256],
-        );
-        rowCount(evidenceUpdate, 1, 'prepared evidence claim');
-        await this.audit(
-          tx,
-          normalized,
-          'saas_prepared_request_evidence.claimed',
-          normalized.evidenceId,
-          lockedAt.toISOString(),
-          auditContext,
-        );
+        const evidenceUpdate = earlyEvidenceUpdate ?? (await claimEvidence());
+        if (!beginDispatch) await writeClaimAudit();
         const row = evidenceUpdate.rows[0];
         if (!row) fail('STORAGE_ERROR', 'prepared evidence claim returned no row');
         const claimedAttempt = attemptUpdate.rows[0];

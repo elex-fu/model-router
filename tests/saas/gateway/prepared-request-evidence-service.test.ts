@@ -7,7 +7,9 @@ import { saasAdvisoryKey } from '../../../src/saas/db/advisory-lock-keys.js';
 import type { SaasDatabase, SqlExecutor, SqlResult } from '../../../src/saas/db/index.js';
 import {
   canonicalPreparedRequestEvidencePayload,
+  consumePreparedDispatchGrant,
   getAuthoritativePreparedAttempt,
+  type PreparedDispatchGrant,
   type PreparedRequestEvidenceInput,
   SaasPreparedRequestEvidenceError,
   SaasPreparedRequestEvidenceService,
@@ -431,6 +433,7 @@ class FakeExecutor implements SqlExecutor {
       this.attemptEvidenceId = String(values[2]);
       this.rows.attempt = {
         ...current,
+        dispatch_state: sql.includes("dispatch_state = 'dispatching',") ? 'dispatching' : current.dispatch_state,
         prepared_evidence_id: this.attemptEvidenceId,
         state_version: (BigInt(String(current.state_version)) + 1n).toString(),
         updated_at: new Date(Math.max(new Date(String(current.updated_at)).getTime(), CLOCK.getTime())).toISOString(),
@@ -1818,4 +1821,81 @@ test('claim rechecks the current signed payload digest after read-only preflight
   );
   assert.equal(fake.evidence.status, 'registered');
   assert.equal(fake.attemptEvidenceId, null);
+});
+
+test('atomic dispatch grants carry one persisted CAS version and cannot be forged, copied, rebound or reused', async () => {
+  for (const mismatch of ['none', 'issuer', 'evidence', 'payload'] as const) {
+    const input = signedInput();
+    const fake = new FakeExecutor(input);
+    const evidenceService = service(fake);
+    const registered = await evidenceService.register(input);
+    fake.evidence.statement_sha256 = registered.statementSha256;
+    const options = { payloadSha256: input.payloadSha256 };
+    const grant = await evidenceService.claimAndBeginDispatch(input.evidenceId ?? '', input.audit, options);
+    assert.ok(Object.isFrozen(grant));
+    assert.throws(() =>
+      consumePreparedDispatchGrant(
+        {} as PreparedDispatchGrant,
+        evidenceService,
+        input.evidenceId ?? '',
+        input.payloadSha256,
+      ),
+    );
+    assert.throws(() =>
+      consumePreparedDispatchGrant(
+        { ...grant } as PreparedDispatchGrant,
+        evidenceService,
+        input.evidenceId ?? '',
+        input.payloadSha256,
+      ),
+    );
+    const consume = () =>
+      consumePreparedDispatchGrant(
+        grant,
+        mismatch === 'issuer' ? service(fake) : evidenceService,
+        mismatch === 'evidence' ? 'other-evidence' : (input.evidenceId ?? ''),
+        mismatch === 'payload' ? 'b'.repeat(64) : input.payloadSha256,
+      );
+    if (mismatch !== 'none') assert.throws(consume);
+    else {
+      const record = consume();
+      const attempt = getAuthoritativePreparedAttempt(record, evidenceService);
+      assert.equal(attempt?.stateVersion, 2);
+      assert.equal(attempt?.dispatchState, 'dispatching');
+      assert.equal(attempt?.preparedEvidenceId, input.evidenceId);
+      assert.equal(fake.attemptClaimQueries.length, 1);
+    }
+    assert.throws(() =>
+      consumePreparedDispatchGrant(grant, evidenceService, input.evidenceId ?? '', input.payloadSha256),
+    );
+    await expectCode(
+      evidenceService.claimAndBeginDispatch(input.evidenceId ?? '', input.audit, options),
+      'ALREADY_CLAIMED',
+    );
+  }
+});
+
+test('atomic dispatch grant requires an exact outbound payload and rolls evidence/audit back on failed attempt CAS', async () => {
+  const input = signedInput();
+  const fake = new FakeExecutor(input);
+  const evidenceService = service(fake);
+  const registered = await evidenceService.register(input);
+  fake.evidence.statement_sha256 = registered.statementSha256;
+  await expectCode(
+    evidenceService.claimAndBeginDispatch(input.evidenceId ?? '', input.audit, { payloadSha256: '' }),
+    'INVALID_INPUT',
+  );
+  await expectCode(
+    evidenceService.claimAndBeginDispatch(input.evidenceId ?? '', input.audit, { payloadSha256: 'b'.repeat(64) }),
+    'AUTHORITY_MISMATCH',
+  );
+  const auditCount = fake.auditActorIds.length;
+  fake.failAttemptClaim = true;
+  await expectCode(
+    evidenceService.claimAndBeginDispatch(input.evidenceId ?? '', input.audit, { payloadSha256: input.payloadSha256 }),
+    'STORAGE_ERROR',
+  );
+  assert.equal(fake.evidence.status, 'registered');
+  assert.equal(fake.auditActorIds.length, auditCount);
+  assert.equal((fake.rows.attempt as Record<string, unknown>).dispatch_state, 'not_sent');
 });

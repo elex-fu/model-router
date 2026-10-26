@@ -26,6 +26,7 @@ import type {
   PreparedEvidenceClientStream,
   PreparedEvidenceTransportResponse,
 } from '../../../src/saas/gateway/prepared-evidence-dispatch-service.js';
+import type { PreparedDispatchGrant } from '../../../src/saas/gateway/prepared-request-evidence-service.js';
 import { ProviderHttpTransportError } from '../../../src/saas/gateway/provider-http-transport.js';
 import {
   RequestDiagnosticTrace,
@@ -2600,4 +2601,27 @@ test('forged public attempt snapshots never bypass the authoritative metering re
   assert.equal(sends, 1);
   assert.equal(metering.reads.length, 2);
   assert.equal(metering.transitionInputs[0]?.expectedStateVersion, 2);
+});
+
+test('a fabricated atomic grant is rejected before any upstream call or legacy dispatch CAS', async () => {
+  const proof = new FakeEvidence();
+  const metering = new FakeMetering();
+  proof.metering = metering;
+  const lease = new FakeLeaseProvider();
+  let sends = 0;
+  const forgedPort = Object.assign(proof, {
+    async claimAndBeginDispatch() {
+      return {} as PreparedDispatchGrant;
+    },
+  });
+  const dispatch = new SaasPreparedEvidenceDispatchService(forgedPort, metering, lease, {
+    async send() {
+      sends++;
+      return { responseStarted: true, resultHttpStatus: 200 };
+    },
+  });
+  await assert.rejects(dispatch.dispatch({ evidenceId: 'evidence-1', payloadBytes: payload, audit }));
+  assert.equal(sends, 0);
+  assert.equal(metering.transitionInputs.length, 0);
+  assert.equal(lease.releaseCount, 1);
 });
