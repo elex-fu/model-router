@@ -2402,6 +2402,8 @@ export class SaasMeteringService {
     }
 
     return this.database.transaction(async (tx) => {
+      // Immutable request/attempt IDs let deferred projection FKs KEY SHARE
+      // these rows while NO KEY UPDATE still excludes competing state writers.
       const state = await this.one<KnownHttpResponseStateRow>(
         tx,
         `SELECT a.id AS attempt_id, a.tenant_id AS attempt_tenant_id,
@@ -2415,7 +2417,7 @@ export class SaasMeteringService {
            FROM saas_attempts a
            JOIN saas_requests r ON r.tenant_id = a.tenant_id AND r.id = a.request_id
           WHERE a.tenant_id = $1 AND a.request_id = $2 AND a.id = $3
-          FOR UPDATE OF a, r`,
+          FOR NO KEY UPDATE OF a, r`,
         [tenantId, requestId, attemptId],
       );
       if (

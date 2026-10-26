@@ -706,6 +706,9 @@ export class DurableConditionalSettlementPort implements ConditionalSettlementPo
 
     try {
       return await this.database.transaction(async (tx) => {
+        // Serialize state/money writers without blocking the deferred capacity
+        // FKs' KEY SHARE locks. Request/attempt identities are immutable; an
+        // UPDATE lock can deadlock with projection's request->attempt FK order.
         const locked = await one<LockedStateRow>(
           tx,
           `SELECT
@@ -748,7 +751,7 @@ export class DurableConditionalSettlementPort implements ConditionalSettlementPo
            FROM saas_attempts a
            JOIN saas_requests r ON r.tenant_id = a.tenant_id AND r.id = a.request_id
            WHERE a.tenant_id = $1 AND a.request_id = $2 AND a.id = $3
-           FOR UPDATE OF a, r`,
+           FOR NO KEY UPDATE OF a, r`,
           [normalized.tenantId, normalized.requestId, normalized.attemptId],
         );
         if (!locked || !permissionAndIdentityMatch(locked, normalized)) return conflict(normalized.idempotencyKey);
@@ -1016,6 +1019,8 @@ export class DurableNormalSuccessSettlementPort implements NormalSuccessTransact
     }
 
     return this.database.transaction(async (tx): Promise<NormalSuccessTransactionResult> => {
+      // State changes need writer exclusion, not key exclusion: deferred
+      // capacity projection FKs must be free to KEY SHARE these immutable IDs.
       const state = await one<NormalSuccessStateRow>(
         tx,
         `SELECT a.id AS attempt_id, a.tenant_id AS attempt_tenant_id,
@@ -1034,7 +1039,7 @@ export class DurableNormalSuccessSettlementPort implements NormalSuccessTransact
            FROM saas_attempts a
            JOIN saas_requests r ON r.tenant_id = a.tenant_id AND r.id = a.request_id
           WHERE a.tenant_id = $1 AND a.request_id = $2 AND a.id = $3
-          FOR UPDATE OF a, r`,
+          FOR NO KEY UPDATE OF a, r`,
         [input.tenantId, input.requestId, input.attemptId],
       );
       if (
@@ -1323,6 +1328,8 @@ export class DurableNormalSuccessSettlementPort implements NormalSuccessTransact
 
   async retainUnknown(input: NormalSuccessUncertaintyInput): Promise<AttemptRecord> {
     return this.database.transaction(async (tx) => {
+      // Same writer fence as completion; uncertainty must not recreate its
+      // attempt->request / projection request->attempt foreign-key deadlock.
       const state = await one<NormalSuccessStateRow>(
         tx,
         `SELECT a.id AS attempt_id, a.tenant_id AS attempt_tenant_id,
@@ -1341,7 +1348,7 @@ export class DurableNormalSuccessSettlementPort implements NormalSuccessTransact
            FROM saas_attempts a
            JOIN saas_requests r ON r.tenant_id = a.tenant_id AND r.id = a.request_id
           WHERE a.tenant_id = $1 AND a.request_id = $2 AND a.id = $3
-          FOR UPDATE OF a, r`,
+          FOR NO KEY UPDATE OF a, r`,
         [input.tenantId, input.requestId, input.attemptId],
       );
       if (
