@@ -32,3 +32,20 @@ test('incomplete, unsupported, over-bound and multiplier usage cannot settle', (
     ),
   );
 });
+
+test('cache aggregate plus TTL detail is priced once, reasoning remains included in output and mismatched aggregates fail', () => {
+  const snapshot = priceFixture('20', '10');
+  const usage = {
+    inputTotal: '10',
+    inputUncached: '2',
+    cacheRead: '3',
+    cacheWrite: '5',
+    cacheWrite5m: '4',
+    cacheWrite1h: '1',
+    outputTotal: '7',
+    reasoningOutput: '6',
+  };
+  assert.equal(calculateFastReceiptCharge(snapshot, usage), 17n);
+  assert.throws(() => calculateFastReceiptCharge(snapshot, { ...usage, cacheWrite: '6' }), /INCONSISTENT_USAGE/);
+  assert.throws(() => calculateFastReceiptCharge(snapshot, { ...usage, reasoningOutput: '8' }));
+});

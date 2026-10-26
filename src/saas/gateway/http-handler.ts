@@ -1,3 +1,4 @@
+import { FastGatewayExecutionError, type FastGatewayExecutorPort } from './fast/executor.js';
 import type { PersistentResponsesContinuationResolver, ResolvedResponsesHistory } from './responses-continuation-resolver.js';
 import { normalizeResponsesHistoryConversationId, type ResponsesHistoryIdentity } from './responses-continuation-history.js';
 import { randomUUID } from 'node:crypto';
@@ -492,6 +493,8 @@ export interface SaasGatewayReadinessProvider {
 }
 
 export interface SaasGatewayHttpOptions {
+  /** Opt-in text data plane; fallback is allowed only before durable intent. */
+  readonly fastGateway?: FastGatewayExecutorPort;
   readonly continuationHistoryResolver?: PersistentResponsesContinuationResolver;
   /**
    * G-B4: the Responses WebSocket surface. When present, an upgrade
@@ -2482,6 +2485,43 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
             stateless: ROUTE_CLIENT_OPERATIONS.has(path),
           })
         : undefined;
+    if (options.fastGateway) {
+      const fastClient = new NodePreparedEvidenceClientStream(req, res, requestId);
+      try {
+        const handled = await options.fastGateway.execute({
+          requestId,
+          authenticatedCaller,
+          path,
+          publicModel: model,
+          protocol,
+          body,
+          clientAddress,
+          idempotencyKey: requestIdempotencyKey,
+          client: fastClient,
+          selected: (mode, reason) => {
+            if (!res.headersSent) {
+              res.setHeader('x-model-router-execution-mode', mode === 'fast' ? 'fast-reserved-max' : 'strict');
+              if (mode === 'strict') res.setHeader('x-model-router-fast-fallback', reason);
+            }
+          },
+        });
+        if (handled) return true;
+      } catch (error) {
+        if (res.headersSent) await fastClient.abort();
+        else
+          sendHttpError(
+            res,
+            new GatewayHttpError(
+              error instanceof FastGatewayExecutionError ? error.status : 503,
+              error instanceof FastGatewayExecutionError ? error.code : 'FAST_GATEWAY_UNAVAILABLE',
+            ),
+            requestId,
+          );
+        return true;
+      } finally {
+        fastClient.dispose();
+      }
+    }
     let prepared: RequestPreparationResult;
     try {
       prepared = await preparation.prepare({

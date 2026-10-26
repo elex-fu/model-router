@@ -276,12 +276,49 @@ test('real Redis authoritative fast admission', { skip: !enabled, timeout: 30000
       assert.equal(await lease.assertValid(), false);
       await assert.rejects(lease.renew(), /lease lost/);
       assert.equal((await service.acquire({ ...request, requestId: randomUUID() })).allowed, false);
-      await delay(900);
+      await delay(2100);
       admitted(await service.acquire({ ...request, requestId: randomUUID() }));
       await lease.release(); // stale release may remove only its own fenced member
       assert.equal((await service.acquire({ ...request, requestId: randomUUID() })).allowed, false);
     },
   );
+  await t.test('low custom grace covers a delayed valid send plus its full upstream lifetime', async () => {
+    const namespace = randomUUID();
+    const service = await f.open(namespace, { maxTtlMs: 90000, abortGraceMs: 1, renewIntervalMs: 10000 });
+    const request = input({ ttlMs: 2000, limits: { account: { concurrency: 1 } } });
+    const lease = admitted(await service.acquire(request));
+    const tag = createHash('sha256')
+      .update(JSON.stringify([namespace]))
+      .digest('hex');
+    const member = createHash('sha256')
+      .update(JSON.stringify([request.tenantId, request.requestId]))
+      .digest('hex');
+    const leaseKey = `mr:fast:{${tag}}:lease:${member}`;
+    const inspect = async () => {
+      const raw = await f.inspector.get(leaseKey);
+      assert.ok(raw);
+      const record = JSON.parse(raw) as { renewBy: number; untilMs: number };
+      // Latest permitted send + complete transport lifetime + independent abort grace.
+      assert.equal(record.untilMs, record.renewBy + request.ttlMs + 1);
+      const keys = await f.inspector.keys(`mr:fast:{${tag}}:slots:*`);
+      for (const key of keys) assert.equal(await f.inspector.zScore(key, member), record.untilMs);
+      return record;
+    };
+    const acquired = await inspect();
+    await delay(300);
+    assert.equal(await lease.assertValid(), true, 'delayed send still has a live ticket');
+    await lease.renew();
+    const renewed = await inspect();
+    assert.ok(renewed.untilMs > acquired.untilMs);
+    // At this time the old ttl+grace formula would have expired, but a late send
+    // from the last acknowledged renewal could still be running. Do not renew.
+    await delay(2200);
+    assert.equal(await lease.assertValid(), false);
+    assert.equal((await service.acquire({ ...request, requestId: randomUUID() })).allowed, false);
+    const meta = JSON.parse((await f.inspector.get(`mr:fast:{${tag}}:generation`)) ?? '{}');
+    assert.equal(meta.horizon, 90000 + 30000 + 1);
+    await lease.release(); // test represents known upstream completion, not client abort
+  });
   await t.test('a shorter shared lease never shortens the longer holder TTL', async () => {
     const service = await f.open();
     admitted(await service.acquire(input({ ttlMs: 800, limits: { account: { concurrency: 2 } } })));
@@ -373,7 +410,7 @@ test('real Redis authoritative fast admission', { skip: !enabled, timeout: 30000
           allowed: false,
           reason: 'rate_limited',
         });
-        await delay(230);
+        await delay(330);
         admitted(await healthy.acquire({ ...request, requestId: randomUUID() }));
       } finally {
         restricted.destroy();
@@ -419,7 +456,8 @@ test('real Redis authoritative fast admission', { skip: !enabled, timeout: 30000
   });
   await t.test('real process death rejects acquire/renew; reopening restored old sentinel quarantines', async () => {
     const namespace = randomUUID();
-    const service = await f.open(namespace);
+    const configuration = { maxTtlMs: 90000, abortGraceMs: 1, renewIntervalMs: 10000 };
+    const service = await f.open(namespace, configuration);
     const lease = admitted(await service.acquire(input()));
     const keys = await f.inspector.keys('mr:fast:*:generation');
     const before = await Promise.all(keys.map(async (key) => [key, await f.inspector.get(key)] as const));
@@ -434,8 +472,8 @@ test('real Redis authoritative fast admission', { skip: !enabled, timeout: 30000
     } finally {
       inspector.destroy();
     }
-    const restarted = await f.open(namespace, { drained: false });
-    assert.equal(restarted.readyInMs, 61000);
+    const restarted = await f.open(namespace, { ...configuration, drained: false });
+    assert.equal(restarted.readyInMs, 90000 + 30000 + 1);
     assert.equal((await restarted.acquire(input())).allowed, false);
   });
 });

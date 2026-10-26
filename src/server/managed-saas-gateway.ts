@@ -1,3 +1,13 @@
+import { FastGatewayExecutor, type FastGatewayExecutorPort } from '../saas/gateway/fast/executor.js';
+import { createFastGatewayJournal } from '../saas/gateway/fast/journal.js';
+import { createPostgresFastGatewaySnapshotLoader } from '../saas/gateway/fast/postgres-snapshot-loader.js';
+import { openRedisFastGatewayAdmission } from '../saas/gateway/fast/redis-admission.js';
+import { createRedisFastGatewaySnapshotCacheStore } from '../saas/gateway/fast/redis-snapshot-store.js';
+import {
+  createRuntimeFastGatewaySnapshotSource,
+  fastGatewayModelCompatibility,
+} from '../saas/gateway/fast/runtime-snapshot.js';
+import { CachedFastGatewaySnapshots } from '../saas/gateway/fast/snapshots.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import { SaasBillingGroupsService } from '../saas/billing/groups/service.js';
@@ -331,6 +341,7 @@ export interface SaasGatewayImageMediaOptions {
 }
 
 export interface ManagedSaasGatewayCompositionDependencies {
+  readonly fastGateway?: FastGatewayExecutorPort;
   readonly continuationHistoryResolver?: PersistentResponsesContinuationResolver;
   /** Opt-in diagnostic sampling. Observer must enqueue without blocking or awaiting persistence. */
   readonly requestDiagnostics?: {
@@ -846,6 +857,7 @@ export function createManagedSaasGatewayComposition(
     ...(dependencies.responsesWsLimits ? { limits: dependencies.responsesWsLimits } : {}),
   });
   const httpHandler = createSaasGatewayHandler({
+    ...(dependencies.fastGateway ? { fastGateway: dependencies.fastGateway } : {}),
     ...(dependencies.continuationHistoryResolver ? { continuationHistoryResolver: dependencies.continuationHistoryResolver } : {}),
     authenticator: dependencies.authenticator,
     preparation,
@@ -977,7 +989,21 @@ export interface ManagedSaasProviderPayloadOptions {
   readonly providerRequestTransform?: import('../saas/gateway/provider-payload-compiler.js').ProviderRequestTransform;
 }
 
+export interface ManagedSaasFastGatewayOptions {
+  readonly mode: 'reserved-max';
+  readonly redisUrl: string;
+  readonly namespace: string;
+  /** Stable instance identity; each journal boot fences its prior allocation epoch. */
+  readonly allocationOwner: string;
+  readonly allocationTrancheMinorUnits: string;
+  /** Only a proven fresh/drained deployment may bypass conservative Redis restart quarantine. */
+  readonly redisDrained?: boolean;
+  /** Optional AES-256 deployment key enables encrypted shared L2; no plaintext credential values. */
+  readonly snapshotEncryptionKey?: Uint8Array;
+}
+
 export interface ManagedSaasGatewayProductionOptions {
+  readonly fastGateway?: ManagedSaasFastGatewayOptions;
   readonly continuationHistoryResolver?: PersistentResponsesContinuationResolver;
   readonly requestDiagnostics?: ManagedSaasGatewayCompositionDependencies['requestDiagnostics'];
   readonly capacityCompletion?: (requestId: string) => Promise<void>;
@@ -2026,6 +2052,31 @@ export function createPostgresDispatchLeaseProvider(
  * adapters. Missing caller/admission/route/KMS/config capabilities throw
  * before startup can bind the gateway listener.
  */
+function fastGatewayConfiguration(
+  options: ManagedSaasGatewayProductionOptions,
+): ManagedSaasFastGatewayOptions | undefined {
+  if (options.fastGateway) return options.fastGateway;
+  const mode = process.env.MODEL_ROUTER_FAST_GATEWAY;
+  if (mode === undefined || mode === '' || mode === 'off') return undefined;
+  if (mode !== 'reserved-max') throw new ManagedSaasGatewayCompositionError('INVALID_CONFIGURATION');
+  const redisUrl = process.env.MODEL_ROUTER_FAST_REDIS_URL ?? process.env.MODEL_ROUTER_SAAS_GATEWAY_REDIS_URL;
+  const namespace = process.env.MODEL_ROUTER_FAST_NAMESPACE;
+  const allocationOwner = process.env.MODEL_ROUTER_FAST_OWNER;
+  if (!redisUrl || !namespace || !allocationOwner)
+    throw new ManagedSaasGatewayCompositionError('INVALID_CONFIGURATION');
+  return {
+    mode,
+    redisUrl,
+    namespace,
+    allocationOwner,
+    allocationTrancheMinorUnits: process.env.MODEL_ROUTER_FAST_CREDIT_TRANCHE_MINOR_UNITS ?? '1000000',
+    redisDrained: process.env.MODEL_ROUTER_FAST_REDIS_DRAINED === '1',
+    ...(process.env.MODEL_ROUTER_FAST_SNAPSHOT_KEY_BASE64
+      ? { snapshotEncryptionKey: Buffer.from(process.env.MODEL_ROUTER_FAST_SNAPSHOT_KEY_BASE64, 'base64') }
+      : {}),
+  };
+}
+
 export function createManagedSaasGatewayProductionComposition(
   database: SaasDatabase,
   options: ManagedSaasGatewayProductionOptions,
@@ -2581,6 +2632,95 @@ export function createManagedSaasGatewayProductionComposition(
         })
       : undefined;
   const payload = createProviderPayloadCompiler(options);
+  const fastConfig = fastGatewayConfiguration(options);
+  let fastClose: (() => Promise<void>) | undefined;
+  let closeFastResources: (() => Promise<void>) | undefined;
+  let fastGateway: FastGatewayExecutorPort | undefined;
+  if (fastConfig) {
+    if (fastConfig.mode !== 'reserved-max') throw new ManagedSaasGatewayCompositionError('INVALID_CONFIGURATION');
+    const snapshotSource = createPostgresFastGatewaySnapshotLoader({
+      database,
+      caller: options.caller,
+      entitlement: new PostgresRequestPreparationEntitlementAdapter(options.entitlement, byokEntitlements),
+      createAuthority: (scopedDatabase) =>
+        new PostgresRequestPreparationAuthorityAdapter({
+          database: scopedDatabase,
+          ...(options.providerNativeProtocol ? { providerNativeProtocol: options.providerNativeProtocol } : {}),
+          routes: new SaasRouteConfigService(scopedDatabase),
+          commercial: new SaasCommercialMeteringPolicyService(scopedDatabase),
+          catalog: new SaasCatalogService(scopedDatabase),
+          byokEntitlements: new ByokServicePlanService(scopedDatabase),
+          pricing: new SaasPricingService(scopedDatabase),
+        }),
+      maxBodyBytes: options.maxBodyBytes,
+      accountMaxConcurrency: options.maxConcurrency,
+    });
+    const runtimeSnapshotSource = createRuntimeFastGatewaySnapshotSource(snapshotSource, {
+      modelCompatibility: options.providerPayload.modelCompatibility,
+      authenticationHeader: options.resolveAuthenticationHeader,
+    });
+    // Initialization starts once, outside individual requests. A failed Redis
+    // authority never falls back to a second strict dispatch after an intent.
+    const ready = openRedisFastGatewayAdmission({
+      url: fastConfig.redisUrl,
+      namespace: fastConfig.namespace,
+      maxTtlMs: options.timeoutMs,
+      drained: fastConfig.redisDrained,
+    }).then((admission) => {
+      const snapshots = new CachedFastGatewaySnapshots(
+        runtimeSnapshotSource,
+        fastConfig.snapshotEncryptionKey
+          ? {
+              encryptionKey: fastConfig.snapshotEncryptionKey,
+              namespace: fastConfig.namespace,
+              store: createRedisFastGatewaySnapshotCacheStore(admission.cacheCommands),
+            }
+          : {},
+      );
+      const journal = createFastGatewayJournal(database, {
+        allocationOwner: fastConfig.allocationOwner,
+        allocationTrancheMinorUnits: fastConfig.allocationTrancheMinorUnits,
+      });
+      closeFastResources = async () => {
+        await journal.close();
+        await admission.close();
+      };
+      return new FastGatewayExecutor({
+        snapshots,
+        admission,
+        journal,
+        unsealer,
+        payload: (candidate) =>
+          createProviderPayloadCompiler({
+            ...options,
+            providerPayload: {
+              ...options.providerPayload,
+              modelCompatibility: (input) => fastGatewayModelCompatibility(candidate, input),
+            },
+          }),
+        allocationOwner: fastConfig.allocationOwner,
+        timeoutMs: options.timeoutMs,
+        transport: {
+          fetch: options.fetch,
+          timeoutMs: options.timeoutMs,
+          resolveDispatchProfile: createProviderDispatchProfileResolver(options),
+          endpointPolicy: options.endpointPolicy,
+          ...(options.providerHttpTestAddressCapability
+            ? { testAddressCapability: options.providerHttpTestAddressCapability }
+            : {}),
+          ...(options.providerHttpEgressAllowlist ? { egressAllowlist: options.providerHttpEgressAllowlist } : {}),
+        },
+      });
+    });
+    void ready.catch(() => undefined); // requests/readiness observe the same failure, not an unhandled rejection
+    fastGateway = { execute: async (input) => (await ready).execute(input) };
+    fastClose = async () => {
+      await ready.catch(() => undefined);
+      await closeFastResources?.();
+    };
+  }
+
+
   const keyService = new KeyService(database, {
     resolver: new PostgresSupplyProfileResolver(database),
   });
@@ -2616,6 +2756,7 @@ export function createManagedSaasGatewayProductionComposition(
   });
 
   return createManagedSaasGatewayComposition({
+    ...(fastGateway ? { fastGateway } : {}),
     ...(options.continuationHistoryResolver ? { continuationHistoryResolver: options.continuationHistoryResolver } : {}),
     ...(options.requestDiagnostics ? { requestDiagnostics: options.requestDiagnostics } : {}),
     authenticator: new CachedKeyAuthenticator(keyService),
@@ -2673,6 +2814,7 @@ export function createManagedSaasGatewayProductionComposition(
       close: async () => {
         // G-A1: stop the media recovery loops before the KMS (their PG
         // leases expire on their own; an in-flight cycle finishes first).
+        await fastClose?.();
         await videoRecoveryHandle?.stop();
         await imageStuckSweeper?.stop();
         await options.providerCredentialUnsealingKms.close();

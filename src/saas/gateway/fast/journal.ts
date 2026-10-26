@@ -109,7 +109,7 @@ WITH current_owner AS MATERIALIZED (
          credit.id, credit.epoch, $15::timestamptz, $17::text FROM credit
   UNION ALL
   SELECT $1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6::uuid, $7::text, $8::text, $16::text, NULL::text, $10::bigint, NULL::jsonb, $12::jsonb,
-         NULL::uuid, NULL::uuid, $15::timestamptz, $17::text WHERE $9::text IS NULL
+         NULL::uuid, NULL::uuid, $15::timestamptz, $17::text FROM current_owner WHERE $9::text IS NULL
   RETURNING id
 )
 SELECT id FROM inserted`;
@@ -119,6 +119,7 @@ interface AllocationRow {
   tenant_id: string;
   currency: string;
   wallet_id: string;
+  epoch: string;
   state: 'active' | 'retired';
   backing_minor_units: string;
   available_minor_units: string;
@@ -132,6 +133,10 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
   private timer?: NodeJS.Timeout;
   private running?: Promise<number>;
   private closed = false;
+  private workerStarted = false;
+  private wakeRequested = false;
+  private idleDelay = 25;
+  private pollDueAt = 0;
 
   constructor(
     private readonly database: SaasDatabase,
@@ -150,21 +155,56 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
     void this.ready.catch(() => options.onBackgroundError?.('FAST_JOURNAL_STARTUP_FAILED'));
   }
 
-  /** Factory starts this durable poller; the constructor stays deterministic for tests. */
+  /** RAM notifications are latency hints only: persisted jobs are always polled. */
   start(): void {
-    if (this.closed || this.timer) return;
-    const interval = this.options.workerPollMs ?? 100;
+    if (this.closed || this.workerStarted) return;
+    const interval = this.options.workerPollMs ?? 25;
     if (!Number.isSafeInteger(interval) || interval < 10) throw new Error('FAST_JOURNAL_INVALID_POLL_INTERVAL');
-    this.timer = setInterval(() => {
-      if (this.running) return;
-      this.running = this.runOnce(this.options.workerBatchSize ?? 32);
+    this.workerStarted = true;
+    this.idleDelay = interval;
+    this.scheduleWorker(interval);
+  }
+
+  private scheduleWorker(delay: number): void {
+    if (!this.workerStarted || this.closed || this.timer || this.running) return;
+    this.pollDueAt = Date.now() + delay;
+    this.timer = setTimeout(() => {
+      this.timer = undefined;
+      const base = this.options.workerPollMs ?? 25;
+      let next = base;
+      this.running = this.runOnce(this.options.workerBatchSize ?? 128);
       void this.running
-        .catch(() => this.options.onBackgroundError?.('FAST_JOURNAL_WORKER_FAILED'))
+        .then(
+          (count) => {
+            this.idleDelay = count ? base : Math.min(Math.max(1000, base), this.idleDelay * 2);
+            next = count >= (this.options.workerBatchSize ?? 128) ? 0 : this.idleDelay;
+          },
+          () => {
+            this.options.onBackgroundError?.('FAST_JOURNAL_WORKER_FAILED');
+            next = Math.max(1000, base);
+          },
+        )
         .finally(() => {
           this.running = undefined;
+          if (this.wakeRequested) next = base;
+          this.wakeRequested = false;
+          this.scheduleWorker(next);
         });
-    }, interval);
+    }, delay);
     this.timer.unref();
+  }
+
+  private wakeWorker(): void {
+    if (!this.workerStarted || this.closed) return;
+    this.idleDelay = this.options.workerPollMs ?? 25;
+    if (this.running) {
+      this.wakeRequested = true;
+      return;
+    }
+    if (this.timer && this.pollDueAt <= Date.now() + this.idleDelay) return;
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = undefined;
+    this.scheduleWorker(this.idleDelay);
   }
 
   async reserveIntent(input: FastReserveIntentInput): Promise<FastReserveResult> {
@@ -311,6 +351,7 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
       );
       if (result.rows[0]?.receipt_digest !== receiptDigest) throw new Error('FAST_JOURNAL_RECEIPT_CONFLICT');
     }
+    this.wakeWorker();
   }
 
   private scheduleReplenishment(tenantId: string, currency: string): void {
@@ -389,95 +430,165 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
       });
   }
 
-  /** Durable row-lock claims; a killed worker rolls back its claim and all posting effects. */
-  async runOnce(limit = 32): Promise<number> {
+  /** One durable, atomic batch claim. SIGKILL rolls back every claimed job and posting. */
+  async runOnce(limit = 128): Promise<number> {
     await this.ready;
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) throw new Error('FAST_JOURNAL_INVALID_BATCH');
-    let count = 0;
-    while (count < limit) {
-      const processed = await this.database.transaction(async (tx) => {
-        const job = await tx.query<{ intent_id: string }>(
-          "SELECT intent_id FROM saas_fast_billing_jobs WHERE state='pending' ORDER BY created_at,intent_id LIMIT 1 FOR UPDATE SKIP LOCKED",
-        );
-        if (!job.rows[0]) return false;
-        await this.settle(tx, job.rows[0].intent_id);
-        return true;
-      });
-      if (!processed) break;
-      count++;
-    }
-    return count;
+    return this.database.transaction(async (tx) => {
+      const jobs = await tx.query<{ intent_id: string }>(
+        `/* fast-journal:worker-claim */ SELECT intent_id FROM saas_fast_billing_jobs
+         WHERE state='pending' ORDER BY created_at,intent_id LIMIT $1 FOR UPDATE SKIP LOCKED`,
+        [limit],
+      );
+      if (jobs.rows.length === 0) return 0;
+      await this.settleBatch(
+        tx,
+        jobs.rows.map((job) => job.intent_id),
+      );
+      return jobs.rows.length;
+    });
   }
 
-  private async settle(tx: SqlExecutor, intentId: string): Promise<void> {
+  private async settleBatch(tx: SqlExecutor, intentIds: readonly string[]): Promise<void> {
     const result = await tx.query<SettlementRow>(
       `SELECT i.*, r.charge_minor_units, r.usage, r.usage_digest, r.outcome
-      FROM saas_fast_gateway_intents i JOIN saas_fast_gateway_receipts r ON r.intent_id=i.id WHERE i.id=$1`,
-      [intentId],
+       FROM saas_fast_gateway_intents i JOIN saas_fast_gateway_receipts r ON r.intent_id=i.id
+       WHERE i.id=ANY($1::uuid[]) ORDER BY i.tenant_id,i.currency,i.id`,
+      [intentIds],
     );
-    const row = result.rows[0];
-    if (!row) throw new Error('FAST_JOURNAL_MISSING_INTENT');
-    let charge: bigint;
-    try {
-      charge = calculateFastReceiptCharge(row.price_snapshot, row.usage);
-      if (
-        row.outcome !== 'succeeded' ||
-        row.charge_minor_units === null ||
-        charge !== BigInt(row.charge_minor_units) ||
-        charge > BigInt(row.max_cost_minor_units)
-      )
-        throw new Error('invalid charge');
-    } catch {
-      await tx.query(
-        "UPDATE saas_fast_billing_jobs SET state='blocked', attempts=attempts+1,last_error='receipt_price_mismatch' WHERE intent_id=$1",
-        [intentId],
-      );
-      return;
-    }
-    let ledgerId: string | null = null;
-    if (row.currency !== null) {
-      await tx.query(WALLET_FENCE_SQL, [saasAdvisoryKey.walletFence(row.tenant_id, row.currency)]);
-      const allocation = (
-        await tx.query<AllocationRow>('SELECT * FROM saas_fast_credit_allocations WHERE id=$1 FOR UPDATE', [
-          row.allocation_id,
-        ])
-      ).rows[0];
-      if (!allocation || allocation.tenant_id !== row.tenant_id || allocation.currency !== row.currency)
-        throw new Error('FAST_JOURNAL_ALLOCATION_MISMATCH');
-      if (charge > 0n) {
-        ledgerId = randomUUID();
-        await postLedger(tx, row, allocation.wallet_id, ledgerId, charge);
+    if (result.rows.length !== intentIds.length) throw new Error('FAST_JOURNAL_MISSING_INTENT');
+    const invalid: string[] = [];
+    const valid: Array<{ row: SettlementRow; charge: bigint; ledgerId: string | null }> = [];
+    for (const row of result.rows) {
+      try {
+        const charge = calculateFastReceiptCharge(row.price_snapshot, row.usage);
+        if (
+          row.outcome !== 'succeeded' ||
+          row.charge_minor_units === null ||
+          charge !== BigInt(row.charge_minor_units) ||
+          charge > BigInt(row.max_cost_minor_units)
+        ) {
+          throw new Error('invalid charge');
+        }
+        valid.push({ row, charge, ledgerId: charge > 0n ? randomUUID() : null });
+      } catch {
+        invalid.push(row.id);
       }
-      const maximum = BigInt(row.max_cost_minor_units);
-      const releasedBacking = allocation.state === 'active' ? charge : maximum;
-      const restoredAvailable = allocation.state === 'active' ? maximum - charge : 0n;
-      const updated = await tx.query(
-        `UPDATE saas_fast_credit_allocations
-        SET backing_minor_units=backing_minor_units-$2::bigint, available_minor_units=available_minor_units+$3::bigint
-        WHERE id=$1 AND backing_minor_units >= $2::bigint`,
-        [allocation.id, releasedBacking.toString(), restoredAvailable.toString()],
+    }
+    if (invalid.length) {
+      const blocked = await tx.query(
+        `UPDATE saas_fast_billing_jobs SET state='blocked',attempts=attempts+1,
+        last_error='receipt_price_mismatch' WHERE intent_id=ANY($1::uuid[]) AND state='pending'`,
+        [invalid],
       );
-      one(updated.rowCount);
+      if (blocked.rowCount !== invalid.length) throw new Error('FAST_JOURNAL_STATE_CONFLICT');
+    }
+    if (!valid.length) return;
+    const paid = valid.filter((item) => item.row.currency !== null);
+    if (paid.length) {
+      // Global deterministic wallet order avoids opposite-batch deadlocks. Claims
+      // are disjoint and never reacquired after a wallet fence is held.
+      const walletKeys = [
+        ...new Set(
+          paid.map(({ row }) => {
+            if (row.currency === null) throw new Error('FAST_JOURNAL_MISSING_CURRENCY');
+            return saasAdvisoryKey.walletFence(row.tenant_id, row.currency);
+          }),
+        ),
+      ].sort();
+      for (const key of walletKeys) await tx.query(WALLET_FENCE_SQL, [key]);
+      const allocations = await tx.query<AllocationRow>(
+        'SELECT * FROM saas_fast_credit_allocations WHERE id=ANY($1::uuid[]) ORDER BY id FOR UPDATE',
+        [[...new Set(paid.map(({ row }) => row.allocation_id))]],
+      );
+      const allocationById = new Map(allocations.rows.map((allocation) => [allocation.id, allocation]));
+      const credits = new Map<string, { id: string; release: bigint; restore: bigint }>();
+      const wallets = new Map<string, { id: string; tenantId: string; charge: bigint; ledgerId: string }>();
+      const postings: LedgerBatchRow[] = [];
+      for (const { row, charge, ledgerId } of paid) {
+        const allocation = row.allocation_id === null ? undefined : allocationById.get(row.allocation_id);
+        if (
+          !allocation ||
+          allocation.tenant_id !== row.tenant_id ||
+          allocation.currency !== row.currency ||
+          allocation.epoch !== row.allocation_epoch
+        )
+          throw new Error('FAST_JOURNAL_ALLOCATION_MISMATCH');
+        const maximum = BigInt(row.max_cost_minor_units);
+        const credit = credits.get(allocation.id) ?? { id: allocation.id, release: 0n, restore: 0n };
+        credit.release += allocation.state === 'active' ? charge : maximum;
+        credit.restore += allocation.state === 'active' ? maximum - charge : 0n;
+        credits.set(allocation.id, credit);
+        if (charge > 0n && ledgerId !== null) {
+          postings.push({
+            ledger_id: ledgerId,
+            intent_id: row.id,
+            tenant_id: row.tenant_id,
+            currency: allocation.currency,
+            charge: charge.toString(),
+            usage_digest: row.usage_digest,
+            wallet_id: allocation.wallet_id,
+            debit_id: randomUUID(),
+            credit_id: randomUUID(),
+          });
+          const wallet = wallets.get(allocation.wallet_id) ?? {
+            id: allocation.wallet_id,
+            tenantId: row.tenant_id,
+            charge: 0n,
+            ledgerId,
+          };
+          wallet.charge += charge;
+          wallets.set(wallet.id, wallet);
+        }
+      }
+      if (postings.length) {
+        await postLedgerBatch(tx, postings);
+        // The preceding command inserts every immutable ledger pair. Project
+        // their exact aggregate once per wallet; a valid same-wallet posting id
+        // establishes the existing projection context for the guard trigger.
+        for (const wallet of wallets.values()) {
+          const projected = await tx.query(
+            `/* fast-journal:worker-wallet */ WITH context AS MATERIALIZED (
+            SELECT set_config('saas.billing_ledger_projection_write','on',true),
+                   set_config('saas.billing_ledger_transaction_id',$4,true)
+          ) UPDATE saas_wallets SET posted_balance_minor_units=posted_balance_minor_units-$3::bigint,updated_at=now()
+            FROM context WHERE id=$1 AND tenant_id=$2 AND posted_balance_minor_units >= $3::bigint RETURNING id`,
+            [wallet.id, wallet.tenantId, wallet.charge.toString(), wallet.ledgerId],
+          );
+          one(projected.rowCount);
+        }
+      }
+      const restored = await tx.query(
+        `/* fast-journal:worker-credit */ UPDATE saas_fast_credit_allocations a
+        SET backing_minor_units=a.backing_minor_units-c.release,
+            available_minor_units=a.available_minor_units+c.restore
+        FROM jsonb_to_recordset($1::jsonb) AS c(id uuid,release bigint,restore bigint)
+        WHERE a.id=c.id AND a.backing_minor_units >= c.release RETURNING a.id`,
+        [fastJournalCanonicalJson([...credits.values()])],
+      );
+      if (restored.rowCount !== credits.size) throw new Error('FAST_JOURNAL_STATE_CONFLICT');
     }
     const completed = await tx.query(
-      `UPDATE saas_fast_billing_jobs SET state='completed', attempts=attempts+1,
-      ledger_transaction_id=$2,completed_at=now(),last_error=NULL WHERE intent_id=$1 AND state='pending'`,
-      [intentId, ledgerId],
+      `/* fast-journal:worker-complete */ UPDATE saas_fast_billing_jobs j
+      SET state='completed',attempts=attempts+1,ledger_transaction_id=c.ledger_id,completed_at=now(),last_error=NULL
+      FROM jsonb_to_recordset($1::jsonb) AS c(intent_id uuid,ledger_id uuid)
+      WHERE j.intent_id=c.intent_id AND j.state='pending'`,
+      [fastJournalCanonicalJson(valid.map(({ row, ledgerId }) => ({ intent_id: row.id, ledger_id: ledgerId })))],
     );
-    one(completed.rowCount);
+    if (completed.rowCount !== valid.length) throw new Error('FAST_JOURNAL_STATE_CONFLICT');
   }
 
   /** Waits for all known pending successes; blocked unknowns remain durable and backed. */
   async drain(): Promise<void> {
     await Promise.all([...this.pendingReplenishments.values()]);
     if (this.running) await this.running;
-    while (await this.runOnce(this.options.workerBatchSize ?? 32)) {
+    while (await this.runOnce(this.options.workerBatchSize ?? 128)) {
       /* durable drain */
     }
   }
   async close(): Promise<void> {
     this.closed = true;
-    if (this.timer) clearInterval(this.timer);
+    if (this.timer) clearTimeout(this.timer);
     this.timer = undefined;
     await this.drain();
     await this.retireAllocations();
@@ -490,6 +601,7 @@ interface SettlementRow {
   tenant_id: string;
   currency: string | null;
   allocation_id: string | null;
+  allocation_epoch: string | null;
   max_cost_minor_units: string;
   price_snapshot: unknown;
   charge_minor_units: string | null;
@@ -511,22 +623,33 @@ export function calculateFastReceiptCharge(snapshot: unknown, usage: Readonly<Re
   if (usage.perUnitUnits !== undefined && usage.perUnitUnits !== null && usage.perUnitUnits !== '0') {
     throw new Error('FAST_JOURNAL_UNSUPPORTED_USAGE');
   }
+  const count = (key: string): bigint | null =>
+    usage[key] == null ? null : parseMinorUnits(usage[key], { allowZero: true });
+  const genericWrite = count('cacheWrite');
+  const write5m = count('cacheWrite5m');
+  const write1h = count('cacheWrite1h');
+  const detailedWrite = (write5m ?? 0n) + (write1h ?? 0n);
+  if (genericWrite !== null && genericWrite > 0n && detailedWrite > 0n && genericWrite !== detailedWrite) {
+    throw new Error('FAST_JOURNAL_INCONSISTENT_USAGE');
+  }
+  // Provider observations may carry both an aggregate cache-write total and
+  // TTL subsets. The existing calculator intentionally accepts only one price
+  // family; retain the subsets and do not bill or bound the aggregate twice.
   const normalized: TokenUsageInput = {
     inputTotal: input,
     inputUncached: usage.inputUncached ?? null,
     outputTotal: output,
     cacheRead: usage.cacheRead ?? null,
-    cacheWrite: usage.cacheWrite ?? null,
+    cacheWrite: detailedWrite > 0n ? '0' : (usage.cacheWrite ?? null),
     cacheWrite5m: usage.cacheWrite5m ?? null,
     cacheWrite1h: usage.cacheWrite1h ?? null,
     reasoningOutput: usage.reasoningOutput ?? null,
   };
-  const buckets = ['inputUncached', 'cacheRead', 'cacheWrite', 'cacheWrite5m', 'cacheWrite1h'] as const;
-  if (buckets.some((key) => usage[key] !== null && usage[key] !== undefined)) {
-    const total = buckets.reduce(
-      (sum, key) => sum + (usage[key] == null ? 0n : parseMinorUnits(usage[key], { allowZero: true })),
-      0n,
-    );
+  if (['inputUncached', 'cacheRead', 'cacheWrite', 'cacheWrite5m', 'cacheWrite1h'].some((key) => usage[key] != null)) {
+    const total =
+      (count('inputUncached') ?? 0n) +
+      (count('cacheRead') ?? 0n) +
+      (detailedWrite > 0n ? detailedWrite : (genericWrite ?? 0n));
     if (total !== BigInt(input)) throw new Error('FAST_JOURNAL_INCONSISTENT_USAGE');
   }
   if (BigInt(input) > BigInt(price.maxInputTokens) || BigInt(output) > BigInt(price.maxOutputTokens))
@@ -557,47 +680,40 @@ function validatePriceSnapshot(snapshot: unknown): FastPriceSnapshot {
   return price;
 }
 
-async function postLedger(
-  tx: SqlExecutor,
-  row: SettlementRow,
-  walletId: string,
-  ledgerId: string,
-  charge: bigint,
-): Promise<void> {
-  // The immutable journal id is the ledger's business key. Do not swallow a
-  // unique violation: the entire job transaction must roll back before replay.
-  await tx.query(
-    `WITH posting AS (
-    INSERT INTO saas_ledger_transactions(id,tenant_id,currency,idempotency_namespace,business_key,source_type,
-      amount_minor_units,metadata_ref,price_snapshot_ref,usage_evidence_ref)
-    VALUES ($1,$2,$3,'fast-journal-v1',$4,'billing_settlement',$5,$6,$7,$8) RETURNING id
-  ) INSERT INTO saas_ledger_entries(id,transaction_id,tenant_id,currency,direction,amount_minor_units,account_type,account_ref,wallet_id)
-    SELECT e.id,posting.id,$2,$3,e.direction,$5,e.account_type,e.account_ref,e.wallet_id FROM posting CROSS JOIN (VALUES
-      ($9::uuid,'debit','wallet',$11::text,$11::uuid),($10::uuid,'credit','billing_revenue','fast-journal-v1',NULL::uuid)
-    ) e(id,direction,account_type,account_ref,wallet_id)`,
-    [
-      ledgerId,
-      row.tenant_id,
-      row.currency,
-      row.id,
-      charge.toString(),
-      `fast-intent:${row.id}`,
-      `fast-price:${row.id}`,
-      `fast-receipt:${row.id}:${row.usage_digest}`,
-      randomUUID(),
-      randomUUID(),
-      walletId,
-    ],
+interface LedgerBatchRow {
+  readonly ledger_id: string;
+  readonly intent_id: string;
+  readonly tenant_id: string;
+  readonly currency: string;
+  readonly charge: string;
+  readonly usage_digest: string;
+  readonly wallet_id: string;
+  readonly debit_id: string;
+  readonly credit_id: string;
+}
+async function postLedgerBatch(tx: SqlExecutor, rows: readonly LedgerBatchRow[]): Promise<void> {
+  // No ON CONFLICT: an unexpected duplicate aborts the whole batch. A genuinely
+  // committed job is excluded by the durable completed state on replay.
+  const posted = await tx.query(
+    `/* fast-journal:worker-ledger */
+    WITH data AS MATERIALIZED (
+      SELECT * FROM jsonb_to_recordset($1::jsonb) AS d(ledger_id uuid,intent_id uuid,tenant_id uuid,currency text,
+        charge bigint,usage_digest text,wallet_id uuid,debit_id uuid,credit_id uuid)
+    ), posting AS (
+      INSERT INTO saas_ledger_transactions(id,tenant_id,currency,idempotency_namespace,business_key,source_type,
+        amount_minor_units,metadata_ref,price_snapshot_ref,usage_evidence_ref)
+      SELECT ledger_id,tenant_id,currency,'fast-journal-v1',intent_id::text,'billing_settlement',charge,
+        'fast-intent:' || intent_id::text,'fast-price:' || intent_id::text,
+        'fast-receipt:' || intent_id::text || ':' || usage_digest FROM data RETURNING id
+    ) INSERT INTO saas_ledger_entries(id,transaction_id,tenant_id,currency,direction,amount_minor_units,account_type,account_ref,wallet_id)
+      SELECT e.id,p.id,d.tenant_id,d.currency,e.direction,d.charge,e.account_type,e.account_ref,e.wallet_id
+      FROM data d JOIN posting p ON p.id=d.ledger_id CROSS JOIN LATERAL (VALUES
+        (d.debit_id,'debit','wallet',d.wallet_id::text,d.wallet_id),
+        (d.credit_id,'credit','billing_revenue','fast-journal-v1',NULL::uuid)
+      ) e(id,direction,account_type,account_ref,wallet_id)`,
+    [fastJournalCanonicalJson(rows)],
   );
-  const projected = await tx.query(
-    `WITH context AS MATERIALIZED (
-    SELECT set_config('saas.billing_ledger_projection_write','on',true),
-           set_config('saas.billing_ledger_transaction_id',$4,true)
-  ) UPDATE saas_wallets SET posted_balance_minor_units=posted_balance_minor_units-$3::bigint,updated_at=now()
-    FROM context WHERE id=$1 AND tenant_id=$2 AND posted_balance_minor_units >= $3::bigint RETURNING id`,
-    [walletId, row.tenant_id, charge.toString(), ledgerId],
-  );
-  one(projected.rowCount);
+  if (posted.rowCount !== rows.length * 2) throw new Error('FAST_JOURNAL_LEDGER_PAIR_MISMATCH');
 }
 
 export function createFastGatewayJournal(

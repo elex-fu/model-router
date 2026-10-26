@@ -44,10 +44,13 @@ The gateway must:
    a conservative ceiling/grace based on that transport, not the client timeout.
 
 Each lease has a short renewable validity deadline, a longer occupancy expiry
-`last renewal + ttlMs + abortGraceMs` and an owner-token/binding fence. The default
-grace is 30 seconds. The short renewal deadline is at most three renewal intervals
-and at most `ttlMs`. Renewal after that deadline fails rather than resurrecting an
-expired lease. A stale release can remove only that request's member; lease records
+`last renewal + sendValidityMs + ttlMs + abortGraceMs` and an owner-token/binding
+fence. The default grace is 30 seconds. The short renewal deadline (`sendValidityMs`)
+is at most three renewal intervals and at most `ttlMs`. A ticket can start its
+full upstream lifetime just before that deadline, so occupancy includes this send
+delay independently of abort grace. A smaller custom grace therefore does not
+shorten occupancy below the latest permitted send's lifetime bound. Renewal after
+that deadline fails rather than resurrecting an expired lease. A stale release can remove only that request's member; lease records
 outlive occupancy and terminal tombstones default to 24 hours. New work must have a
 new canonical request ID. Financial durable idempotency remains necessary beyond
 the bounded Redis tombstone retention.
@@ -89,7 +92,9 @@ orphans expire; no PostgreSQL fallback or speculative upstream send is permitted
 Missing sentinel, malformed state, unavailable connection or mismatched generation
 fails closed. Requests never initialize an empty Redis namespace. All instances
 must use the same namespace and maximum horizon. A new namespace or changed Redis
-run ID defaults to a shared quarantine of `max(61 seconds, maxTtlMs + abortGraceMs)`.
+run ID defaults to a shared quarantine of
+`max(61 seconds, maxSendValidityMs + maxTtlMs + abortGraceMs)`, where
+`maxSendValidityMs = min(maxTtlMs, 3 * configured renewIntervalMs)`.
 This lets prior rate windows and every possible orphan upstream occupancy expire
 without consulting PostgreSQL per request. Restoring an old RDB does not bypass
 this quarantine because Redis process `run_id` changes. A disconnected managed
@@ -124,3 +129,9 @@ Captured local gate (2026-10-26): Node 24.22.1 and owned Redis 7.4.2,
 checks). Both whole-source and focused-test strict TypeScript checks passed; Biome
 on the changed TypeScript files passed with no warnings. These are correctness
 results, not a throughput or end-to-end HTTP performance claim.
+
+Follow-up gate on the same date: **22 passed, 0 failed/skipped**, including a
+1 ms custom-grace delayed-send regression, exact Redis lease/ZSET horizon checks
+after acquire and renew, and real restart quarantine of 120,001 ms for a 90-second
+transport ceiling plus a 30-second send-validity window. Focused strict TypeScript
+and changed-file Biome passed. No additional Redis command was added to admission.

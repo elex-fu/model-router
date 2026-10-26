@@ -140,7 +140,8 @@ for i,limit in ipairs(p.limits) do
   if requests>9000000000000000-1 or tokens>9000000000000000-p.tokenUnits then return cjson.encode({ok=false,reason='unavailable'}) end
   rates[i]=rate
 end
-record={token=p.token,binding=p.binding,state='active',untilMs=now+p.ttl+p.grace,renewBy=now+p.renew}
+-- Dispatch may begin just before renewBy and then consume the full upstream TTL.
+record={token=p.token,binding=p.binding,state='active',untilMs=now+p.renew+p.ttl+p.grace,renewBy=now+p.renew}
 local encoded=cjson.encode(record)
 for i,limit in ipairs(p.limits) do
   if limit.rpm>0 or limit.tpm>0 then
@@ -159,7 +160,7 @@ for i,limit in ipairs(p.limits) do
 end
 -- Last mutation is the receipt. Any preceding command failure only over-reserves;
 -- the caller fails closed and MUST NOT dispatch without this acknowledged receipt.
-redis.call('SET',KEYS[2],encoded,'PX',p.ttl+p.grace+p.retention)
+redis.call('SET',KEYS[2],encoded,'PX',p.renew+p.ttl+p.grace+p.retention)
 return reply(record)`;
 const RENEW = `${PREFIX}
 if not matches(record) or record.state~='active' or record.renewBy<=now then return cjson.encode({ok=false,reason='unavailable'}) end
@@ -169,7 +170,7 @@ for i,limit in ipairs(p.limits) do
     if not score or tonumber(score)<=now then return cjson.encode({ok=false,reason='unavailable'}) end
   end
 end
-record.untilMs=now+p.ttl+p.grace; record.renewBy=now+p.renew
+record.untilMs=now+p.renew+p.ttl+p.grace; record.renewBy=now+p.renew
 for i,limit in ipairs(p.limits) do
   if limit.concurrency>0 then
     redis.call('ZADD',KEYS[3+i*2],'XX',record.untilMs,p.member)
@@ -177,7 +178,7 @@ for i,limit in ipairs(p.limits) do
     redis.call('PEXPIREAT',KEYS[3+i*2],math.ceil(tonumber(latest[2])))
   end
 end
-redis.call('SET',KEYS[2],cjson.encode(record),'PX',p.ttl+p.grace+p.retention)
+redis.call('SET',KEYS[2],cjson.encode(record),'PX',p.renew+p.ttl+p.grace+p.retention)
 return reply(record)`;
 const RELEASE = `${PREFIX}
 if not matches(record) then return cjson.encode({ok=false,reason='unavailable'}) end
@@ -260,7 +261,10 @@ export class RedisFastGatewayAdmission implements FastGatewayAdmission {
       !integer(this.retention, options.maxTtlMs + this.grace, 604_800_000)
     )
       throw new Error('Invalid fast admission options');
-    this.horizon = Math.max(61_000, options.maxTtlMs + this.grace);
+    // A valid ticket can wait until renewBy before starting its full upstream TTL.
+    // Quarantine must cover that send delay as well as execution and abort grace.
+    const maxSendValidityMs = Math.min(options.maxTtlMs, this.renewEvery * 3);
+    this.horizon = Math.max(61_000, maxSendValidityMs + options.maxTtlMs + this.grace);
     this.prefix = `mr:fast:{${digest([options.namespace])}}`;
   }
   /** Bootstrap only, never called by acquire. drained requires externally verified upstream drain. */

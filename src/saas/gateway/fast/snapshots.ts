@@ -19,6 +19,16 @@ export interface FastGatewayRateLimits {
   readonly concurrency: number;
 }
 export interface FastGatewayCandidate {
+  /** Frozen deployment policy captured only by the cold source; never resolved per send. */
+  readonly dispatch?: {
+    readonly authenticationHeader: { readonly headerName: string; readonly valueFormat?: 'raw' | 'bearer' };
+    readonly modelCompatibility: {
+      readonly providerId: string;
+      readonly productId: string;
+      readonly providerModel: string;
+      readonly providerProtocol: string;
+    };
+  };
   readonly authority: RequestPreparationCandidateAuthority;
   /** Sealed envelope only; plaintext credentials must never enter a snapshot. */
   readonly credential: GatewayProviderCredentialUnsealInput;

@@ -237,8 +237,11 @@ function supportedRuntime(row: Row, now: number): { rpm: number | null; tpm: num
     const health = record(row.health);
     if (!['healthy', 'degraded'].includes(String(health.state))) unsupported('runtime_health');
     if (health.cooldown_until !== null && timestamp(health.cooldown_until) > now) unsupported('runtime_health');
-    if (health.half_open_probe_at !== null && health.half_open_probe_at !== undefined) unsupported('runtime_health');
-  } else unsupported('runtime_health');
+    // A retained historical probe timestamp is not an active probe lease once
+    // state is healthy/degraded. New fast outcomes are owned by Redis.
+  }
+  // Verified active accounts without history are neutral, not unhealthy.
+  // Requiring a PG success row here would recreate a legacy-write prerequisite.
   return { rpm: nullableLimit(account.rpm_limit), tpm: nullableLimit(account.tpm_limit) };
 }
 

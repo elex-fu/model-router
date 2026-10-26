@@ -315,6 +315,7 @@ function fixture(mode: 'byok' | 'platform' = 'byok') {
     definition_digest: 'a'.repeat(64),
     created_at: iso(-10_000),
   };
+  let hasHealth = true;
   const health: Row = { state: 'healthy', cooldown_until: null, half_open_probe_at: null, observed_at: iso(-120_000) };
   const expiryRow: Row = { expires_at: iso(10_000), subscription_expires_at: iso(8000) };
   const statements: { sql: string; values: readonly unknown[] }[] = [];
@@ -364,7 +365,8 @@ function fixture(mode: 'byok' | 'platform' = 'byok') {
         ];
       else if (sql.includes('fast-snapshot:policy')) rows = [policy];
       else if (sql.includes('fixture:authority-expiries')) rows = [expiryRow];
-      else if (sql.includes('fast-snapshot:account-runtime')) rows = [{ account, health, model_cooling: false }];
+      else if (sql.includes('fast-snapshot:account-runtime'))
+        rows = [{ account, health: hasHealth ? health : null, model_cooling: false }];
       else if (sql.includes('WITH base_version AS')) rows = [version];
       else if (sql.includes('FROM saas_customer_price_versions')) rows = [price];
       else if (sql.includes('FROM saas_supplier_cost_versions'))
@@ -441,6 +443,9 @@ function fixture(mode: 'byok' | 'platform' = 'byok') {
     version,
     price,
     health,
+    omitHealth: () => {
+      hasHealth = false;
+    },
     expiryRow,
     keyRow,
     principal,
@@ -641,4 +646,22 @@ test('snapshot TTL anchors to transaction BEGIN before any repeatable-read acqui
   assert.doesNotMatch(clock ?? '', /clock_timestamp/);
   assert.equal(snapshot.observedAtMs, NOW);
   assert.equal(snapshot.validUntilMs, NOW + 5000);
+});
+
+test('verified fresh accounts need no legacy PG success-health write', async () => {
+  for (const mode of ['byok', 'platform'] as const) {
+    const f = fixture(mode);
+    f.omitHealth();
+    assert.ok(await f.loader.resolve(f.input));
+  }
+});
+test('historical probe timestamp does not suppress healthy fast accounts', async () => {
+  const f = fixture();
+  f.health.half_open_probe_at = iso(-120000);
+  assert.ok(await f.loader.resolve(f.input));
+  f.health.cooldown_until = iso(1000);
+  assert.equal(await f.loader.resolve(f.input), null);
+  f.health.cooldown_until = null;
+  f.health.state = 'half_open';
+  assert.equal(await f.loader.resolve(f.input), null);
 });
