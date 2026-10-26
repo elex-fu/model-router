@@ -25,6 +25,8 @@ export interface FastReserveIntentInput {
   /** Trusted minimum of snapshot and local concurrency caps, never a client field. */
   readonly allocationTargetConcurrency?: number;
   readonly sendDeadlineMs: number;
+  /** Cancels preparation/recovery only; an in-flight write remains uncertain. */
+  readonly signal?: AbortSignal;
 }
 export interface FastIntent {
   readonly id: string;
@@ -83,6 +85,7 @@ export interface FastJournalOptions {
   readonly workerBatchSize?: number;
   readonly onBackgroundError?: (code: string) => void;
   readonly onCreditUnavailable?: (reason: 'credit_busy' | 'credit_not_ready') => void;
+  readonly onCreditRecovery?: (reason: 'credit_busy' | 'credit_not_ready') => void;
 }
 
 /** Canonical JSON preserves bigint exactly and rejects non-JSON authority facts. */
@@ -150,8 +153,13 @@ WITH current_owner AS MATERIALIZED (
          NULL::uuid, NULL::uuid, $15::timestamptz, $17::text FROM current_owner WHERE $9::text IS NULL
   RETURNING id
 )
-SELECT id,false AS credit_busy FROM inserted
-UNION ALL SELECT NULL::uuid,EXISTS(SELECT 1 FROM candidate) AS credit_busy WHERE NOT EXISTS(SELECT 1 FROM inserted)`;
+SELECT id,false AS credit_busy,false AS credit_recoverable FROM inserted
+UNION ALL SELECT NULL::uuid,EXISTS(SELECT 1 FROM candidate) AS credit_busy,
+  (SELECT COALESCE(SUM(a.available_minor_units),0) >= $10::bigint
+     FROM saas_fast_credit_allocations a
+    WHERE a.tenant_id=$4 AND a.currency=$9 AND a.owner=$13 AND a.epoch=$14 AND a.state='active')
+  AS credit_recoverable
+WHERE NOT EXISTS(SELECT 1 FROM inserted)`;
 
 interface AllocationRow {
   id: string;
@@ -295,7 +303,7 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
     let requestedTarget = this.tranche ?? 0n;
     digest(input.requestFingerprint);
     digest(input.payloadSha256);
-    if (!Number.isSafeInteger(input.sendDeadlineMs) || input.sendDeadlineMs <= Date.now())
+    if (!Number.isSafeInteger(input.sendDeadlineMs) || input.sendDeadlineMs <= Date.now() || input.signal?.aborted)
       return { kind: 'denied', reason: 'send_deadline' };
     if (input.currency === null) {
       if (max !== 0n || input.priceSnapshot !== null) throw new Error('FAST_JOURNAL_INVALID_BYOK');
@@ -358,73 +366,122 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
           (this.tranche !== null || (hint.preparedTarget !== null && requestedTarget <= hint.preparedTarget))
         )
           break;
-        let timer: NodeJS.Timeout | undefined;
-        try {
-          const prepared = await Promise.race([
-            this.scheduleReplenishment(input.tenantId, input.currency, true).then(() => true),
-            new Promise<false>((resolve) => {
-              timer = setTimeout(() => resolve(false), Math.max(0, input.sendDeadlineMs - Date.now()));
-              timer.unref();
-            }),
-          ]);
-          // A timeout never cancels or frees a possibly committed credit grant.
-          // Its tracked singleflight remains available to later callers/drain.
-          if (!prepared) return { kind: 'denied', reason: 'send_deadline' };
-        } finally {
-          if (timer) clearTimeout(timer);
-        }
+        // A timeout/cancel never cancels or frees a possibly committed grant.
+        // The tracked singleflight remains available to later callers/drain.
+        if (!(await this.waitForCreditWork(this.scheduleReplenishment(input.tenantId, input.currency, true), input)))
+          return { kind: 'denied', reason: 'send_deadline' };
       }
     }
-    // Cold credit work can outlive the cached authority window. No intent is
-    // written after expiry, and the caller still rechecks before actual send.
-    if (this.closed) return { kind: 'denied', reason: 'closed' };
-    if (input.sendDeadlineMs <= Date.now()) return { kind: 'denied', reason: 'send_deadline' };
     const id = randomUUID();
     let unavailable: 'credit_busy' | 'credit_not_ready' = 'credit_not_ready';
-    try {
-      const result = await this.database.query<{ id: string | null; credit_busy: boolean }>(RESERVE_SQL, [
-        id,
-        input.requestId,
-        input.attemptId,
-        input.tenantId,
-        input.projectId,
-        input.proxyKeyId,
-        input.requestFingerprint,
-        input.payloadSha256,
-        input.currency,
-        input.maxCostMinorUnits,
-        priceSnapshotJson,
-        authoritySnapshotJson,
-        input.allocationOwner,
-        this.epoch,
-        new Date(input.sendDeadlineMs).toISOString(),
-        input.accountId,
-        identity,
-        this.nextStripe(input.tenantId, input.currency),
-      ]);
-      if (result.rows.length === 1 && result.rows[0]?.id === id) {
-        return {
-          kind: 'created',
-          intent: {
-            id,
-            requestId: input.requestId,
-            attemptId: input.attemptId,
-            tenantId: input.tenantId,
-            maxCostMinorUnits: input.maxCostMinorUnits,
-          },
-        };
+    let retriedBusy = false;
+    let retriedNotReady = false;
+    let recoveryDeadline = 0;
+    // Success still uses exactly one intent SQL. Only an acknowledged id:null
+    // means this statement created no intent/debit and permits a fresh snapshot.
+    // Each failure kind gets one recovery, never an open-ended admission queue.
+    for (;;) {
+      if (this.closed) return { kind: 'denied', reason: 'closed' };
+      if (input.sendDeadlineMs <= Date.now() || input.signal?.aborted)
+        return { kind: 'denied', reason: 'send_deadline' };
+      if (recoveryDeadline > 0 && performance.now() >= recoveryDeadline) break;
+      let recoverable = false;
+      try {
+        const result = await this.database.query<{
+          id: string | null;
+          credit_busy: boolean;
+          credit_recoverable: boolean;
+        }>(RESERVE_SQL, [
+          id,
+          input.requestId,
+          input.attemptId,
+          input.tenantId,
+          input.projectId,
+          input.proxyKeyId,
+          input.requestFingerprint,
+          input.payloadSha256,
+          input.currency,
+          input.maxCostMinorUnits,
+          priceSnapshotJson,
+          authoritySnapshotJson,
+          input.allocationOwner,
+          this.epoch,
+          new Date(input.sendDeadlineMs).toISOString(),
+          input.accountId,
+          identity,
+          this.nextStripe(input.tenantId, input.currency),
+        ]);
+        if (result.rows.length === 1 && result.rows[0]?.id === id) {
+          return {
+            kind: 'created',
+            intent: {
+              id,
+              requestId: input.requestId,
+              attemptId: input.attemptId,
+              tenantId: input.tenantId,
+              maxCostMinorUnits: input.maxCostMinorUnits,
+            },
+          };
+        }
+        if (
+          result.rows.length !== 1 ||
+          result.rows[0]?.id !== null ||
+          typeof result.rows[0].credit_busy !== 'boolean' ||
+          typeof result.rows[0].credit_recoverable !== 'boolean'
+        )
+          throw new Error('FAST_JOURNAL_UNCERTAIN_RESERVE');
+        unavailable = result.rows[0].credit_busy ? 'credit_busy' : 'credit_not_ready';
+        recoverable = result.rows[0].credit_recoverable;
+        // Four normal polling periods bound waiting/starting another CAS. An
+        // already in-flight SQL is never cancelled/retried as though not written.
+        if (recoveryDeadline === 0) recoveryDeadline = performance.now() + 100;
+      } catch (error) {
+        // All non-unique errors, including lost commit ACK, remain uncertain.
+        // Never recover/retry a write or grant sending authority after an error.
+        if (!isUniqueViolation(error)) throw error;
+        const existing = await this.findExisting(input, identity);
+        return existing ?? { kind: 'denied', reason: 'identity_conflict' };
       }
-      if (result.rows.length !== 1 || result.rows[0]?.id !== null) throw new Error('FAST_JOURNAL_UNCERTAIN_RESERVE');
-      if (result.rows[0].credit_busy) unavailable = 'credit_busy';
-    } catch (error) {
-      // All non-unique errors, including lost commit ACK, remain uncertain. Never
-      // retry a write or return a sending authority from a subsequent lookup.
-      if (!isUniqueViolation(error)) throw error;
       const existing = await this.findExisting(input, identity);
-      return existing ?? { kind: 'denied', reason: 'identity_conflict' };
+      if (existing) return existing;
+      if (input.currency === null) break;
+      if (performance.now() >= recoveryDeadline) break;
+      if (unavailable === 'credit_busy') {
+        if (retriedBusy) break;
+        retriedBusy = true;
+      } else {
+        if (retriedNotReady || (!recoverable && !this.running)) break;
+        retriedNotReady = true;
+        // Rebalance ONLY unused, wallet-backed credit. This also joins a worker
+        // already holding the wallet fence, so its restoration is committed
+        // before reselection. Unfunded/capped wallets finish this pass promptly;
+        // no receipt, unknown hold or merely elapsed time releases money.
+        let prepared = false;
+        try {
+          prepared = await this.waitForCreditWork(
+            recoverable
+              ? this.scheduleReplenishment(input.tenantId, input.currency, true)
+              : (this.running ?? Promise.resolve()).then(() => undefined),
+            input,
+            recoveryDeadline,
+          );
+        } catch {
+          // Replenishment already reports its own failure. Do not turn a known
+          // admission denial into new sending authority or an uncertain retry.
+        }
+        if (!prepared) {
+          if (input.sendDeadlineMs <= Date.now() || input.signal?.aborted)
+            return { kind: 'denied', reason: 'send_deadline' };
+          break;
+        }
+      }
+      if (performance.now() >= recoveryDeadline) break;
+      try {
+        this.options.onCreditRecovery?.(unavailable);
+      } catch {
+        /* telemetry cannot affect money authority */
+      }
     }
-    const existing = await this.findExisting(input, identity);
-    if (existing) return existing;
     if (input.currency !== null) this.scheduleReplenishment(input.tenantId, input.currency);
     try {
       this.options.onCreditUnavailable?.(unavailable);
@@ -432,6 +489,34 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
       /* telemetry cannot affect money authority */
     }
     return { kind: 'denied', reason: unavailable };
+  }
+
+  /** Timeout/abort stops waiting, never the durable transaction or its tracking. */
+  private async waitForCreditWork(
+    work: Promise<void>,
+    input: FastReserveIntentInput,
+    recoveryDeadline = Number.POSITIVE_INFINITY,
+  ): Promise<boolean> {
+    let timer: NodeJS.Timeout | undefined;
+    let abort: (() => void) | undefined;
+    try {
+      return await Promise.race([
+        work.then(() => true),
+        new Promise<false>((resolve) => {
+          abort = () => resolve(false);
+          input.signal?.addEventListener('abort', abort, { once: true });
+          if (input.signal?.aborted) return resolve(false);
+          timer = setTimeout(
+            () => resolve(false),
+            Math.max(0, Math.min(input.sendDeadlineMs - Date.now(), recoveryDeadline - performance.now())),
+          );
+          timer.unref();
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+      if (abort) input.signal?.removeEventListener('abort', abort);
+    }
   }
 
   private async findExisting(input: FastReserveIntentInput, identity: string): Promise<FastReserveResult | null> {

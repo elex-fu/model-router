@@ -68,6 +68,8 @@ When the tranche setting is **unset**, native mode passes a server-derived concu
 
 A client may omit its output limit only if the configured compiler injects a positive enforced bound. The final compiled payload is independently checked against the estimator before Redis or money reservation; a custom compiler that leaves the bound absent still uses strict mode.
 
+Only an explicitly acknowledged no-intent/no-debit result permits bounded credit recovery; it never repeats Redis admission or upstream execution. Normal success stays one intent SQL. Recovery wait/new-attempt admission is limited to 100 ms and the original snapshot deadline/client cancellation; an in-flight database write remains uncertain on error, never retryable. Count recovery SQL and complete HTTP p99 including waits, not only final successes. See [the journal recovery contract](fast-billing-journal.md#acknowledged-no-write-credit-recovery).
+
 Credit errors distinguish insufficient/not-ready capacity (`429 FAST_CREDIT_NOT_READY`) from a concurrent reservation race (`503 FAST_CREDIT_BUSY`); an expired send deadline and a closed journal are separate 503 codes. These newer profiles must not be merged with older runs that exposed one generic credit error.
 
 ## Readiness

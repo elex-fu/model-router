@@ -1,4 +1,3 @@
-import { priceFixture } from './journal-fixture.js';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import test from 'node:test';
@@ -16,6 +15,7 @@ import {
   withRequestDiagnosticTrace,
 } from '../../../../src/saas/gateway/request-diagnostic-trace.js';
 import { fastExecutorFixture } from './executor-fixture.js';
+import { priceFixture } from './journal-fixture.js';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -511,6 +511,7 @@ test('automatic liquidity uses the minimum trusted concurrency, never a client f
     s.snapshot.candidates[0].limits.concurrency,
   );
   assert.equal(s.intents[0].allocationTargetConcurrency, expected);
+  assert.equal(s.intents[0].signal, s.input.client.signal, 'the original client cancellation reaches credit recovery');
 });
 
 test('credit readiness and contention failures stay distinguishable and never send', async () => {

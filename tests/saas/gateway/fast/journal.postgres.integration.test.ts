@@ -795,6 +795,273 @@ test('fast money journal real PostgreSQL: atomic reserve, durable completion, ex
     },
   );
   await t.test(
+    'acknowledged fragmented no-write admission rebalances one conserved cap; warm aggregate never executes and recovered ACK loss never retries',
+    async () => {
+      for (const loseRecoveredAck of [false, true]) {
+        let watchedRequest = '',
+          statements = 0;
+        const valuesSeen: Array<readonly unknown[]> = [];
+        const resultsSeen: Array<{ id: string | null; credit_busy: boolean; credit_recoverable: boolean }> = [];
+        let warmSql = '',
+          warmValues: readonly unknown[] = [];
+        const measured: SaasDatabase = {
+          ...gateway,
+          query: async <Row>(sql: string, values?: readonly unknown[]): Promise<SqlResult<Row>> => {
+            const result = await gateway.query<Row>(sql, values);
+            if (sql.includes('fast-journal:reserve-intent')) {
+              warmSql = sql;
+              warmValues = values ?? [];
+              if (values?.[1] === watchedRequest) {
+                statements++;
+                valuesSeen.push(values);
+                resultsSeen.push(result.rows[0] as (typeof resultsSeen)[number]);
+                if (loseRecoveredAck && statements === 2) throw new Error('recovered intent ACK lost');
+              }
+            }
+            return result;
+          },
+        };
+        const scope = await setup('2560', '2560', randomUUID(), measured, 8);
+        const intents: FastIntent[] = [];
+        for (let i = 0; i < 32; i++) {
+          intents.push(await reserve(scope.journal, intentFixture(scope.tenantId, scope.owner)));
+          if (i === 0) {
+            const parameters = [...warmValues];
+            parameters[0] = randomUUID();
+            parameters[1] = randomUUID();
+            parameters[2] = randomUUID();
+            const rollback = new Error('explain rollback');
+            await assert.rejects(
+              gateway.transaction(async (tx) => {
+                const plan = await tx.query<Record<string, unknown>>(
+                  `EXPLAIN (ANALYZE, FORMAT JSON) ${warmSql}`,
+                  parameters,
+                );
+                const aggregates: Record<string, unknown>[] = [];
+                const visit = (value: unknown): void => {
+                  if (Array.isArray(value)) {
+                    for (const item of value) visit(item);
+                    return;
+                  }
+                  if (!value || typeof value !== 'object') return;
+                  const object = value as Record<string, unknown>;
+                  if (object['Node Type'] === 'Aggregate') aggregates.push(object);
+                  for (const item of Object.values(object)) visit(item);
+                };
+                visit(plan.rows);
+                assert.equal(aggregates.length, 1, 'one failure-only eight-stripe liquidity sum');
+                assert.equal(
+                  aggregates[0]['Actual Loops'],
+                  0,
+                  'successful warm admission must never run the recovery aggregate',
+                );
+                throw rollback;
+              }),
+              (error) => error === rollback,
+            );
+          }
+        }
+        await Promise.all(
+          intents.slice(0, 8).map((intent) => scope.journal.appendReceipt(receiptFixture(intent, '1'))),
+        );
+        await scope.journal.runOnce();
+        const fragmented = await gateway.query<{ available: string }>(
+          'SELECT available_minor_units::text AS available FROM saas_fast_credit_allocations WHERE tenant_id=$1 ORDER BY stripe',
+          [scope.tenantId],
+        );
+        assert.deepEqual(
+          fragmented.rows.map((row) => row.available),
+          Array(8).fill('79'),
+        );
+        const input = intentFixture(scope.tenantId, scope.owner);
+        watchedRequest = input.requestId;
+        if (loseRecoveredAck) await assert.rejects(scope.journal.reserveIntent(input), /recovered intent ACK lost/);
+        else assert.equal((await scope.journal.reserveIntent(input)).kind, 'created');
+        assert.equal(statements, 2, 'only acknowledged id:null is retried, never a recovered lost ACK');
+        assert.equal(resultsSeen[0].id, null);
+        assert.equal(resultsSeen[0].credit_recoverable, true);
+        assert.equal(resultsSeen[0].credit_busy, false);
+        assert.equal(typeof resultsSeen[1].id, 'string');
+        assert.deepEqual(
+          valuesSeen[0].slice(0, 17),
+          valuesSeen[1].slice(0, 17),
+          'all identity, money and deadline bytes are frozen',
+        );
+        const current = await facts(scope.tenantId);
+        assert.equal(current.intents, '33');
+        assert.equal(current.balance, '2552');
+        assert.equal(current.backing, '2552', 'recovery cannot expand the explicit cap or mint wallet funds');
+        assert.equal(current.available, '552');
+        assert.equal(current.charges, '8');
+        watchedRequest = '';
+        assert.equal((await scope.journal.reserveIntent(input)).kind, 'existing');
+        await scope.journal.close();
+        assert.equal(
+          (await facts(scope.tenantId)).backing,
+          '2000',
+          'all 25 unresolved maxima survive recovery/ACK loss/retirement',
+        );
+      }
+    },
+  );
+  await t.test(
+    'real EPQ depletion retries one fresh candidate without overspending, while true insufficient backing does not queue',
+    { timeout: 15000 },
+    async () => {
+      let release!: () => void, held!: () => void;
+      const heldPromise = new Promise<void>((resolve) => {
+        held = resolve;
+      });
+      const commit = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let holdingRequest = '',
+        racingRequest = '',
+        holderPid = 0,
+        racingPid = 0;
+      const raceResults: Array<{ id: string | null; credit_busy: boolean }> = [];
+      let scarceStatements = 0,
+        scarceRequest = '';
+      const measured: SaasDatabase = {
+        ...gateway,
+        query: async <Row>(sql: string, values?: readonly unknown[]): Promise<SqlResult<Row>> => {
+          if (!sql.includes('fast-journal:reserve-intent')) return gateway.query<Row>(sql, values);
+          if (values?.[1] === scarceRequest) scarceStatements++;
+          if (values?.[1] === holdingRequest)
+            return gateway.transaction(async (tx) => {
+              holderPid = (await tx.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0].pid;
+              const result = await tx.query<Row>(sql, values);
+              held();
+              await commit;
+              return result;
+            });
+          if (values?.[1] === racingRequest)
+            return gateway.transaction(async (tx) => {
+              racingPid = (await tx.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0].pid;
+              const parameters = [...values];
+              // Adversarial local scheduling hint: both statements discover stripe0
+              // before its last M is committed. The hint is not financial authority.
+              if (raceResults.length === 0) parameters[17] = 0;
+              const result = await tx.query<Row>(sql, parameters);
+              raceResults.push(result.rows[0] as (typeof raceResults)[number]);
+              return result;
+            });
+          return gateway.query<Row>(sql, values);
+        },
+      };
+      const scope = await setup('640', '640', randomUUID(), measured, 2);
+      for (let i = 0; i < 6; i++) await reserve(scope.journal, intentFixture(scope.tenantId, scope.owner));
+      const first = intentFixture(scope.tenantId, scope.owner),
+        second = intentFixture(scope.tenantId, scope.owner);
+      holdingRequest = first.requestId;
+      racingRequest = second.requestId;
+      const holder = scope.journal.reserveIntent(first);
+      await heldPromise;
+      const racing = scope.journal.reserveIntent(second);
+      try {
+        let blocked = false;
+        for (let attempt = 0; attempt < 100 && !blocked; attempt++) {
+          if (racingPid)
+            blocked = (
+              await migrator.query<{ blocked: boolean }>(
+                'SELECT $2::integer=ANY(pg_blocking_pids($1::integer)) AS blocked',
+                [racingPid, holderPid],
+              )
+            ).rows[0].blocked;
+          if (!blocked) await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+        assert.equal(blocked, true, 'actual PostgreSQL row-lock dependency is established before commit');
+      } finally {
+        release();
+      }
+      assert.equal((await holder).kind, 'created');
+      assert.equal((await racing).kind, 'created');
+      assert.equal(raceResults.length, 2);
+      assert.equal(raceResults[0].id, null);
+      assert.equal(raceResults[0].credit_busy, true);
+      assert.equal(typeof raceResults[1].id, 'string');
+      const scarce = intentFixture(scope.tenantId, scope.owner);
+      scarceRequest = scarce.requestId;
+      const started = performance.now();
+      assert.deepEqual(await scope.journal.reserveIntent(scarce), { kind: 'denied', reason: 'credit_not_ready' });
+      assert.equal(scarceStatements, 1, 'no second CAS or recovery wait for genuine zero available/no worker');
+      assert.ok(
+        performance.now() - started < 100,
+        'true insufficiency returns without consuming the recovery wait budget',
+      );
+      assert.equal((await facts(scope.tenantId)).backing, '640');
+      assert.equal((await facts(scope.tenantId)).available, '0');
+      assert.equal((await facts(scope.tenantId)).intents, '8');
+      await scope.journal.close();
+      assert.equal((await facts(scope.tenantId)).backing, '640');
+    },
+  );
+  await t.test(
+    'recovery cancellation, original authority deadline and bounded wait never issue a late CAS or release unresolved money',
+    async () => {
+      for (const stop of ['cancel', 'authority', 'budget'] as const) {
+        let pause = false,
+          waiting!: () => void,
+          release!: () => void,
+          statements = 0;
+        const started = new Promise<void>((resolve) => {
+          waiting = resolve;
+        });
+        const gate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const measured: SaasDatabase = {
+          ...gateway,
+          query: async <Row>(sql: string, values?: readonly unknown[]): Promise<SqlResult<Row>> => {
+            if (pause && sql.includes('fast-journal:reserve-intent')) statements++;
+            return gateway.query<Row>(sql, values);
+          },
+          transaction: async (work) => {
+            if (pause) {
+              waiting();
+              await gate;
+            }
+            return gateway.transaction(work);
+          },
+        };
+        const scope = await setup('2560', '2560', randomUUID(), measured, 8);
+        const intents: FastIntent[] = [];
+        for (let i = 0; i < 32; i++)
+          intents.push(await reserve(scope.journal, intentFixture(scope.tenantId, scope.owner)));
+        await Promise.all(
+          intents.slice(0, 8).map((intent) => scope.journal.appendReceipt(receiptFixture(intent, '1'))),
+        );
+        await scope.journal.runOnce();
+        const controller = new AbortController();
+        const input = {
+          ...intentFixture(scope.tenantId, scope.owner),
+          signal: controller.signal,
+          sendDeadlineMs: Date.now() + (stop === 'authority' ? 50 : 60_000),
+        };
+        pause = true;
+        const before = performance.now();
+        const pending = scope.journal.reserveIntent(input);
+        await started;
+        if (stop === 'cancel') controller.abort();
+        try {
+          assert.deepEqual(await pending, {
+            kind: 'denied',
+            reason: stop === 'budget' ? 'credit_not_ready' : 'send_deadline',
+          });
+          assert.ok(performance.now() - before < 250, 'no unbounded queue on a stalled credit transaction');
+          assert.equal(statements, 1, 'no new intent SQL after abort/deadline/recovery wait expires');
+          assert.equal((await facts(scope.tenantId)).intents, '32');
+          assert.equal((await facts(scope.tenantId)).backing, '2552');
+        } finally {
+          release();
+        }
+        await scope.journal.close();
+        assert.equal(statements, 1, 'late completion of tracked refill cannot issue an intent');
+        assert.equal((await facts(scope.tenantId)).backing, '1920');
+      }
+    },
+  );
+  await t.test(
     'eight stripes conserve one tranche under uniform, adversarial skew and near-tranche rebalancing',
     async () => {
       for (const skewed of [false, true]) {

@@ -44,6 +44,7 @@ export interface FastIntentInput {
   readonly allocationOwner: string;
   readonly allocationTargetConcurrency?: number;
   readonly sendDeadlineMs: number;
+  readonly signal?: AbortSignal;
 }
 export interface FastReceiptInput {
   readonly intentId: string;
@@ -452,6 +453,7 @@ export class FastGatewayExecutor implements FastGatewayExecutorPort {
             candidate.limits.concurrency,
           ),
           sendDeadlineMs: snapshot.validUntilMs,
+          signal: input.client.signal,
         }),
       );
       if (reserved.kind !== 'created') {
