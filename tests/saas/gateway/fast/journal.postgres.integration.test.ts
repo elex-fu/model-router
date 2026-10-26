@@ -2986,6 +2986,239 @@ test('fast money journal real PostgreSQL: atomic reserve, durable completion, ex
     },
   );
   await t.test(
+    'compacted receipt backing remains refund-protected and real refund freezes serialize with settlement in both wallet-fence orders',
+    { timeout: 15000 },
+    async () => {
+      for (const settlementFirst of [false, true]) {
+        let armed = false,
+          pauseUsed = false,
+          holderPid = 0,
+          waiterPid = 0;
+        let markHeld!: () => void, release!: () => void;
+        const held = new Promise<void>((resolve) => {
+          markHeld = resolve;
+        });
+        const unblock = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const wrap = (database: SaasDatabase, kind: 'refund' | 'settlement'): SaasDatabase => ({
+          ...database,
+          transaction: (work) =>
+            database.transaction((tx) =>
+              work({
+                query: async <Row>(sql: string, values?: readonly unknown[]): Promise<SqlResult<Row>> => {
+                  if (armed && holderPid !== 0 && sql === WALLET_FENCE_SQL) {
+                    waiterPid = (await tx.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0].pid;
+                  }
+                  const result = await tx.query<Row>(sql, values);
+                  if (
+                    armed &&
+                    !pauseUsed &&
+                    ((!settlementFirst &&
+                      kind === 'refund' &&
+                      sql.includes('INSERT INTO saas_refund_wallet_freezes')) ||
+                      (settlementFirst && kind === 'settlement' && sql.includes('fast-journal:worker-wallet')))
+                  ) {
+                    pauseUsed = true;
+                    holderPid = (await tx.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0].pid;
+                    markHeld();
+                    await unblock;
+                  }
+                  return result;
+                },
+              }),
+            ),
+        });
+        const scope = await setup('100', '100', randomUUID(), wrap(gateway, 'settlement'));
+        const actorId = randomUUID(),
+          orderId = randomUUID(),
+          providerRefundId = randomUUID();
+        await migrator.query('INSERT INTO saas_users(id,email) VALUES($1,$2)', [actorId, `${actorId}@example.test`]);
+        const funding = (
+          await migrator.query<{ id: string; source_order_ref: string }>(
+            "SELECT id,source_order_ref FROM saas_ledger_transactions WHERE tenant_id=$1 AND source_type='wallet_funding'",
+            [scope.tenantId],
+          )
+        ).rows[0];
+        await migrator.query(
+          `INSERT INTO saas_payment_orders
+          (id,tenant_id,order_type,provider_key,merchant_id,client_request_id,local_order_ref,funding_reference,
+           amount_minor_units,currency,state,provider_order_id,funding_transaction_id,paid_at,fulfilled_at)
+          VALUES($1,$2,'wallet_topup','journal-test-provider','journal-test-merchant',$3,$4,$5,100,'USD','fulfilled',$6,$7,clock_timestamp(),clock_timestamp())`,
+          [orderId, scope.tenantId, randomUUID(), randomUUID(), funding.source_order_ref, randomUUID(), funding.id],
+        );
+        let submissions = 0;
+        // Only provider/authorization boundaries are synthetic. The actual
+        // refund service, restricted-role freezes and balanced ledger run in PG.
+        const refunds = new PaymentRefundService(
+          wrap(control, 'refund'),
+          {
+            providerKey: 'journal-test-provider',
+            merchantId: 'journal-test-merchant',
+            submitRefund: async (input) => {
+              submissions++;
+              return { ...input, providerRefundId, status: 'pending' as const };
+            },
+            queryRefund: async (input) => ({ ...input, providerRefundId, status: 'succeeded' as const }),
+          },
+          {
+            providerKey: 'journal-test-provider',
+            merchantId: 'journal-test-merchant',
+            reconcileDelayMs: 0,
+            operations: {
+              authorize: async () => ({ authorizationRef: 'synthetic-authorized-test' }),
+              recordAudit: async () => {},
+            },
+          },
+        );
+        const request = (amountMinorUnits: string) => ({
+          actorId,
+          tenantId: scope.tenantId,
+          orderId,
+          clientRequestId: randomUUID(),
+          amountMinorUnits,
+          reasonCode: 'TEST_REFUND',
+        });
+        const frozen = async () =>
+          (
+            await gateway.query<{ amount: string }>(
+              'SELECT COALESCE(SUM(amount_minor_units),0)::text AS amount FROM saas_refund_wallet_freezes WHERE tenant_id=$1',
+              [scope.tenantId],
+            )
+          ).rows[0].amount;
+        const assertFunds = async () => {
+          const current = await assertLiability(scope.tenantId);
+          const strict = (
+            await gateway.query<{ amount: string }>(
+              "SELECT COALESCE(SUM(amount_minor_units),0)::text AS amount FROM saas_billing_reservations WHERE tenant_id=$1 AND state IN ('reserved','reconciliation_pending')",
+              [scope.tenantId],
+            )
+          ).rows[0].amount;
+          assert.ok(BigInt(current.backing) + BigInt(strict) + BigInt(await frozen()) <= BigInt(current.balance));
+          return current;
+        };
+        const input = intentFixture(scope.tenantId, scope.owner);
+        const intent = await reserve(scope.journal, input);
+        await scope.journal.appendReceipt({
+          ...receiptFixture(intent),
+          verification: { priceSnapshot: input.priceSnapshot },
+        });
+        assert.equal(await releaseCount(intent.id), '1');
+        assert.deepEqual(await assertFunds(), {
+          balance: '100',
+          backing: '100',
+          available: '80',
+          intents: '1',
+          charges: '0',
+          completed: '0',
+        });
+        await assert.rejects(refunds.requestWalletTopUpRefund(request('1')), {
+          code: 'REFUND_AMOUNT_EXCEEDS_AVAILABLE',
+        });
+        assert.equal(submissions, 0, 'compacted A remains allocation backing, not refundable wallet cash');
+        await scope.journal.retireAllocations();
+        assert.deepEqual(await assertFunds(), {
+          balance: '100',
+          backing: '20',
+          available: '0',
+          intents: '1',
+          charges: '0',
+          completed: '0',
+        });
+        await assert.rejects(refunds.requestWalletTopUpRefund(request('81')), {
+          code: 'REFUND_AMOUNT_EXCEEDS_AVAILABLE',
+        });
+        assert.equal(submissions, 0, 'unposted C remains backed after retirement');
+        const refundInput = request('80');
+        armed = true;
+        const first = settlementFirst ? scope.journal.runOnce() : refunds.requestWalletTopUpRefund(refundInput);
+        await Promise.race([
+          held,
+          first.then(() => {
+            throw new Error('writer missed the expected wallet-fence pause');
+          }),
+        ]);
+        const second = settlementFirst ? refunds.requestWalletTopUpRefund(refundInput) : scope.journal.runOnce();
+        try {
+          let blocked = false;
+          for (let attempt = 0; attempt < 100 && !blocked; attempt++) {
+            if (waiterPid !== 0)
+              blocked = (
+                await gateway.query<{ blocked: boolean }>(
+                  'SELECT $2::integer=ANY(pg_blocking_pids($1::integer)) AS blocked',
+                  [waiterPid, holderPid],
+                )
+              ).rows[0].blocked;
+            if (!blocked) await new Promise((resolve) => setTimeout(resolve, 5));
+          }
+          assert.equal(
+            blocked,
+            true,
+            `real ${settlementFirst ? 'refund' : 'settlement'} waits on the other writer's wallet fence`,
+          );
+          assert.deepEqual(await assertFunds(), {
+            balance: '100',
+            backing: '20',
+            available: '0',
+            intents: '1',
+            charges: '0',
+            completed: '0',
+          });
+          assert.equal(await frozen(), '0', 'uncommitted refund freeze/ledger are not partially visible');
+        } finally {
+          release();
+          await Promise.all([first, second]);
+          armed = false;
+        }
+        assert.equal((await refunds.requestWalletTopUpRefund(refundInput)).status, 'pending');
+        assert.equal(submissions, 1);
+        assert.equal(await frozen(), '80');
+        assert.deepEqual(await assertFunds(), {
+          balance: '80',
+          backing: '0',
+          available: '0',
+          intents: '1',
+          charges: '1',
+          completed: '1',
+        });
+        await assert.rejects(refunds.requestWalletTopUpRefund(request('1')), {
+          code: 'REFUND_AMOUNT_EXCEEDS_AVAILABLE',
+        });
+        const other = new PostgresFastGatewayJournal(gateway, {
+          allocationOwner: randomUUID(),
+          allocationTrancheMinorUnits: '100',
+        });
+        await other.replenish(scope.tenantId, 'USD', '1');
+        assert.equal((await assertFunds()).backing, '0', 'new owner cannot allocate frozen refund funds');
+        assert.equal((await refunds.processPendingRefunds()).succeeded, 1);
+        assert.equal((await refunds.requestWalletTopUpRefund(refundInput)).status, 'succeeded');
+        assert.equal((await refunds.processPendingRefunds()).claimed, 0);
+        assert.equal(submissions, 1, 'replay cannot resubmit or refund twice');
+        await scope.journal.runOnce();
+        assert.equal(await releaseCount(intent.id), '1');
+        assert.equal(await frozen(), '0');
+        assert.deepEqual(await assertFunds(), {
+          balance: '0',
+          backing: '0',
+          available: '0',
+          intents: '1',
+          charges: '1',
+          completed: '1',
+        });
+        const postings = await gateway.query<{ source_type: string; count: string; amount: string }>(
+          "SELECT source_type,count(*)::text AS count,SUM(amount_minor_units)::text AS amount FROM saas_ledger_transactions WHERE tenant_id=$1 AND source_type IN ('billing_settlement','wallet_refund') GROUP BY source_type ORDER BY source_type",
+          [scope.tenantId],
+        );
+        assert.deepEqual(postings.rows, [
+          { source_type: 'billing_settlement', count: '1', amount: '20' },
+          { source_type: 'wallet_refund', count: '1', amount: '80' },
+        ]);
+        await other.close();
+        await scope.journal.close();
+      }
+    },
+  );
+  await t.test(
     'receipt SIGKILL recovers through standalone no-Redis drain CLI, which stays alive idle and preserves live owners and unknown stakes',
     { timeout: 30000 },
     async () => {
