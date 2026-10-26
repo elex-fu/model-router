@@ -2332,3 +2332,279 @@ test('modelCooldown is forwarded to the core scheduler and cools only the (accou
   assert.equal(result.decision, 'allow');
   if (result.decision === 'allow') assert.equal(result.value.accountId, 'account-b');
 });
+
+test('concurrent stale-health callers await one refresh and independently re-read authority', async () => {
+  const count = 32;
+  let initialReads = 0;
+  let admitCalls = 0;
+  let outcomeCalls = 0;
+  let freshReads = 0;
+  let releases = 0;
+  let refreshed = false;
+  let allInitialReads!: () => void;
+  const initialBarrier = new Promise<void>((resolve) => {
+    allInitialReads = resolve;
+  });
+  const store: ProbeStore = {
+    async getSchedulingView() {
+      if (refreshed) {
+        freshReads++;
+        return allowView();
+      }
+      if (++initialReads === count) allInitialReads();
+      await initialBarrier;
+      return staleView();
+    },
+    async tryAdmitHalfOpenProbe() {
+      return ++admitCalls === 1 ? 'admitted' : 'closed';
+    },
+    async recordRuntimeOutcome() {
+      outcomeCalls++;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      refreshed = true;
+      return 'applied';
+    },
+  };
+  const { scheduler, input } = setup(
+    'byok',
+    {},
+    {
+      healthProbe: {
+        store,
+        leaseProvider: {
+          acquire: async () => ({
+            fencingToken: '9001',
+            release: async () => {
+              releases++;
+            },
+          }),
+        },
+      },
+    },
+  );
+  const results = await Promise.all(
+    Array.from({ length: count }, (_, i) =>
+      scheduler.select({
+        ...input([candidate('byok')]),
+        requestId: `concurrent-${i}`,
+      }),
+    ),
+  );
+  assert.deepEqual(
+    results.map(({ decision }) => decision),
+    Array(count).fill('allow'),
+  );
+  assert.equal(admitCalls, 1);
+  assert.equal(outcomeCalls, 1);
+  assert.equal(releases, 1);
+  assert.equal(freshReads, count);
+});
+
+test('three schedulers wait for a remote stale-health probe without duplicating it', async () => {
+  const count = 24;
+  let initialReads = 0;
+  let admitCalls = 0;
+  let outcomes = 0;
+  let refreshed = false;
+  let allInitial!: () => void;
+  const barrier = new Promise<void>((resolve) => {
+    allInitial = resolve;
+  });
+  const store: ProbeStore = {
+    async getSchedulingView() {
+      if (refreshed) return allowView();
+      if (++initialReads === count) allInitial();
+      await barrier;
+      return staleView();
+    },
+    async tryAdmitHalfOpenProbe() {
+      return ++admitCalls === 1 ? 'admitted' : 'closed';
+    },
+    async recordRuntimeOutcome() {
+      outcomes++;
+      await new Promise<void>((resolve) => setTimeout(resolve, 50));
+      refreshed = true;
+      return 'applied';
+    },
+  };
+  const gateways = Array.from({ length: 3 }, () =>
+    setup(
+      'byok',
+      {},
+      {
+        healthProbe: {
+          store,
+          leaseProvider: { acquire: async () => ({ fencingToken: '9001', release: async () => {} }) },
+        },
+      },
+    ),
+  );
+  const results = await Promise.all(
+    Array.from({ length: count }, (_, i) => {
+      const gateway = gateways[i % 3];
+      return gateway.scheduler.select({ ...gateway.input([candidate('byok')]), requestId: `remote-${i}` });
+    }),
+  );
+  assert.deepEqual(
+    results.map(({ decision }) => decision),
+    Array(count).fill('allow'),
+  );
+  assert.equal(admitCalls, 3);
+  assert.equal(outcomes, 1);
+});
+
+test('concurrent health-refresh waiters never inherit a successful authority decision', async (t) => {
+  for (const outcome of ['write-throws', 'fenced', 'cooldown', 'malformed', 'unavailable', 'expired'] as const) {
+    await t.test(outcome, async () => {
+      const count = 8;
+      let initialReads = 0;
+      let reads = 0;
+      let writes = 0;
+      let finished = false;
+      let allInitial!: () => void;
+      const barrier = new Promise<void>((resolve) => {
+        allInitial = resolve;
+      });
+      const store: ProbeStore = {
+        async getSchedulingView() {
+          reads++;
+          if (finished) {
+            if (outcome === 'cooldown') return allowView(NOW, 'cooldown', new Date(NOW.getTime() + 1000));
+            if (outcome === 'expired') return allowView(new Date(NOW.getTime() - 60_001));
+            if (outcome === 'malformed' || outcome === 'unavailable')
+              return { decision: 'block', reason: 'test-only refusal', code: outcome };
+            return staleView();
+          }
+          if (++initialReads === count) allInitial();
+          await barrier;
+          return staleView();
+        },
+        async tryAdmitHalfOpenProbe() {
+          return 'admitted';
+        },
+        async recordRuntimeOutcome() {
+          writes++;
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          finished = true;
+          if (outcome === 'write-throws') throw new Error('test-only write failure');
+          return outcome === 'fenced' ? 'stale' : 'applied';
+        },
+      };
+      const { scheduler, input } = setup(
+        'byok',
+        {},
+        {
+          healthProbe: {
+            store,
+            leaseProvider: { acquire: async () => ({ fencingToken: '9001', release: async () => {} }) },
+          },
+        },
+      );
+      const results = await Promise.all(
+        Array.from({ length: count }, (_, i) =>
+          scheduler.select({
+            ...input([candidate('byok')]),
+            requestId: `negative-${i}`,
+          }),
+        ),
+      );
+      assert.deepEqual(
+        results.map(({ decision }) => decision),
+        Array(count).fill('block'),
+      );
+      assert.equal(writes, 1);
+      assert.ok(reads <= count * 2, 'failed probes do not recursively poll or probe');
+    });
+  }
+});
+
+test('half-open single-flight keys isolate BYOK tenants and account identities', async () => {
+  let writes = 0;
+  const refreshed = new Set<string>();
+  const scope = (value: { tenantId: string; accountId: string }) => JSON.stringify([value.tenantId, value.accountId]);
+  const store: ProbeStore = {
+    async getSchedulingView({ candidate: value }) {
+      return refreshed.has(scope(value)) ? allowView() : staleView();
+    },
+    async tryAdmitHalfOpenProbe() {
+      return 'admitted';
+    },
+    async recordRuntimeOutcome({ candidate: value }) {
+      writes++;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      refreshed.add(scope(value));
+      return 'applied';
+    },
+  };
+  const { scheduler } = setup(
+    'byok',
+    {},
+    {
+      healthProbe: {
+        store,
+        leaseProvider: { acquire: async () => ({ fencingToken: '9001', release: async () => {} }) },
+      },
+    },
+  );
+  const health = (
+    scheduler as unknown as { scheduler: { dependencies: { health: ProviderAccountSchedulerHealthPort } } }
+  ).scheduler.dependencies.health;
+  const results = await Promise.all(
+    [
+      ['tenant-a', 'account-a'],
+      ['tenant-b', 'account-a'],
+      ['tenant-a', 'account-b'],
+    ].map(([tenantId, accountId]) =>
+      health.get({
+        caller: { ...caller('byok'), tenantId },
+        candidate: { ...candidate('byok', accountId), tenantId },
+        now: NOW,
+      }),
+    ),
+  );
+  assert.deepEqual(
+    results.map(({ decision }) => decision),
+    ['allow', 'allow', 'allow'],
+  );
+  assert.equal(writes, 3);
+});
+
+test('remote probe waiting is bounded and never retries a real health or storage refusal', async (t) => {
+  for (const refusal of ['stale', 'cooldown', 'unavailable', 'malformed', 'admission-throws'] as const) {
+    await t.test(refusal, async () => {
+      let reads = 0;
+      let admissions = 0;
+      const store: ProbeStore = {
+        async getSchedulingView() {
+          if (++reads === 1 || refusal === 'stale' || refusal === 'admission-throws') return staleView();
+          if (refusal === 'cooldown') return allowView(NOW, 'cooldown', new Date(NOW.getTime() + 1000));
+          return { decision: 'block', reason: 'test-only refusal', code: refusal };
+        },
+        async tryAdmitHalfOpenProbe() {
+          admissions++;
+          if (refusal === 'admission-throws') throw new Error('test-only unavailable admission');
+          return 'closed';
+        },
+        async recordRuntimeOutcome() {
+          assert.fail('CAS losers must never write a probe outcome');
+        },
+      };
+      const { scheduler, input } = setup(
+        'byok',
+        {},
+        { healthProbe: { store, leaseProvider: { acquire: async () => null } } },
+      );
+      const started = performance.now();
+      const result = await scheduler.select(input([candidate('byok')]));
+      const elapsed = performance.now() - started;
+      assert.equal(result.decision, 'block');
+      assert.equal(admissions, 1);
+      if (refusal === 'stale') {
+        assert.ok(elapsed >= 900 && elapsed < 2500, `bounded wait took ${elapsed}ms`);
+        assert.ok(reads > 2 && reads <= 45, `bounded poll count: ${reads}`);
+      } else {
+        assert.equal(reads, refusal === 'admission-throws' ? 1 : 2);
+      }
+    });
+  }
+});

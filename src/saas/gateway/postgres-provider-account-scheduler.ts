@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
+import { setTimeout as delay } from 'node:timers/promises';
 import type { SaasDatabase } from '../db/index.js';
 import { createPreparedSqlStatement, queryPreparedOrAnonymous } from '../db/prepared-statements.js';
 import type { RedisConcurrencySlots } from '../runtime/redis-concurrency-slots.js';
@@ -1921,6 +1923,13 @@ function healthReadTime(input: Parameters<ProviderAccountSchedulerHealthPort['ge
 }
 
 class HalfOpenProbeHealthPort implements ProviderAccountSchedulerHealthPort {
+  // Share only an in-flight refresh, never its authority decision. Every waiter
+  // reads its own current scheduling view after the fenced probe completes.
+  private readonly pendingProbes = new Map<string, Promise<ProviderAccountSchedulerHealthDecision>>();
+  private static readonly MAX_PENDING_PROBES = 1024;
+  private static readonly REMOTE_PROBE_WAIT_MS = 1000;
+  private static readonly REMOTE_PROBE_POLL_MS = 25;
+
   constructor(
     private readonly store: ProviderAccountHealthSchedulingPort &
       ProviderAccountHalfOpenProbeAdmissionPort &
@@ -1976,11 +1985,38 @@ class HalfOpenProbeHealthPort implements ProviderAccountSchedulerHealthPort {
   /**
    * Single-winner half-open probe for one stale (or never-observed)
    * candidate. The winner records a lease-authorized probe outcome and
-   * becomes schedulable; every loser (probe in flight, storage blip, no free
-   * lease slot) is denied for this candidate only — never a whole-selection
-   * block.
+   * becomes schedulable. Local contenders share completion; remote CAS losers
+   * briefly re-read the real health row. Failed/expired refreshes, storage
+   * failures and unavailable leases still deny the candidate.
    */
   private async probeCandidate(
+    input: Parameters<ProviderAccountSchedulerHealthPort['get']>[0],
+    cause: 'stale' | 'unobserved',
+  ): Promise<ProviderAccountSchedulerHealthDecision> {
+    const { candidate } = input;
+    const key = JSON.stringify([
+      candidate.supplyMode,
+      candidate.supplyMode === 'byok' ? candidate.tenantId : null,
+      candidate.accountId,
+    ]);
+    const pending = this.pendingProbes.get(key);
+    if (pending) {
+      await pending;
+      return this.readAfterProbe(input);
+    }
+    const probe = this.runProbe(input, cause);
+    // Cardinality is bounded without evicting live refreshes. The rare overflow
+    // uses an uncached fenced probe; it cannot reuse an allow decision.
+    if (this.pendingProbes.size >= HalfOpenProbeHealthPort.MAX_PENDING_PROBES) return probe;
+    this.pendingProbes.set(key, probe);
+    try {
+      return await probe;
+    } finally {
+      if (this.pendingProbes.get(key) === probe) this.pendingProbes.delete(key);
+    }
+  }
+
+  private async runProbe(
     input: Parameters<ProviderAccountSchedulerHealthPort['get']>[0],
     cause: 'stale' | 'unobserved',
   ): Promise<ProviderAccountSchedulerHealthDecision> {
@@ -1989,13 +2025,13 @@ class HalfOpenProbeHealthPort implements ProviderAccountSchedulerHealthPort {
     try {
       admitted = await this.store.tryAdmitHalfOpenProbe({ candidate, staleAfterMs: this.maxHealthAgeMs });
     } catch {
-      admitted = 'closed';
+      return { decision: 'deny', reason: 'provider account runtime health probe admission failed' };
     }
     if (admitted !== 'admitted') {
-      return {
-        decision: 'deny',
-        reason: `provider account runtime health is ${cause} and a half-open probe is already in flight`,
-      };
+      // Another process may own the CAS, or may already have refreshed the
+      // row since our initial read. Wait only for stale/unknown observations;
+      // a real cooldown, malformed view or storage failure never waits/retries.
+      return this.readAfterProbe(input, true);
     }
     const attemptId = randomUUID();
     try {
@@ -2039,9 +2075,36 @@ class HalfOpenProbeHealthPort implements ProviderAccountSchedulerHealthPort {
           // has already been recorded.
         }
       }
-      // A concurrent outcome may follow the probe. Read the real row once
-      // after release instead of manufacturing a successful observation.
-      const refreshed = await this.store.getSchedulingView(input);
+      return await this.readAfterProbe(input);
+    } catch {
+      return {
+        decision: 'deny',
+        reason: `provider account runtime health is ${cause} and the half-open probe failed`,
+      };
+    }
+  }
+
+  private async readAfterProbe(
+    input: Parameters<ProviderAccountSchedulerHealthPort['get']>[0],
+    waitForRemoteProbe = false,
+  ): Promise<ProviderAccountSchedulerHealthDecision> {
+    try {
+      const deadline = performance.now() + HalfOpenProbeHealthPort.REMOTE_PROBE_WAIT_MS;
+      // For tracked keys, one poller per account/process, not per waiter. The
+      // monotonic deadline bounds contention waiting without widening health
+      // freshness. Waiters never cancel the shared fenced probe.
+      let refreshed = await this.store.getSchedulingView(input);
+      while (
+        waitForRemoteProbe &&
+        refreshed.decision === 'block' &&
+        (refreshed.code === 'stale' || refreshed.code === 'unknown') &&
+        performance.now() < deadline
+      ) {
+        await delay(Math.min(HalfOpenProbeHealthPort.REMOTE_PROBE_POLL_MS, deadline - performance.now()));
+        refreshed = await this.store.getSchedulingView(input);
+      }
+      // Always use a fresh, caller-scoped authority read, never the result of
+      // another caller's probe. A concurrent unhealthy outcome still wins.
       const now = healthReadTime(input);
       if (refreshed.decision !== 'allow' || now === null) {
         return { decision: 'deny', reason: 'provider account runtime health probe refresh failed' };
@@ -2064,10 +2127,7 @@ class HalfOpenProbeHealthPort implements ProviderAccountSchedulerHealthPort {
         },
       };
     } catch {
-      return {
-        decision: 'deny',
-        reason: `provider account runtime health is ${cause} and the half-open probe failed`,
-      };
+      return { decision: 'deny', reason: 'provider account runtime health probe refresh failed' };
     }
   }
 }
