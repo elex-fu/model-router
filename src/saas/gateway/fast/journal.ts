@@ -823,6 +823,7 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
     }
     if (!valid.length) return;
     const paid = valid.filter((item) => item.row.currency !== null);
+    const credits = new Map<string, CreditBatchRow>();
     if (paid.length) {
       // Global deterministic wallet order avoids opposite-batch deadlocks. Claims
       // are disjoint and never reacquired after a wallet fence is held.
@@ -843,7 +844,6 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
         [[...new Set(paid.map(({ row }) => row.allocation_id))]],
       );
       const allocationById = new Map(allocations.rows.map((allocation) => [allocation.id, allocation]));
-      const credits = new Map<string, CreditBatchRow>();
       const wallets = new Map<string, { id: string; tenantId: string; charge: bigint; ledgerId: string }>();
       const postings: LedgerBatchRow[] = [];
       for (const { row, charge, ledgerId } of paid) {
@@ -917,6 +917,19 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
           one(projected.rowCount);
         }
       }
+    }
+    const completed = await tx.query(
+      `/* fast-journal:worker-complete */ UPDATE saas_fast_billing_jobs j
+      SET state='completed',attempts=attempts+1,ledger_transaction_id=c.ledger_id,completed_at=now(),last_error=NULL
+      FROM jsonb_to_recordset($1::jsonb) AS c(intent_id uuid,ledger_id uuid)
+      WHERE j.intent_id=c.intent_id AND j.state='pending'`,
+      [fastJournalCanonicalJson(valid.map(({ row, ledgerId }) => ({ intent_id: row.id, ledger_id: ledgerId })))],
+    );
+    if (completed.rowCount !== valid.length) throw new Error('FAST_JOURNAL_STATE_CONFLICT');
+    // Jobs were locked by the claim; completion is still uncommitted and must
+    // roll back with every ledger/wallet write if the final credit guards fail.
+    // Leave only credit restoration and COMMIT after admission row locks.
+    if (credits.size) {
       const creditJson = fastJournalCanonicalJson([...credits.values()]);
       // Keep lock acquisition separate from UPDATE: a concurrent intent may
       // commit while this SELECT waits, and the next command must see that row
@@ -951,14 +964,6 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
       );
       if (restored.rowCount !== credits.size) throw new Error('FAST_JOURNAL_STATE_CONFLICT');
     }
-    const completed = await tx.query(
-      `/* fast-journal:worker-complete */ UPDATE saas_fast_billing_jobs j
-      SET state='completed',attempts=attempts+1,ledger_transaction_id=c.ledger_id,completed_at=now(),last_error=NULL
-      FROM jsonb_to_recordset($1::jsonb) AS c(intent_id uuid,ledger_id uuid)
-      WHERE j.intent_id=c.intent_id AND j.state='pending'`,
-      [fastJournalCanonicalJson(valid.map(({ row, ledgerId }) => ({ intent_id: row.id, ledger_id: ledgerId })))],
-    );
-    if (completed.rowCount !== valid.length) throw new Error('FAST_JOURNAL_STATE_CONFLICT');
   }
 
   /** Waits for all known pending successes; blocked unknowns remain durable and backed. */

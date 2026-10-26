@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import { PlatformWalletLedgerService } from '../../../../src/saas/billing/service.js';
 import { saasAdvisoryKey, WALLET_FENCE_SQL } from '../../../../src/saas/db/advisory-lock-keys.js';
 import { createSaasDatabase } from '../../../../src/saas/db/index.js';
-import type { SaasDatabase, SqlResult } from '../../../../src/saas/db/types.js';
+import type { SaasDatabase, SqlExecutor, SqlResult } from '../../../../src/saas/db/types.js';
 import {
   createFastGatewayJournal,
   type FastIntent,
@@ -96,6 +96,20 @@ test('fast money journal real PostgreSQL: atomic reserve, durable completion, ex
     assert.equal(result.kind, 'created');
     if (result.kind !== 'created') throw new Error('reserve denied');
     return result.intent;
+  }
+  async function jobFacts(intentId: string, database: SqlExecutor = gateway) {
+    return (
+      await database.query<{
+        state: string;
+        attempts: number;
+        ledger_transaction_id: string | null;
+        completed_at: Date | null;
+        last_error: string | null;
+      }>(
+        'SELECT state,attempts,ledger_transaction_id,completed_at,last_error FROM saas_fast_billing_jobs WHERE intent_id=$1',
+        [intentId],
+      )
+    ).rows[0];
   }
   await t.test(
     'same-wallet concurrent reservations cannot exceed escrow; strict holds and negative correction cannot spend backing',
@@ -361,7 +375,12 @@ test('fast money journal real PostgreSQL: atomic reserve, durable completion, ex
       assert.equal(
         statements.length,
         10,
-        'one claim/read/fence/allocation read/ledger/balance check/wallet/credit lock/credit/completion for the entire wallet batch',
+        'one claim/read/fence/allocation read/ledger/balance check/wallet/completion/credit lock/credit for the entire wallet batch',
+      );
+      assert.deepEqual(
+        statements.slice(-3).map((sql) => /fast-journal:([a-z-]+)/.exec(sql)?.[1]),
+        ['worker-complete', 'worker-credit-lock', 'worker-credit'],
+        'the credit UPDATE is the final business statement; job completion cannot extend admission row locks',
       );
       assert.equal((await facts(tenantId)).charges, '40');
       assert.equal((await facts(tenantId)).balance, '9720');
@@ -375,7 +394,11 @@ test('fast money journal real PostgreSQL: atomic reserve, durable completion, ex
     'SIGKILL at real journal and worker boundaries retains durable replay and never duplicates a debit',
     { timeout: 60_000 },
     async () => {
-      async function killAt(boundary: string, payload: Record<string, unknown> = {}) {
+      async function killAt(
+        boundary: string,
+        payload: Record<string, unknown> = {},
+        inspectPaused?: () => Promise<void>,
+      ) {
         const child = fork(resolve('tests/saas/gateway/fast/journal-crash-child.ts'), [], {
           execArgv: ['--import', 'tsx'],
           stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
@@ -408,24 +431,49 @@ test('fast money journal real PostgreSQL: atomic reserve, durable completion, ex
         const paused = waitMessage();
         child.send(JSON.parse(fastJournalCanonicalJson({ boundary, ...payload })));
         assert.equal((await paused).kind, 'paused');
-        const exited = once(child, 'exit');
-        child.kill('SIGKILL');
-        const [, signal] = await exited;
-        assert.equal(signal, 'SIGKILL');
+        try {
+          await inspectPaused?.();
+        } finally {
+          const exited = once(child, 'exit');
+          child.kill('SIGKILL');
+          const [, signal] = await exited;
+          assert.equal(signal, 'SIGKILL');
+        }
       }
       for (const boundary of [
         'fast-journal:worker-claim',
         'fast-journal:worker-ledger',
         'fast-journal:worker-balance-check',
         'fast-journal:worker-wallet',
+        'fast-journal:worker-complete',
         'fast-journal:worker-credit-lock',
         'fast-journal:worker-credit',
-        'fast-journal:worker-complete',
       ]) {
         const { tenantId, owner, journal } = await setup();
         const intent = await reserve(journal, intentFixture(tenantId, owner));
         await journal.appendReceipt(receiptFixture(intent));
-        await killAt(boundary);
+        const pendingJob = await jobFacts(intent.id);
+        await killAt(boundary, {}, async () => {
+          if (boundary !== 'fast-journal:worker-complete') return;
+          assert.deepEqual(
+            await jobFacts(intent.id),
+            pendingJob,
+            'uncommitted completion is invisible to other sessions',
+          );
+          assert.deepEqual(
+            await facts(tenantId),
+            {
+              balance: '100',
+              backing: '100',
+              available: '20',
+              intents: '1',
+              charges: '0',
+              completed: '0',
+            },
+            'ledger, wallet and credit remain externally atomic while paused before final credit restoration',
+          );
+        });
+        assert.deepEqual(await jobFacts(intent.id), pendingJob, 'process death restores every job completion field');
         assert.deepEqual(await facts(tenantId), {
           balance: '100',
           backing: '100',
@@ -601,7 +649,8 @@ test('fast money journal real PostgreSQL: atomic reserve, durable completion, ex
       }
       await retired.journal.retireAllocations();
       let balanced = false,
-        projected = 0;
+        projected = 0,
+        completed = false;
       const delayed: SaasDatabase = {
         ...gateway,
         transaction: (work) =>
@@ -612,12 +661,14 @@ test('fast money journal real PostgreSQL: atomic reserve, durable completion, ex
                 if (sql.includes('fast-journal:worker-credit-lock')) {
                   assert.equal(balanced, true);
                   assert.equal(projected, 2);
+                  assert.equal(completed, true, 'job completion precedes admission credit locks');
                   beforeCredit.release();
                   await continueWorker.promise;
                 }
                 const result = await tx.query<Row>(sql, values);
                 if (sql.includes('fast-journal:worker-balance-check')) balanced = true;
                 if (sql.includes('fast-journal:worker-wallet')) projected++;
+                if (sql.includes('fast-journal:worker-complete')) completed = true;
                 return result;
               },
             });
@@ -691,6 +742,7 @@ test('fast money journal real PostgreSQL: atomic reserve, durable completion, ex
       const intent = await reserve(scope.journal, intentFixture(scope.tenantId, scope.owner));
       await scope.journal.appendReceipt(receiptFixture(intent));
       const baseline = await facts(scope.tenantId);
+      const pendingJob = await jobFacts(intent.id);
       for (const fault of ['unbalanced', 'allocation_epoch'] as const) {
         const statements: string[] = [];
         const injected: SaasDatabase = {
@@ -709,6 +761,25 @@ test('fast money journal real PostgreSQL: atomic reserve, durable completion, ex
                     );
                   }
                   if (fault === 'allocation_epoch' && sql.includes('fast-journal:worker-credit */')) {
+                    const uncommitted = await jobFacts(intent.id, tx);
+                    assert.equal(
+                      uncommitted.state,
+                      'completed',
+                      'completion already executed before final credit failure',
+                    );
+                    assert.equal(uncommitted.attempts, 1);
+                    assert.ok(uncommitted.ledger_transaction_id);
+                    assert.ok(uncommitted.completed_at);
+                    assert.deepEqual(
+                      await jobFacts(intent.id),
+                      pendingJob,
+                      'another session still sees the pending job',
+                    );
+                    assert.deepEqual(
+                      await facts(scope.tenantId),
+                      baseline,
+                      'no preceding financial effects are committed',
+                    );
                     const credits = JSON.parse(String(values?.[0]));
                     credits[0].epoch = randomUUID();
                     values = [JSON.stringify(credits)];
@@ -725,6 +796,11 @@ test('fast money journal real PostgreSQL: atomic reserve, durable completion, ex
           assert.ok(!statements.some((sql) => sql.includes('fast-journal:worker-credit')));
         } else await assert.rejects(worker.runOnce(), /FAST_JOURNAL_STATE_CONFLICT/);
         assert.deepEqual(await facts(scope.tenantId), baseline);
+        assert.deepEqual(
+          await jobFacts(intent.id),
+          pendingJob,
+          'failed credit guard rolls completion and its metadata back',
+        );
       }
       assert.equal(await scope.journal.runOnce(), 1);
       assert.equal((await facts(scope.tenantId)).balance, '80');
