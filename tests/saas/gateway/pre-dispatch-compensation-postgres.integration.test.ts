@@ -353,7 +353,7 @@ test('FIN wallet compensation lock order uses real settlement and fresh compensa
     await t.test('test-only missing-first-fence + NO KEY UPDATE mutation still deadlocks the actual wallet debit', () =>
       proveWalletCompensationLockOrder(migrator, gateway, 'test-only-missing-fence-no-key-update'),
     );
-    await t.test('an actual ledger-entry fault rolls back settlement; forbidden gateway writers remain rejected', () =>
+    await t.test('actual ledger-pair and second-entry faults roll back settlement; forbidden gateway writers remain rejected', () =>
       proveWalletSettlementRollback(migrator, gateway),
     );
   } catch (error) {

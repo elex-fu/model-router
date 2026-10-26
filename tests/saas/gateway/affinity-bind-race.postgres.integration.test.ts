@@ -122,9 +122,82 @@ interface ReadCounts {
   concurrency: number;
 }
 
+interface HealthQueryCounts {
+  batches: number;
+  singles: number;
+}
+
+/** Count candidate observations, not SQL statements. Keep the native results unchanged. */
+function observeHealthRead(
+  sql: string,
+  values: readonly unknown[] | undefined,
+  result: SqlResult<unknown>,
+  observations: ReadonlyMap<string, ReadCounts>,
+  queries: HealthQueryCounts,
+): boolean {
+  const batch = sql.includes('/* provider-account-runtime-health:scheduling-batch */');
+  const single =
+    /SELECT state, observed_at, cooldown_until/.test(sql) && sql.includes('saas_provider_account_runtime_health');
+  if (!batch && !single) return false;
+  if (batch) {
+    const accounts: unknown = values?.[1];
+    assert.ok(Array.isArray(accounts) && accounts.length > 0, 'batch must request original candidate accounts');
+    assert.equal(new Set(accounts).size, accounts.length, 'batch must not duplicate candidate accounts');
+    assert.deepEqual(
+      values?.[0],
+      accounts.map(() => 'platform'),
+      'health owner scope must remain platform',
+    );
+    assert.deepEqual(
+      values?.[2],
+      accounts.map(() => 'platform'),
+      'health owner kind must remain platform',
+    );
+    assert.deepEqual(
+      values?.[3],
+      accounts.map(() => null),
+      'platform health has no tenant owner',
+    );
+    assert.equal(result.rows.length, accounts.length, 'each real candidate must have exactly one health row');
+    const seen = new Set<number>();
+    for (const value of result.rows) {
+      assert.ok(value !== null && typeof value === 'object');
+      const row = value as { request_index?: unknown; state?: unknown };
+      const ordinal =
+        typeof row.request_index === 'string' && /^[1-9][0-9]*$/.test(row.request_index)
+          ? Number(row.request_index)
+          : row.request_index;
+      assert.ok(
+        typeof ordinal === 'number' && Number.isSafeInteger(ordinal) && ordinal >= 1 && ordinal <= accounts.length,
+        'health batch ordinal must address its exact requested account',
+      );
+      assert.ok(!seen.has(ordinal), 'health batch must not duplicate a requested observation');
+      seen.add(ordinal);
+      const account: unknown = accounts[ordinal - 1];
+      assert.ok(typeof account === 'string' && observations.has(account), 'read must address an original candidate');
+      assert.equal(row.state, 'healthy');
+      present(observations.get(account)).health += 1;
+    }
+    queries.batches += 1;
+  } else {
+    const account = values?.[1];
+    assert.ok(typeof account === 'string' && observations.has(account), 'read must address an original candidate');
+    assert.equal(result.rows.length, 1);
+    assert.equal((result.rows[0] as { state?: unknown }).state, 'healthy');
+    present(observations.get(account)).health += 1;
+    queries.singles += 1;
+  }
+  return true;
+}
+
 /** Observe exact driver calls/results; preserve native prepared capability and every value. */
-function observeDatabase(database: SaasDatabase, observations: Map<string, ReadCounts>): SaasDatabase {
+function observeDatabase(
+  database: SaasDatabase,
+  observations: Map<string, ReadCounts>,
+  healthQueries: HealthQueryCounts,
+): SaasDatabase {
   const note = (sql: string, values: readonly unknown[] | undefined, result: SqlResult<unknown>) => {
+    if (observeHealthRead(sql, values, result, observations, healthQueries)) return;
     let kind: keyof ReadCounts | undefined;
     let account: unknown;
     if (sql.includes('postgres-provider-account-scheduler:platform-eligibility')) {
@@ -135,14 +208,6 @@ function observeDatabase(database: SaasDatabase, observations: Map<string, ReadC
       kind = 'concurrency';
       account = values?.[2];
       assert.deepEqual(result.rows, [{ in_flight: '0' }], 'race revalidation must read real free PG capacity');
-    } else if (
-      /SELECT state, observed_at, cooldown_until/.test(sql) &&
-      sql.includes('saas_provider_account_runtime_health')
-    ) {
-      kind = 'health';
-      account = values?.[1];
-      assert.equal(result.rows.length, 1);
-      assert.equal((result.rows[0] as { state?: unknown }).state, 'healthy');
     }
     if (kind !== undefined) {
       assert.ok(typeof account === 'string' && observations.has(account), 'read must address an original candidate');
@@ -712,6 +777,10 @@ async function runRace(afterStaleClear: boolean) {
     const reads = candidates.map(
       () => new Map(candidates.map(({ accountId }) => [accountId, { eligibility: 0, health: 0, concurrency: 0 }])),
     );
+    const healthQueries = [
+      { batches: 0, singles: 0 },
+      { batches: 0, singles: 0 },
+    ];
     let loserSnapshotProved = false;
     const ports = [affinityA, affinityB].map(
       (inner, index): ProviderAccountSchedulerAffinityPort => ({
@@ -772,8 +841,8 @@ async function runRace(afterStaleClear: boolean) {
       { ...input, requestId: requestB },
     ];
     const schedulers = [
-      scheduler(observeDatabase(gateway, present(reads[0])), present(ports[0])),
-      scheduler(observeDatabase(otherGateway, present(reads[1])), present(ports[1])),
+      scheduler(observeDatabase(gateway, present(reads[0]), present(healthQueries[0])), present(ports[0])),
+      scheduler(observeDatabase(otherGateway, present(reads[1]), present(healthQueries[1])), present(ports[1])),
     ];
     const decisions = await Promise.all(
       schedulers.map((current, index) =>
@@ -803,6 +872,14 @@ async function runRace(afterStaleClear: boolean) {
     assert.deepEqual(present(reads[0]).get(loser.accountId), { eligibility: 1, health: 1, concurrency: 1 });
     assert.deepEqual(present(reads[1]).get(winner.accountId), { eligibility: 2, health: 2, concurrency: 2 });
     assert.deepEqual(present(reads[1]).get(loser.accountId), { eligibility: 1, health: 1, concurrency: 1 });
+    assert.deepEqual(
+      healthQueries,
+      [
+        { batches: 1, singles: 0 },
+        { batches: 2, singles: 0 },
+      ],
+      'one batch per collection, with a new winner-revalidation batch and no N+1 point-read fallback',
+    );
     const finalRows = await affinityRows(migrator, fixture);
     assert.deepEqual(
       finalRows.map(({ reference_kind }) => reference_kind),
@@ -864,8 +941,13 @@ interface CapacityReadCounts extends ReadCounts {
 }
 
 /** Observe the real capacity transitions without replacing any PG result. */
-function observeCapacityDatabase(database: SaasDatabase, observations: Map<string, CapacityReadCounts>): SaasDatabase {
+function observeCapacityDatabase(
+  database: SaasDatabase,
+  observations: Map<string, CapacityReadCounts>,
+  healthQueries: HealthQueryCounts,
+): SaasDatabase {
   const note = (sql: string, values: readonly unknown[] | undefined, result: SqlResult<unknown>) => {
+    if (observeHealthRead(sql, values, result, observations, healthQueries)) return;
     let kind: keyof ReadCounts | undefined;
     let account: unknown;
     if (sql.includes('postgres-provider-account-scheduler:platform-eligibility')) {
@@ -880,14 +962,6 @@ function observeCapacityDatabase(database: SaasDatabase, observations: Map<strin
       assert.ok(typeof count === 'string' && /^(0|[1-9][0-9]*)$/.test(count));
       assert.ok(typeof account === 'string' && observations.has(account));
       present(observations.get(account)).inFlight.push(count);
-    } else if (
-      /SELECT state, observed_at, cooldown_until/.test(sql) &&
-      sql.includes('saas_provider_account_runtime_health')
-    ) {
-      kind = 'health';
-      account = values?.[1];
-      assert.equal(result.rows.length, 1);
-      assert.equal((result.rows[0] as { state?: unknown }).state, 'healthy');
     }
     if (kind !== undefined) {
       assert.ok(typeof account === 'string' && observations.has(account), 'read must address an original candidate');
@@ -1044,6 +1118,7 @@ async function runCapacityBoundary(boundary: CapacityBoundary) {
         },
       ]),
     );
+    const healthQueries = { batches: 0, singles: 0 };
     const counts = { resolveA: 0, bindA: 0, resolveB: 0, bindB: 0, resolveC: 0, bindC: 0 };
     let firstLoserUnchanged = false;
     let secondLoserUnchanged = false;
@@ -1094,7 +1169,7 @@ async function runCapacityBoundary(boundary: CapacityBoundary) {
       },
     });
     const bound = publicScheduler(
-      observeCapacityDatabase(gateway, reads),
+      observeCapacityDatabase(gateway, reads, healthQueries),
       {
         async resolve(authority) {
           counts.resolveA += 1;
@@ -1178,6 +1253,11 @@ async function runCapacityBoundary(boundary: CapacityBoundary) {
     assert.equal(decision.decision, 'reject');
     if (decision.decision === 'reject') assert.equal(decision.code, 'rate_limited');
     const expectedChecks = boundary === 'initial_busy' ? 1 : 2;
+    assert.deepEqual(
+      healthQueries,
+      { batches: expectedChecks, singles: 0 },
+      'capacity revalidation must use one fresh health batch per collection without point-read fallback',
+    );
     assert.deepEqual(reads.get(winnerP.accountId), {
       eligibility: expectedChecks,
       health: expectedChecks,

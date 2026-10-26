@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { setTimeout as delay } from 'node:timers/promises';
 import { SaasBillingError } from '../../../src/saas/billing/errors.js';
 import { saasAdvisoryKey, WALLET_FENCE_SQL } from '../../../src/saas/db/advisory-lock-keys.js';
-import type { SaasDatabase, SqlExecutor } from '../../../src/saas/db/types.js';
+import type { SaasDatabase, SqlExecutor, SqlResult } from '../../../src/saas/db/types.js';
 import { PostgresPreDispatchCompensation } from '../../../src/saas/gateway/postgres-pre-dispatch-compensation.js';
 import { createPostgresPreparationCapacityPort } from '../../../src/saas/gateway/postgres-preparation-capacity.js';
 import { GatewayPreDispatchCompensationService } from '../../../src/saas/gateway/pre-dispatch-compensation-service.js';
@@ -26,12 +26,40 @@ export const WALLET_COMPENSATION_LEGACY_SOURCE_SQL = `SELECT e.* FROM saas_prepa
 export const WALLET_COMPENSATION_PINNED_SOURCE_SQL = `SELECT e.* FROM saas_prepared_request_evidence e
      WHERE e.tenant_id = $1 AND e.request_id = $2 AND e.id = $3`;
 const COMPENSATION_WALLET_ROW_SQL = 'SELECT id FROM saas_wallets WHERE tenant_id = $1 AND currency = $2 FOR UPDATE';
-const LEDGER_ENTRY_SQL = `INSERT INTO saas_ledger_entries
-          (id, transaction_id, tenant_id, currency, direction, amount_minor_units,
-           account_type, account_ref, wallet_id, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`;
-const WALLET_PROJECTION_SQL = `UPDATE saas_wallets
+// Exact current production templates: the gate must fail closed if either SQL
+// shape changes without also reviewing its binding/result and lock assertions.
+const LEDGER_PAIR_SQL = `/* billing:post-ledger-pair */
+       WITH posting AS (
+         INSERT INTO saas_ledger_transactions
+           (id, tenant_id, currency, idempotency_namespace, business_key, source_type,
+            amount_minor_units, metadata_ref, source_order_ref, price_snapshot_ref, usage_evidence_ref, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+         ON CONFLICT DO NOTHING
+         RETURNING id, tenant_id, currency, idempotency_namespace, business_key, source_type,
+                   amount_minor_units, metadata_ref, source_order_ref, price_snapshot_ref,
+                   usage_evidence_ref, created_at
+       ), entries AS (
+         INSERT INTO saas_ledger_entries
+           (id, transaction_id, tenant_id, currency, direction, amount_minor_units,
+            account_type, account_ref, wallet_id, created_at)
+         SELECT entry.id, posting.id, posting.tenant_id, posting.currency, entry.direction,
+                posting.amount_minor_units, entry.account_type, entry.account_ref, entry.wallet_id, posting.created_at
+           FROM posting
+           CROSS JOIN (VALUES
+             ($13::uuid, $15::text, 'wallet'::text, $16::text, $16::uuid),
+             ($14::uuid, $17::text, $18::text, $19::text, NULL::uuid)
+           ) entry(id, direction, account_type, account_ref, wallet_id)
+         RETURNING 1 AS inserted
+       )
+       SELECT posting.*, (SELECT count(*)::text FROM entries) AS inserted_entry_count FROM posting`;
+const WALLET_PROJECTION_SQL = `/* billing:project-ledger */
+       WITH projection_context AS MATERIALIZED (
+         SELECT set_config('saas.billing_ledger_projection_write', 'on', true),
+                set_config('saas.billing_ledger_transaction_id', $6, true)
+       )
+       UPDATE saas_wallets
        SET posted_balance_minor_units = posted_balance_minor_units + $4, updated_at = $5
+       FROM projection_context
        WHERE id = $1 AND tenant_id = $2 AND currency = $3
          AND posted_balance_minor_units + $4 >= 0
        RETURNING id, tenant_id, currency, posted_balance_minor_units, created_at, updated_at`;
@@ -111,6 +139,46 @@ async function walletFixture(migrator: SaasDatabase, gateway: SaasDatabase) {
   return { settlement, cancellation, walletId: wallet.id };
 }
 type WalletFixture = Awaited<ReturnType<typeof walletFixture>>;
+
+function assertSettlementPairBindings(values: readonly unknown[] | undefined, fixture: WalletFixture) {
+  assert.ok(values);
+  assert.equal(values.length, 19, 'only the exact current ledger-pair bindings are observed');
+  assert.deepEqual(values.slice(1, 7), [
+    fixture.settlement.tenantId,
+    'USD',
+    'saas.billing.settlement',
+    fixture.settlement.input.settlementKey,
+    'billing_settlement',
+    fixture.settlement.input.chargeAmountMinorUnits,
+  ]);
+  assert.equal(values[8], null);
+  assert.equal(values[9], fixture.settlement.input.priceSnapshotRef);
+  assert.equal(values[10], fixture.settlement.input.usageEvidenceRef);
+  assert.deepEqual(values.slice(14), ['debit', fixture.walletId, 'credit', 'billing_revenue', 'platform-revenue:USD']);
+  for (const index of [0, 12, 13]) {
+    assert.equal(typeof values[index], 'string');
+    assert.match(String(values[index]), /^[a-f0-9-]{36}$/);
+  }
+  assert.notEqual(values[12], values[13], 'production must supply distinct entry identities before any test mutation');
+}
+
+function assertInsertedPair<Row>(result: SqlResult<Row>, values: readonly unknown[] | undefined) {
+  assert.equal(result.rowCount, 1);
+  assert.equal(result.rows.length, 1);
+  const row: unknown = result.rows[0];
+  assert.ok(row && typeof row === 'object');
+  for (const [key, value] of [
+    ['id', values?.[0]],
+    ['tenant_id', values?.[1]],
+    ['currency', values?.[2]],
+    ['amount_minor_units', values?.[6]],
+    ['inserted_entry_count', '2'],
+  ] as const) {
+    assert.ok(key in row);
+    assert.equal(Reflect.get(row, key), value, `real PostgreSQL ledger pair ${key} must match`);
+  }
+  return 2;
+}
 
 function signal<T>() {
   let resolve: (value: T) => void = () => {
@@ -236,6 +304,7 @@ export async function proveWalletCompensationLockOrder(
   const events: string[] = [];
   let aCurrent = '';
   let ledgerAttempts = 0;
+  let ledgerTransactionId: unknown;
   let ledgerWrites = 0;
   let projectionAttempts = 0;
   let projectionWrites = 0;
@@ -246,17 +315,22 @@ export async function proveWalletCompensationLockOrder(
       aPid.resolve(await backendPid(tx));
       return work({
         async query<Row>(sql: string, values?: readonly unknown[]) {
-          const ledger = sql === LEDGER_ENTRY_SQL;
+          const ledger = sql === LEDGER_PAIR_SQL;
           const projection = sql === WALLET_PROJECTION_SQL;
-          if (ledger && ++ledgerAttempts === 1) {
-            assert.equal(values?.[2], fixture.settlement.tenantId);
-            assert.equal(values?.[4], 'debit');
-            assert.equal(values?.[5], fixture.settlement.input.chargeAmountMinorUnits);
-            assert.equal(values?.[8], fixture.walletId);
+          if (ledger) {
+            assert.equal(++ledgerAttempts, 1, 'A must attempt exactly one real ledger pair');
+            assertSettlementPairBindings(values, fixture);
+            ledgerTransactionId = values?.[0];
             ledgerEntered.resolve(undefined);
             await continueLedger.promise;
           }
           if (projection) {
+            assert.equal(values?.length, 6);
+            assert.equal(
+              values?.[5],
+              ledgerTransactionId,
+              'projection trigger context must name the actual ledger pair',
+            );
             assert.deepEqual(values?.slice(0, 4), [fixture.walletId, fixture.settlement.tenantId, 'USD', '-12']);
             projectionAttempts++;
           }
@@ -268,8 +342,7 @@ export async function proveWalletCompensationLockOrder(
               events.push('a-wallet-fence');
             }
             if (ledger) {
-              assert.equal(result.rowCount, 1);
-              ledgerWrites++;
+              ledgerWrites += assertInsertedPair(result, values);
             }
             if (projection) {
               assert.equal(result.rowCount, 1);
@@ -294,7 +367,10 @@ export async function proveWalletCompensationLockOrder(
   );
   let b: ReturnType<GatewayPreDispatchCompensationService['compensate']> | undefined;
   try {
-    await Promise.race([ledgerEntered.promise, a.then(() => assert.fail('A must reach the real first ledger INSERT'))]);
+    await Promise.race([
+      ledgerEntered.promise,
+      a.then(() => assert.fail('A must reach the real atomic ledger-pair INSERT')),
+    ]);
     assert.ok(events.includes('a-wallet-fence'), 'the real billing wallet advisory must precede the A barrier');
     const service = new GatewayPreDispatchCompensationService(
       {
@@ -450,38 +526,70 @@ export async function proveWalletSettlementRollback(migrator: SaasDatabase, gate
   const fixture = await walletFixture(migrator, gateway);
   const before = await financialSnapshot(migrator, fixture);
   const beforeB = await cancellationSnapshot(migrator, fixture.cancellation);
-  const sentinel = new Error('test-only fault after actual first settlement ledger entry');
-  let inserted = 0;
-  let faultThrown: Error | undefined;
-  const database = mappedDatabase(gateway, gateway.query.bind(gateway), (work) =>
-    cancellationTransaction(gateway, (tx) =>
-      work({
-        async query<Row>(sql: string, values?: readonly unknown[]) {
-          const result = await tx.query<Row>(sql, values);
-          if (sql === LEDGER_ENTRY_SQL && ++inserted === 1) {
-            assert.equal(result.rowCount, 1);
+  // An atomic statement has no JavaScript boundary between its two entries.
+  // Exercise both caller rollback after the real pair and a genuine PostgreSQL
+  // second-entry constraint failure inside that same production statement.
+  for (const fault of ['after-pair', 'duplicate-second-entry'] as const) {
+    const sentinel = new Error('test-only fault after actual settlement ledger pair');
+    let attempts = 0;
+    let inserted = 0;
+    let faultThrown: Error | undefined;
+    let postgresState: string | undefined;
+    let postgresConstraint: unknown;
+    const database = mappedDatabase(gateway, gateway.query.bind(gateway), (work) =>
+      cancellationTransaction(gateway, (tx) =>
+        work({
+          async query<Row>(sql: string, values?: readonly unknown[]): Promise<SqlResult<Row>> {
+            if (sql !== LEDGER_PAIR_SQL) return tx.query<Row>(sql, values);
+            assertSettlementPairBindings(values, fixture);
+            assert.equal(++attempts, 1, 'exactly one real settlement pair must be attempted');
+            assert.ok(values);
+            if (fault === 'duplicate-second-entry') {
+              const duplicate = [...values];
+              duplicate[13] = duplicate[12];
+              try {
+                return await tx.query<Row>(sql, duplicate);
+              } catch (error) {
+                postgresState = cancellationSqlState(error);
+                if (error && typeof error === 'object' && 'constraint' in error) postgresConstraint = error.constraint;
+                throw error;
+              }
+            }
+            const result = await tx.query<Row>(sql, values);
+            inserted += assertInsertedPair(result, values);
             faultThrown = sentinel;
             throw sentinel;
-          }
-          return result;
-        },
-      }),
-    ),
-  );
-  await assert.rejects(
-    new DurableNormalSuccessSettlementPort(database, fixture.settlement).complete(fixture.settlement.input),
-    (error: unknown) => {
-      assert.equal(inserted, 1, 'the fault must follow the actual first ledger INSERT');
-      assert.equal(faultThrown, sentinel, 'the exact fault must be thrown after the successful INSERT assertion');
-      assert.ok(error instanceof SaasBillingError);
-      assert.equal(error.code, 'BILLING_STORAGE_ERROR');
-      assert.equal(error.cause, undefined, 'the billing public error intentionally does not retain its internal cause');
-      return true;
-    },
-  );
-  assert.equal(inserted, 1);
-  assert.deepEqual(await financialSnapshot(migrator, fixture), before);
-  assert.deepEqual(await cancellationSnapshot(migrator, fixture.cancellation), beforeB);
+          },
+        }),
+      ),
+    );
+    await assert.rejects(
+      new DurableNormalSuccessSettlementPort(database, fixture.settlement).complete(fixture.settlement.input),
+      (error: unknown) => {
+        assert.equal(attempts, 1, 'the fault must exercise the actual production ledger-pair INSERT');
+        if (fault === 'after-pair') {
+          assert.equal(inserted, 2, 'both actual entries must be acknowledged before the caller fault');
+          assert.equal(faultThrown, sentinel);
+          assert.equal(postgresState, undefined);
+        } else {
+          assert.equal(postgresState, '23505', 'the real entry primary key must reject the second entry');
+          assert.equal(postgresConstraint, 'saas_ledger_entries_pkey');
+          assert.equal(inserted, 0, 'the failed statement must never acknowledge a ledger pair');
+          assert.equal(faultThrown, undefined, 'no JavaScript fault may substitute for the PostgreSQL failure');
+        }
+        assert.ok(error instanceof SaasBillingError);
+        assert.equal(error.code, 'BILLING_STORAGE_ERROR');
+        assert.equal(
+          error.cause,
+          undefined,
+          'the billing public error intentionally does not retain its internal cause',
+        );
+        return true;
+      },
+    );
+    assert.deepEqual(await financialSnapshot(migrator, fixture), before);
+    assert.deepEqual(await cancellationSnapshot(migrator, fixture.cancellation), beforeB);
+  }
   const service = new GatewayPreDispatchCompensationService(
     { transaction: (work) => cancellationTransaction(gateway, work) },
     compensationPort(fixture),
