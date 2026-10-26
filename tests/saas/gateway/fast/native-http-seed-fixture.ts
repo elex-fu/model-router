@@ -375,5 +375,5 @@ export async function seedNativeFastHttpInventory(database: SaasDatabase, kmsEnv
       metadataRef: 'r9-no-real-payment',
     });
   });
-  return { tenantId: tenant.id, projectId: project.id, key: key.secret, inventory };
+  return { tenantId: tenant.id, projectId: project.id, keyId: key.id, key: key.secret, inventory };
 }

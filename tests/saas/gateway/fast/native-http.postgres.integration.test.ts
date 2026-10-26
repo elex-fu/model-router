@@ -129,6 +129,28 @@ test(`required native fast HTTP ${scenario}: first funded send and exact durable
     MODEL_ROUTER_SAAS_SOFTWARE_KMS_KEY_ID: 'r9-local-test',
   };
   const seeded = await seedNativeFastHttpInventory(migrator, kmsEnv);
+  const readRateLimits = async () =>
+    (
+      await migrator.query<{ scope: string; rpm: string; tpm: string; concurrency: string }>(
+        `SELECT 'tenant' AS scope, requests_per_minute::text AS rpm, tokens_per_minute::text AS tpm,
+          max_concurrent_requests::text AS concurrency FROM saas_tenants WHERE id=$1
+        UNION ALL SELECT 'project', v.requests_per_minute::text, v.tokens_per_minute::text, v.max_concurrent_requests::text
+          FROM saas_projects p JOIN saas_project_inference_policy_versions v
+          ON v.tenant_id=p.tenant_id AND v.project_id=p.id AND v.version=p.inference_policy_version
+          WHERE p.tenant_id=$1 AND p.id=$2
+        UNION ALL SELECT 'key', requests_per_minute::text, tokens_per_minute::text, max_concurrent_requests::text
+          FROM saas_api_keys WHERE tenant_id=$1 AND project_id=$2 AND id=$3 ORDER BY scope`,
+        [seeded.tenantId, seeded.projectId, seeded.keyId],
+      )
+    ).rows;
+  const initialRateLimits = scenario === 'builtin-default' ? await readRateLimits() : undefined;
+  if (initialRateLimits) {
+    assert.deepEqual(
+      initialRateLimits,
+      ['key', 'project', 'tenant'].map((scope) => ({ scope, rpm: '600000', tpm: '600000000', concurrency: '64' })),
+      'native default uses the original fixture limits, never an inflated TPM ceiling',
+    );
+  }
   const route = seeded.inventory[0];
   assert.ok(route);
   assert.equal(
@@ -485,6 +507,80 @@ test(`required native fast HTTP ${scenario}: first funded send and exact durable
   if (pressure)
     assert.ok(BigInt(facts.backing) <= 1_000_000n, 'completed pressure rounds retain the explicit hard cap');
   if (scenario === 'builtin-default') {
+    assert.deepEqual(
+      await readRateLimits(),
+      initialRateLimits,
+      'successful reconciliation never changes policy limits',
+    );
+    // Only the clean default has four successful admissions. Pressure failures
+    // intentionally retain their upper bounds and must not use this ratio.
+    const scopes = [
+      ['tenant', seeded.tenantId],
+      ['project', seeded.tenantId, seeded.projectId],
+      ['key', seeded.tenantId, seeded.projectId, seeded.keyId],
+    ];
+    const rateKeys = scopes.map(
+      (scope) => `${prefix}:rate:${createHash('sha256').update(JSON.stringify(scope)).digest('hex')}`,
+    );
+    assert.deepEqual(
+      (await redis.keys(`${prefix}:rate:*`)).sort(),
+      [...rateKeys].sort(),
+      'exact enabled tenant/project/key counters; fixture accounts have no RPM or TPM limit',
+    );
+    // Financial drain and admission release are independent acknowledgements.
+    // Observe release; never delete, reset, or otherwise repair Redis state.
+    const releaseDeadline = Date.now() + 5_000;
+    let liveSlots = -1;
+    do {
+      const slotKeys = await redis.keys(`${prefix}:slots:*`);
+      liveSlots = (await Promise.all(slotKeys.map((key) => redis.zCard(key)))).reduce((sum, count) => sum + count, 0);
+      if (liveSlots === 0) break;
+      await delay(10);
+    } while (Date.now() < releaseDeadline);
+    assert.equal(liveSlots, 0, 'all owned tenant/project/key/account concurrency slots are released');
+    const clock = (await redis.sendCommand(['TIME'])) as string[];
+    const nowMs = Number(clock[0]) * 1000 + Math.floor(Number(clock[1]) / 1000);
+    const leaseKeys = await redis.keys(`${prefix}:lease:*`);
+    assert.equal(leaseKeys.length, 4, 'four actual admissions retain immutable release receipts');
+    const values = await redis.mGet([...rateKeys, ...leaseKeys]);
+    const expectedBuckets = new Map<string, number>();
+    for (const raw of values.slice(rateKeys.length)) {
+      assert.ok(raw);
+      const lease = JSON.parse(raw) as { state: string; bucket: string; tokenUnits: number };
+      assert.equal(lease.state, 'released');
+      assert.equal(lease.tokenUnits, 262208, 'original built-in reservation remains on the release receipt');
+      assert.match(lease.bucket, /^\d+$/);
+      if (Number(lease.bucket) * 1000 + 1000 > nowMs - 60_000) {
+        expectedBuckets.set(lease.bucket, (expectedBuckets.get(lease.bucket) ?? 0) + 1);
+      }
+    }
+    const currentRequests = [...expectedBuckets.values()].reduce((sum, count) => sum + count, 0);
+    assert.ok(currentRequests >= 1 && currentRequests <= 4, 'at least the latest admitted request is still in-window');
+    const counters = values.slice(0, rateKeys.length);
+    for (const [index, raw] of counters.entries()) {
+      assert.ok(raw, `${scopes[index]?.[0]} rate counter must remain after release`);
+      const counter = JSON.parse(raw) as { buckets: Record<string, [number, number]> };
+      let requests = 0;
+      let tokens = 0;
+      // Authority uses trailing one-second buckets, not a fixed minute reset.
+      // A wall-clock minute rollover can split four sends across buckets; sum
+      // only the still-current window, while preserving every bucket's RPM.
+      const currentBuckets = Object.entries(counter.buckets).filter(
+        ([bucket]) => Number(bucket) * 1000 + 1000 > nowMs - 60_000,
+      );
+      assert.deepEqual(currentBuckets.map(([bucket]) => bucket).sort(), [...expectedBuckets.keys()].sort());
+      for (const [bucket, [bucketRequests, bucketTokens]] of currentBuckets) {
+        assert.equal(bucketRequests, expectedBuckets.get(bucket), 'RPM exactly preserves original admitted leases');
+        assert.equal(bucketTokens, bucketRequests * 15, 'actual input10 + output5 reconciles each admission bucket');
+        requests += bucketRequests;
+        tokens += bucketTokens;
+      }
+      assert.equal(requests, currentRequests, 'no successful admission is erased from current-window RPM');
+      assert.equal(tokens, requests * 15, 'actual TPM is reconciled without refunding RPM');
+      t.diagnostic(
+        `${scopes[index]?.[0]}: current-window RPM=${requests} TPM=${tokens} slots=0 limits=600000/600000000/64`,
+      );
+    }
     assert.equal(automaticTarget, 67133440n, 'trusted C64 sets exact 2*M*C target');
     assert.equal(
       BigInt(facts.backing) + BigInt(facts.charge),

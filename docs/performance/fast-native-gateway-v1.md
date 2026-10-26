@@ -1,6 +1,6 @@
 # Native fast gateway, first vertical slice
 
-Status: implemented behind an **off-by-default** flag; paid native integration and a clean automatic-default, actual-estimator sustained paired run have passed; finite-repeat latency variance remains under investigation. This is a separate data plane, not another small reduction in the legacy proof chain. No deployment is implied.
+Status: implemented behind an **off-by-default** flag; paid native integration and a clean automatic-default, actual-estimator sustained paired run have passed; finite-repeat latency variance and credit-admission failures remain under investigation. This is a separate data plane, not another small reduction in the legacy proof chain. No deployment is implied.
 
 ## Ordinary warm request
 
@@ -47,6 +47,8 @@ Rollback disables the flag for **new requests**, while the durable receipt worke
 ## Validation at the integration checkpoint
 
 Focused tests cover paid JSON/SSE reserve and exact usage; mixed-case SSE media type; durable terminal barrier; duplicate and lost intent acknowledgement; expiry during intent wait; strict pre-intent fallback; receipt storage failure; cold-only callback invocation and exact routing identity; unsafe header rejection. Existing HTTP/composition regressions remain green. Real restricted-role PostgreSQL/Redis tests are separately supplied by the journal, snapshots and admission components. Native paid HTTP and request-scoped SQL census have passed; finite paired runs with an explicit adequately funded tranche reached 95–101% of contemporaneous sub2api throughput. A separate one-million-unit sustained pressure scene correctly rejected when outstanding maximum liability exhausted that explicit cap. A later clean automatic-default run using the real built-in estimator completed 27,564/27,564 requests over 60 seconds at 459.09 RPS versus paired sub2api 400.22 RPS, with exact financial drains. Its finite repeats retained one slow outlier; stability follow-up and the complete operational fault matrix remain separate gates, not inferred from the sustained pass.
+
+The subsequent clean generation-6 test of local source `770d736` (published equivalent `6d755f6`) did not pass acceptance. Its first c32 pair completed 1,000/1,000 at 379.32 RPS versus sub2api 411.09 RPS (92.27%). The second fast scene returned 980 successes, 19 `FAST_CREDIT_NOT_READY` 429s and one `FAST_CREDIT_BUSY` 503; the zero-rejection gate stopped the run before the second sub2api scene and third pair. All 1,980 successful responses reconciled exactly, with no unknown settlement. The incomplete repeated run is a failure, not evidence of stable performance parity; the earlier sustained success does not override it.
 
 ## Read-side integration boundary
 

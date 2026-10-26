@@ -209,3 +209,18 @@ test('default native gate uses actual built-in M and omitted automatic/pool sett
   assert.match(source, /after\.intents, before\.intents/);
   assert.match(source, /BigInt\(after\.backing\) <= 1_000_000n/);
 });
+
+test('default native gate requires actual TPM reconciliation without erasing RPM or changing limits', () => {
+  const source = read(native);
+  const defaultDrain = source.slice(source.lastIndexOf("if (scenario === 'builtin-default')"));
+  assert.match(source, /rpm: '600000', tpm: '600000000', concurrency: '64'/);
+  assert.match(defaultDrain, /readRateLimits\(\),\s*initialRateLimits/);
+  assert.match(defaultDrain, /liveSlots, 0/);
+  assert.match(defaultDrain, /leaseKeys.length, 4/);
+  assert.match(defaultDrain, /lease.state, 'released'/);
+  assert.match(defaultDrain, /bucketRequests, expectedBuckets.get\(bucket\)/);
+  assert.match(defaultDrain, /bucketTokens, bucketRequests \* 15/);
+  assert.match(defaultDrain, /requests, currentRequests/);
+  assert.match(defaultDrain, /tokens, requests \* 15/);
+  assert.doesNotMatch(defaultDrain, /redis\.(?:set|del|flushDb|flushAll)\(/);
+});
