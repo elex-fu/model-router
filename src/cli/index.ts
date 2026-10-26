@@ -110,6 +110,21 @@ program
   );
 
 program
+  .command('saas:fast-billing-worker')
+  .description('Explicit drain-only durable fast billing worker; no gateway admission or Redis')
+  .option('--once', 'Process immediately claimable jobs and exit; unknown liabilities remain backed')
+  .option('--poll-ms <milliseconds>', 'Base durable polling interval (10-60000; default 250)')
+  .option('--batch-size <count>', 'Atomic settlement batch size (1-1000; default 128)')
+  .option('--allow-local-plaintext', 'Allow explicit sslmode=disable for loopback disposable PostgreSQL')
+  .addHelpText(
+    'after',
+    '\nRequires MODEL_ROUTER_SAAS_GATEWAY_DATABASE_URL with the non-owning gateway login. Verified TLS is the default. No migrations, grants, Redis, snapshots, KMS or upstream calls are performed. SIGTERM/SIGINT drain and close gracefully.\n',
+  )
+  .action((options) =>
+    management(async () => (await import('./saas-fast-billing-worker.js')).saasFastBillingWorker(options)),
+  );
+
+program
   .command('saas:migrate')
   .description('Apply SaaS database migrations explicitly. Server startup never runs migrations.')
   .action(() => management(async () => (await import('./saas-migrations.js')).saasMigrate()));

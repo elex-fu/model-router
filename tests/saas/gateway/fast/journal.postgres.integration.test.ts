@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
-import { fork } from 'node:child_process';
+import { fork, spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { test } from 'node:test';
 import { PlatformWalletLedgerService } from '../../../../src/saas/billing/service.js';
+import { WALLET_FENCE_SQL } from '../../../../src/saas/db/advisory-lock-keys.js';
 import { createSaasDatabase } from '../../../../src/saas/db/index.js';
 import type { SaasDatabase, SqlResult } from '../../../../src/saas/db/types.js';
 import {
@@ -249,7 +250,9 @@ test('fast money journal real PostgreSQL: atomic reserve, durable completion, ex
       await receipts.appendReceipt(receipt);
       for (const boundary of [
         'fast-journal:worker-ledger',
+        'fast-journal:worker-balance-check',
         'fast-journal:worker-wallet',
+        'fast-journal:worker-credit-lock',
         'fast-journal:worker-credit',
         'fast-journal:worker-complete',
       ]) {
@@ -260,7 +263,7 @@ test('fast money journal real PostgreSQL: atomic reserve, durable completion, ex
               work({
                 query: async <Row>(sql: string, values?: readonly unknown[]): Promise<SqlResult<Row>> => {
                   const result = await tx.query<Row>(sql, values);
-                  if (sql.includes(boundary)) throw new Error('injected crash');
+                  if (sql.includes(`${boundary} */`)) throw new Error('injected crash');
                   return result;
                 },
               }),
@@ -357,8 +360,8 @@ test('fast money journal real PostgreSQL: atomic reserve, durable completion, ex
       assert.equal(await worker.runOnce(128), 40);
       assert.equal(
         statements.length,
-        8,
-        'one claim/read/fence/allocation read/ledger/wallet/credit/completion for the entire wallet batch',
+        10,
+        'one claim/read/fence/allocation read/ledger/balance check/wallet/credit lock/credit/completion for the entire wallet batch',
       );
       assert.equal((await facts(tenantId)).charges, '40');
       assert.equal((await facts(tenantId)).balance, '9720');
@@ -413,7 +416,9 @@ test('fast money journal real PostgreSQL: atomic reserve, durable completion, ex
       for (const boundary of [
         'fast-journal:worker-claim',
         'fast-journal:worker-ledger',
+        'fast-journal:worker-balance-check',
         'fast-journal:worker-wallet',
+        'fast-journal:worker-credit-lock',
         'fast-journal:worker-credit',
         'fast-journal:worker-complete',
       ]) {
@@ -541,6 +546,192 @@ test('fast money journal real PostgreSQL: atomic reserve, durable completion, ex
     },
   );
 
+  await t.test(
+    'late credit locks allow same-stripe admission during ledger work but serialize refill and retirement with fresh additive restoration',
+    { timeout: 15000 },
+    async () => {
+      function latch() {
+        let release!: () => void;
+        const promise = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        return { promise, release };
+      }
+      const beforeCredit = latch(),
+        continueWorker = latch(),
+        nativeHeld = latch(),
+        commitNative = latch();
+      const writersStarted = latch();
+      const writerPids: number[] = [];
+      let holdAdmission = false,
+        watchWriters = false,
+        writerFences = 0,
+        nativePid = 0,
+        workerPid = 0;
+      const admissionDatabase: SaasDatabase = {
+        ...gateway,
+        query: async <Row>(sql: string, values?: readonly unknown[]): Promise<SqlResult<Row>> => {
+          if (!holdAdmission || !sql.includes('fast-journal:reserve-intent')) return gateway.query<Row>(sql, values);
+          return gateway.transaction(async (tx) => {
+            nativePid = (await tx.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0].pid;
+            const result = await tx.query<Row>(sql, values);
+            nativeHeld.release();
+            await commitNative.promise;
+            return result;
+          });
+        },
+        transaction: (work) =>
+          gateway.transaction((tx) =>
+            work({
+              query: async <Row>(sql: string, values?: readonly unknown[]): Promise<SqlResult<Row>> => {
+                if (watchWriters && sql === WALLET_FENCE_SQL) {
+                  writerPids.push((await tx.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0].pid);
+                  if (++writerFences === 2) writersStarted.release();
+                }
+                return tx.query<Row>(sql, values);
+              },
+            }),
+          ),
+      };
+      const active = await setup('1000', '1000', randomUUID(), admissionDatabase);
+      const retired = await setup('1000');
+      for (const scope of [active, retired]) {
+        const intent = await reserve(scope.journal, intentFixture(scope.tenantId, scope.owner));
+        await scope.journal.appendReceipt(receiptFixture(intent));
+      }
+      await retired.journal.retireAllocations();
+      let balanced = false,
+        projected = 0;
+      const delayed: SaasDatabase = {
+        ...gateway,
+        transaction: (work) =>
+          gateway.transaction(async (tx) => {
+            workerPid = (await tx.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0].pid;
+            return work({
+              query: async <Row>(sql: string, values?: readonly unknown[]): Promise<SqlResult<Row>> => {
+                if (sql.includes('fast-journal:worker-credit-lock')) {
+                  assert.equal(balanced, true);
+                  assert.equal(projected, 2);
+                  beforeCredit.release();
+                  await continueWorker.promise;
+                }
+                const result = await tx.query<Row>(sql, values);
+                if (sql.includes('fast-journal:worker-balance-check')) balanced = true;
+                if (sql.includes('fast-journal:worker-wallet')) projected++;
+                return result;
+              },
+            });
+          }),
+      };
+      const worker = new PostgresFastGatewayJournal(delayed, { allocationOwner: randomUUID() });
+      const settling = worker.runOnce();
+      async function assertBlockedBy(blockedPid: number, blockerPid: number) {
+        let blocked = false;
+        for (let attempt = 0; attempt < 100 && !blocked; attempt++) {
+          blocked = (
+            await migrator.query<{ blocked: boolean }>(
+              'SELECT $2::integer=ANY(pg_blocking_pids($1::integer)) AS blocked',
+              [blockedPid, blockerPid],
+            )
+          ).rows[0].blocked;
+          if (!blocked) await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        assert.equal(blocked, true, `expected actual PostgreSQL lock dependency ${blockedPid} -> ${blockerPid}`);
+      }
+      try {
+        await beforeCredit.promise;
+        const admitted = await reserve(active.journal, intentFixture(active.tenantId, active.owner));
+        holdAdmission = true;
+        const heldIntent = reserve(active.journal, intentFixture(active.tenantId, active.owner));
+        await nativeHeld.promise;
+        watchWriters = true;
+        const refill = active.journal.replenish(active.tenantId, 'USD');
+        const retirement = active.journal.retireAllocations();
+        await writersStarted.promise;
+        await Promise.all(writerPids.map((pid) => assertBlockedBy(pid, workerPid)));
+        continueWorker.release();
+        await assertBlockedBy(workerPid, nativePid);
+        commitNative.release();
+        const held = await heldIntent;
+        assert.equal(
+          (
+            await gateway.query<{ count: string }>(
+              'SELECT COUNT(DISTINCT allocation_id)::text AS count FROM saas_fast_gateway_intents WHERE id=ANY($1::uuid[])',
+              [[admitted.id, held.id]],
+            )
+          ).rows[0].count,
+          '1',
+          'both native admissions must use the same allocation stripe',
+        );
+        assert.equal(await settling, 2);
+        await Promise.all([refill, retirement]);
+        for (const scope of [active, retired]) {
+          assert.equal((await facts(scope.tenantId)).balance, '980');
+          assert.equal((await facts(scope.tenantId)).charges, '1');
+        }
+        const remaining = await facts(active.tenantId);
+        assert.equal(BigInt(remaining.backing) - BigInt(remaining.available), 160n);
+        assert.ok(BigInt(remaining.backing) <= BigInt(remaining.balance));
+        assert.equal((await facts(retired.tenantId)).backing, '0');
+      } finally {
+        continueWorker.release();
+        commitNative.release();
+        await settling;
+      }
+      await active.journal.close();
+      await retired.journal.close();
+      await worker.close();
+      assert.equal((await facts(active.tenantId)).backing, '160');
+    },
+  );
+  await t.test(
+    'named balance checks and final allocation tuple guards fail closed before committing ledger, wallet or credit changes',
+    async () => {
+      const scope = await setup();
+      const intent = await reserve(scope.journal, intentFixture(scope.tenantId, scope.owner));
+      await scope.journal.appendReceipt(receiptFixture(intent));
+      const baseline = await facts(scope.tenantId);
+      for (const fault of ['unbalanced', 'allocation_epoch'] as const) {
+        const statements: string[] = [];
+        const injected: SaasDatabase = {
+          ...gateway,
+          transaction: (work) =>
+            gateway.transaction((tx) =>
+              work({
+                query: async <Row>(sql: string, values?: readonly unknown[]): Promise<SqlResult<Row>> => {
+                  statements.push(sql);
+                  if (fault === 'unbalanced' && sql.includes('fast-journal:worker-ledger')) {
+                    const original = 'e.direction,d.charge,e.account_type';
+                    assert.ok(sql.includes(original));
+                    sql = sql.replace(
+                      original,
+                      "e.direction,CASE WHEN e.direction='credit' THEN d.charge+1 ELSE d.charge END,e.account_type",
+                    );
+                  }
+                  if (fault === 'allocation_epoch' && sql.includes('fast-journal:worker-credit */')) {
+                    const credits = JSON.parse(String(values?.[0]));
+                    credits[0].epoch = randomUUID();
+                    values = [JSON.stringify(credits)];
+                  }
+                  return tx.query<Row>(sql, values);
+                },
+              }),
+            ),
+        };
+        const worker = new PostgresFastGatewayJournal(injected, { allocationOwner: randomUUID() });
+        if (fault === 'unbalanced') {
+          await assert.rejects(worker.runOnce(), { code: '23514' });
+          assert.ok(statements.at(-1)?.includes('fast-journal:worker-balance-check'));
+          assert.ok(!statements.some((sql) => sql.includes('fast-journal:worker-credit')));
+        } else await assert.rejects(worker.runOnce(), /FAST_JOURNAL_STATE_CONFLICT/);
+        assert.deepEqual(await facts(scope.tenantId), baseline);
+      }
+      assert.equal(await scope.journal.runOnce(), 1);
+      assert.equal((await facts(scope.tenantId)).balance, '80');
+      assert.equal((await facts(scope.tenantId)).charges, '1');
+      await scope.journal.close();
+    },
+  );
   await t.test(
     'automatic worker wakes from idle backoff without a RAM work queue or postponing a continuous receipt stream',
     async () => {
@@ -1106,6 +1297,143 @@ test('fast money journal real PostgreSQL: atomic reserve, durable completion, ex
           )
         ).rows[0]?.count,
         '1',
+      );
+    },
+  );
+  await t.test(
+    'receipt SIGKILL recovers through standalone no-Redis drain CLI, which stays alive idle and preserves live owners and unknown stakes',
+    { timeout: 30000 },
+    async () => {
+      const scope = await setup();
+      const intent = await reserve(scope.journal, intentFixture(scope.tenantId, scope.owner));
+      const crashed = fork(resolve('tests/saas/gateway/fast/journal-crash-child.ts'), [], {
+        execArgv: ['--import', 'tsx'],
+        stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
+        env: process.env,
+      });
+      const timeout = setTimeout(() => crashed.kill('SIGKILL'), 10000);
+      t.after(() => {
+        clearTimeout(timeout);
+        if (crashed.exitCode === null && crashed.signalCode === null) crashed.kill('SIGKILL');
+      });
+      const message = () =>
+        Promise.race([
+          once(crashed, 'message').then(([value]) => value as { kind: string }),
+          once(crashed, 'exit').then(() => {
+            throw new Error('crash fixture exited before durable receipt boundary');
+          }),
+        ]);
+      assert.equal((await message()).kind, 'ready');
+      const paused = message();
+      crashed.send({ boundary: 'fast-journal:append-receipt', receipt: receiptFixture(intent) });
+      assert.equal((await paused).kind, 'paused');
+      const exited = once(crashed, 'exit');
+      crashed.kill('SIGKILL');
+      await exited;
+      clearTimeout(timeout);
+      assert.equal((await facts(scope.tenantId)).completed, '0');
+      function worker(onceMode: boolean) {
+        const databaseUrl = new URL(urls[2]);
+        databaseUrl.searchParams.set('sslmode', 'disable');
+        const child = spawn(
+          process.execPath,
+          [
+            '--import',
+            'tsx',
+            resolve('src/cli/index.ts'),
+            'saas:fast-billing-worker',
+            '--allow-local-plaintext',
+            '--poll-ms',
+            '20',
+            ...(onceMode ? ['--once'] : []),
+          ],
+          {
+            env: {
+              ...process.env,
+              MODEL_ROUTER_SAAS_GATEWAY_DATABASE_URL: databaseUrl.toString(),
+              MODEL_ROUTER_SAAS_REDIS_URL: 'redis://127.0.0.1:1',
+              MODEL_ROUTER_SAAS_GATEWAY_REDIS_URL: 'redis://127.0.0.1:1',
+            },
+            stdio: ['ignore', 'pipe', 'pipe'],
+          },
+        );
+        let output = '',
+          diagnostics = '',
+          ready = false;
+        let markReady!: () => void;
+        const readiness = new Promise<void>((resolve) => {
+          markReady = resolve;
+        });
+        child.stdout.on('data', (bytes) => {
+          output += bytes.toString();
+          if (output.includes('"event":"ready"')) {
+            ready = true;
+            markReady();
+          }
+        });
+        child.stderr.on('data', (bytes) => {
+          diagnostics += bytes.toString();
+        });
+        const completion = once(child, 'exit');
+        const timer = setTimeout(() => child.kill('SIGKILL'), 10000);
+        t.after(() => {
+          clearTimeout(timer);
+          if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+        });
+        return {
+          child,
+          async waitReady() {
+            await Promise.race([
+              readiness,
+              completion.then(() => {
+                if (!ready) throw new Error(`worker exited before ready: ${diagnostics}`);
+              }),
+            ]);
+          },
+          async finish() {
+            const [code, signal] = await completion;
+            clearTimeout(timer);
+            assert.equal(code, 0, diagnostics);
+            assert.equal(signal, null);
+            return output;
+          },
+        };
+      }
+      const onceWorker = worker(true);
+      assert.match(await onceWorker.finish(), /"processedJobs":"1"/);
+      assert.equal((await facts(scope.tenantId)).balance, '80');
+      assert.equal((await facts(scope.tenantId)).backing, '80', 'drain-only must not retire a live admission owner');
+      const replay = worker(true);
+      assert.match(await replay.finish(), /"processedJobs":"0"/);
+      assert.equal((await facts(scope.tenantId)).charges, '1');
+      const unknown = await reserve(scope.journal, intentFixture(scope.tenantId, scope.owner, priceFixture('40')));
+      await scope.journal.appendReceipt({
+        ...receiptFixture(unknown),
+        outcome: 'unknown',
+        chargeMinorUnits: null,
+        usage: {},
+        httpStatus: null,
+      });
+      const poller = worker(false);
+      await poller.waitReady();
+      await new Promise((resolve) => setTimeout(resolve, 2800));
+      assert.equal(
+        poller.child.exitCode,
+        null,
+        'standalone worker must stay alive beyond DB idle timeout and poll backoff',
+      );
+      assert.equal(poller.child.signalCode, null);
+      const late = await reserve(scope.journal, intentFixture(scope.tenantId, scope.owner, priceFixture('10')));
+      await scope.journal.appendReceipt(receiptFixture(late, '7'));
+      poller.child.kill('SIGTERM');
+      assert.match(await poller.finish(), /"event":"stopped"/);
+      assert.equal((await facts(scope.tenantId)).balance, '73');
+      assert.equal((await facts(scope.tenantId)).charges, '2');
+      await scope.journal.close();
+      assert.equal(
+        (await facts(scope.tenantId)).backing,
+        '40',
+        'unknown maximum survives worker exit and retirement, never TTL release',
       );
     },
   );

@@ -741,12 +741,15 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
         ),
       ].sort();
       for (const key of walletKeys) await tx.query(WALLET_FENCE_SQL, [key]);
+      // The wallet fences exclude every backing/state writer (refill, retirement
+      // and settlement). Intent CAS may still subtract available credit while
+      // ledger construction/checks run; do not pin all admission stripes here.
       const allocations = await tx.query<AllocationRow>(
-        'SELECT * FROM saas_fast_credit_allocations WHERE id=ANY($1::uuid[]) ORDER BY id FOR UPDATE',
+        'SELECT * FROM saas_fast_credit_allocations WHERE id=ANY($1::uuid[]) ORDER BY id',
         [[...new Set(paid.map(({ row }) => row.allocation_id))]],
       );
       const allocationById = new Map(allocations.rows.map((allocation) => [allocation.id, allocation]));
-      const credits = new Map<string, { id: string; release: bigint; restore: bigint }>();
+      const credits = new Map<string, CreditBatchRow>();
       const wallets = new Map<string, { id: string; tenantId: string; charge: bigint; ledgerId: string }>();
       const postings: LedgerBatchRow[] = [];
       for (const { row, charge, ledgerId } of paid) {
@@ -759,7 +762,16 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
         )
           throw new Error('FAST_JOURNAL_ALLOCATION_MISMATCH');
         const maximum = BigInt(row.max_cost_minor_units);
-        const credit = credits.get(allocation.id) ?? { id: allocation.id, release: 0n, restore: 0n };
+        const credit = credits.get(allocation.id) ?? {
+          id: allocation.id,
+          tenant_id: allocation.tenant_id,
+          wallet_id: allocation.wallet_id,
+          currency: allocation.currency,
+          epoch: allocation.epoch,
+          state: allocation.state,
+          release: 0n,
+          restore: 0n,
+        };
         credit.release += allocation.state === 'active' ? charge : maximum;
         credit.restore += allocation.state === 'active' ? maximum - charge : 0n;
         credits.set(allocation.id, credit);
@@ -790,7 +802,13 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
       }
       if (postings.length) {
         await postLedgerBatch(tx, postings);
-        // The preceding command inserts every immutable ledger pair. Project
+        // Run the same mandatory deferred balance checks before scarce credit
+        // row locks, not at COMMIT while all admission stripes are pinned. No
+        // guard is disabled; subsequent ledger writes would also be immediate.
+        await tx.query(
+          '/* fast-journal:worker-balance-check */ SET CONSTRAINTS saas_ledger_transactions_balanced, saas_ledger_entries_balanced IMMEDIATE',
+        );
+        // The ledger command inserted every immutable ledger pair. Project
         // their exact aggregate once per wallet; a valid same-wallet posting id
         // establishes the existing projection context for the guard trigger.
         for (const wallet of wallets.values()) {
@@ -805,13 +823,37 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
           one(projected.rowCount);
         }
       }
+      const creditJson = fastJournalCanonicalJson([...credits.values()]);
+      // Keep lock acquisition separate from UPDATE: a concurrent intent may
+      // commit while this SELECT waits, and the next command must see that row
+      // version. A combined lock/update CTE failed this real concurrent-wait
+      // regression; keep the snapshot boundary explicit instead of weakening CAS.
+      const locked = await tx.query<AllocationRow>(
+        '/* fast-journal:worker-credit-lock */ SELECT * FROM saas_fast_credit_allocations WHERE id=ANY($1::uuid[]) ORDER BY id FOR NO KEY UPDATE',
+        [[...credits.keys()]],
+      );
+      if (locked.rows.length !== credits.size) throw new Error('FAST_JOURNAL_STATE_CONFLICT');
+      for (const allocation of locked.rows) {
+        const expected = credits.get(allocation.id);
+        if (
+          !expected ||
+          allocation.tenant_id !== expected.tenant_id ||
+          allocation.wallet_id !== expected.wallet_id ||
+          allocation.currency !== expected.currency ||
+          allocation.epoch !== expected.epoch ||
+          allocation.state !== expected.state
+        )
+          throw new Error('FAST_JOURNAL_STATE_CONFLICT');
+      }
       const restored = await tx.query(
         `/* fast-journal:worker-credit */ UPDATE saas_fast_credit_allocations a
         SET backing_minor_units=a.backing_minor_units-c.release,
             available_minor_units=a.available_minor_units+c.restore
-        FROM jsonb_to_recordset($1::jsonb) AS c(id uuid,release bigint,restore bigint)
-        WHERE a.id=c.id AND a.backing_minor_units >= c.release RETURNING a.id`,
-        [fastJournalCanonicalJson([...credits.values()])],
+        FROM jsonb_to_recordset($1::jsonb)
+          AS c(id uuid,tenant_id uuid,wallet_id uuid,currency text,epoch uuid,state text,release bigint,restore bigint)
+        WHERE a.id=c.id AND a.tenant_id=c.tenant_id AND a.wallet_id=c.wallet_id AND a.currency=c.currency
+          AND a.epoch=c.epoch AND a.state=c.state AND a.backing_minor_units >= c.release RETURNING a.id`,
+        [creditJson],
       );
       if (restored.rowCount !== credits.size) throw new Error('FAST_JOURNAL_STATE_CONFLICT');
     }
@@ -940,6 +982,16 @@ interface LedgerBatchRow {
   readonly wallet_id: string;
   readonly debit_id: string;
   readonly credit_id: string;
+}
+interface CreditBatchRow {
+  readonly id: string;
+  readonly tenant_id: string;
+  readonly wallet_id: string;
+  readonly currency: string;
+  readonly epoch: string;
+  readonly state: 'active' | 'retired';
+  release: bigint;
+  restore: bigint;
 }
 async function postLedgerBatch(tx: SqlExecutor, rows: readonly LedgerBatchRow[]): Promise<void> {
   // No ON CONFLICT: an unexpected duplicate aborts the whole batch. A genuinely

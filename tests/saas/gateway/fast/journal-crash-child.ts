@@ -12,7 +12,9 @@ import { roleUrls } from '../../metering/normal-success-postgres-fixture.js';
 const permitted = new Set([
   'fast-journal:worker-claim',
   'fast-journal:worker-ledger',
+  'fast-journal:worker-balance-check',
   'fast-journal:worker-wallet',
+  'fast-journal:worker-credit-lock',
   'fast-journal:worker-credit',
   'fast-journal:worker-complete',
   'fast-journal:reserve-intent',
@@ -31,7 +33,7 @@ process.once(
       ...database,
       query: async <Row>(sql: string, values?: readonly unknown[]): Promise<SqlResult<Row>> => {
         const result = await database.query<Row>(sql, values);
-        if (sql.includes(raw.boundary)) await pause();
+        if (sql.includes(`${raw.boundary} */`)) await pause();
         return result;
       },
       transaction: (work) =>
@@ -39,7 +41,7 @@ process.once(
           work({
             query: async <Row>(sql: string, values?: readonly unknown[]): Promise<SqlResult<Row>> => {
               const result = await tx.query<Row>(sql, values);
-              if (sql.includes(raw.boundary)) await pause();
+              if (sql.includes(`${raw.boundary} */`)) await pause();
               return result;
             },
           }),
