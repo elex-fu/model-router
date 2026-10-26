@@ -5,12 +5,13 @@ import type { SaasDatabase, SqlResult } from '../../../../src/saas/db/types.js';
 
 const url =
   'postgres://model_router_saas_gateway:test-password@127.0.0.1:15432/model_router_test_worker?sslmode=disable';
-function fixture() {
+function fixture(onQuery?: (sql: string) => void) {
   const calls: string[] = [];
   const owners: unknown[] = [];
   const database: SaasDatabase = {
     async query<Row>(sql: string, values?: readonly unknown[]): Promise<SqlResult<Row>> {
       calls.push(sql);
+      onQuery?.(sql);
       if (sql.startsWith('INSERT INTO saas_fast_gateway_owners')) owners.push(values?.[0]);
       return { rows: [], rowCount: 0 };
     },
@@ -81,6 +82,44 @@ test('explicit drain command validates role/options, loads no unrelated environm
     /gateway login/,
   );
   assert.equal(connections, 0);
+});
+test('background poll failure aborts, closes and rejects even when error reporting throws', {
+  timeout: 3000,
+}, async () => {
+  for (const throwDiagnostic of [false, true]) {
+    const { database, calls } = fixture((sql) => {
+      if (sql.includes('fast-journal:worker-claim')) throw new Error('sensitive-pool-failure');
+    });
+    const lines: string[] = [];
+    await assert.rejects(
+      saasFastBillingWorker(
+        { allowLocalPlaintext: true, pollMs: 10 },
+        {
+          env: { MODEL_ROUTER_SAAS_GATEWAY_DATABASE_URL: url },
+          signal: new AbortController().signal,
+          createDatabase: () => database,
+          verifyGatewayPrivileges: async () => {},
+          writeLine: (line) => {
+            lines.push(line);
+            if (throwDiagnostic && JSON.parse(line).event === 'error') throw new Error('broken diagnostic sink');
+          },
+        },
+      ),
+      (error) =>
+        error instanceof Error &&
+        error.message.includes('durable jobs remain retryable') &&
+        !error.message.includes('sensitive'),
+    );
+    assert.equal(calls.at(-1), 'close');
+    assert.equal(
+      calls.filter((sql) => sql.includes('fast-journal:worker-claim')).length,
+      1,
+      'fatal cleanup must not claim another job',
+    );
+    assert.equal(lines.filter((line) => JSON.parse(line).event === 'error').length, 1);
+    assert.ok(!lines.some((line) => JSON.parse(line).event === 'stopped'));
+    assert.ok(!calls.some((sql) => sql.includes('fast-journal:worker-ledger')));
+  }
 });
 test('poll stop and privilege failures close resources without leaking raw database errors', async () => {
   const { calls, database } = fixture();

@@ -136,7 +136,18 @@ export async function saasFastBillingWorker(
       allocationOwner: `billing-drain:${randomUUID()}`,
       workerPollMs: pollMs,
       workerBatchSize: batchSize,
-      onBackgroundError: (code) => writeLine(JSON.stringify({ event: 'error', code })),
+      onBackgroundError: (code) => {
+        // A standalone daemon must fail honestly for its supervisor to restart
+        // it, rather than stay alive after its pool has latched an idle error.
+        // Stop first: a broken diagnostic sink must not strand the process.
+        failure ??= new Error(FAILURE);
+        stop.abort();
+        try {
+          writeLine(JSON.stringify({ event: 'error', code }));
+        } catch {
+          /* failure and cleanup do not depend on diagnostic delivery */
+        }
+      },
     });
     await journal.checkReady();
     if (options.once) {
@@ -169,7 +180,7 @@ export async function saasFastBillingWorker(
     failure = new Error(FAILURE);
   } finally {
     try {
-      await journal?.close();
+      await journal?.close(failure ? { drain: false } : undefined);
     } catch {
       failure ??= new Error(FAILURE);
     }

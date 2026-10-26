@@ -6,7 +6,7 @@ import { resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { test } from 'node:test';
 import { PlatformWalletLedgerService } from '../../../../src/saas/billing/service.js';
-import { WALLET_FENCE_SQL } from '../../../../src/saas/db/advisory-lock-keys.js';
+import { saasAdvisoryKey, WALLET_FENCE_SQL } from '../../../../src/saas/db/advisory-lock-keys.js';
 import { createSaasDatabase } from '../../../../src/saas/db/index.js';
 import type { SaasDatabase, SqlResult } from '../../../../src/saas/db/types.js';
 import {
@@ -1390,11 +1390,15 @@ test('fast money journal real PostgreSQL: atomic reserve, durable completion, ex
               }),
             ]);
           },
-          async finish() {
+          async finish(expectedCode = 0) {
             const [code, signal] = await completion;
             clearTimeout(timer);
-            assert.equal(code, 0, diagnostics);
+            assert.equal(code, expectedCode, diagnostics);
             assert.equal(signal, null);
+            if (expectedCode !== 0) {
+              assert.match(diagnostics, /durable jobs remain retryable/);
+              assert.ok(!output.includes('"event":"stopped"'));
+            }
             return output;
           },
         };
@@ -1406,6 +1410,61 @@ test('fast money journal real PostgreSQL: atomic reserve, durable completion, ex
       const replay = worker(true);
       assert.match(await replay.finish(), /"processedJobs":"0"/);
       assert.equal((await facts(scope.tenantId)).charges, '1');
+      const interrupted = await reserve(scope.journal, intentFixture(scope.tenantId, scope.owner, priceFixture('10')));
+      let unlockWallet!: () => void, walletLocked!: () => void;
+      const walletReady = new Promise<void>((resolve) => {
+        walletLocked = resolve;
+      });
+      const releaseWallet = new Promise<void>((resolve) => {
+        unlockWallet = resolve;
+      });
+      const blocker = migrator.transaction(async (tx) => {
+        await tx.query(WALLET_FENCE_SQL, [saasAdvisoryKey.walletFence(scope.tenantId, 'USD')]);
+        walletLocked();
+        await releaseWallet;
+      });
+      await walletReady;
+      try {
+        await scope.journal.appendReceipt(receiptFixture(interrupted, '7'));
+        const failedPoller = worker(false);
+        await failedPoller.waitReady();
+        let blockedPid: number | undefined;
+        for (let attempt = 0; attempt < 100 && blockedPid === undefined; attempt++) {
+          // Same gateway login may inspect/terminate only its own drain child;
+          // the migrator intentionally has no monitoring/signal role grants.
+          const candidates = await gateway.query<{ pid: number }>(
+            `SELECT pid FROM pg_stat_activity WHERE application_name='model-router-fast-billing-drain'
+             AND usename='model_router_saas_gateway' AND datname=current_database()
+             AND state='active' AND wait_event_type='Lock' AND query=$1`,
+            [WALLET_FENCE_SQL],
+          );
+          assert.ok(candidates.rows.length <= 1, 'target only this disposable drain child, never a shared gateway');
+          blockedPid = candidates.rows[0]?.pid;
+          if (blockedPid === undefined) await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        assert.ok(blockedPid !== undefined, 'child must actually claim the durable job and wait on its wallet fence');
+        const terminated = await gateway.query<{ terminated: boolean }>(
+          `SELECT pg_terminate_backend(pid) AS terminated FROM pg_stat_activity WHERE pid=$1
+           AND application_name='model-router-fast-billing-drain' AND usename='model_router_saas_gateway'
+           AND datname=current_database() AND wait_event_type='Lock' AND query=$2`,
+          [blockedPid, WALLET_FENCE_SQL],
+        );
+        assert.equal(terminated.rows[0]?.terminated, true);
+        assert.match(await failedPoller.finish(1), /FAST_JOURNAL_WORKER_FAILED/);
+        assert.equal((await facts(scope.tenantId)).balance, '80');
+        assert.equal((await facts(scope.tenantId)).charges, '1');
+        const pending = await gateway.query<{ state: string }>(
+          'SELECT state FROM saas_fast_billing_jobs WHERE intent_id=$1',
+          [interrupted.id],
+        );
+        assert.equal(pending.rows[0]?.state, 'pending');
+      } finally {
+        unlockWallet();
+        await blocker;
+      }
+      assert.match(await worker(true).finish(), /"processedJobs":"1"/);
+      assert.equal((await facts(scope.tenantId)).balance, '73');
+      assert.equal((await facts(scope.tenantId)).charges, '2');
       const unknown = await reserve(scope.journal, intentFixture(scope.tenantId, scope.owner, priceFixture('40')));
       await scope.journal.appendReceipt({
         ...receiptFixture(unknown),
@@ -1427,8 +1486,8 @@ test('fast money journal real PostgreSQL: atomic reserve, durable completion, ex
       await scope.journal.appendReceipt(receiptFixture(late, '7'));
       poller.child.kill('SIGTERM');
       assert.match(await poller.finish(), /"event":"stopped"/);
-      assert.equal((await facts(scope.tenantId)).balance, '73');
-      assert.equal((await facts(scope.tenantId)).charges, '2');
+      assert.equal((await facts(scope.tenantId)).balance, '66');
+      assert.equal((await facts(scope.tenantId)).charges, '3');
       await scope.journal.close();
       assert.equal(
         (await facts(scope.tenantId)).backing,

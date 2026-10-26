@@ -875,10 +875,20 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
       /* durable drain */
     }
   }
-  async close(): Promise<void> {
+  async close(options: { readonly drain?: boolean } = {}): Promise<void> {
     this.closed = true;
     if (this.timer) clearTimeout(this.timer);
     this.timer = undefined;
+    if (options.drain === false) {
+      // Fatal standalone shutdown: finish only work already started. Never
+      // claim another job or retire credit while reporting a processor failure.
+      const pending = [this.ready, ...this.pendingReplenishments.values()];
+      if (this.running) pending.push(this.running.then(() => undefined));
+      const outcomes = await Promise.allSettled(pending);
+      const rejected = outcomes.find((outcome) => outcome.status === 'rejected');
+      if (rejected?.status === 'rejected') throw rejected.reason;
+      return;
+    }
     await this.drain();
     await this.retireAllocations();
   }
