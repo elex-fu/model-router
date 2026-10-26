@@ -1149,9 +1149,9 @@ test('isolated signal drills retain independent fixtures and real signal/converg
   }
 });
 
-// Candidate probes require the real gateway-e2e account/lease authority seeded
-// by HTTP E2E. Both v3 gates belong to the seeded PG15/18 main matrix, not an
-// unseeded isolated service. Keep this dependency executable and fail-closed.
+// Candidate probes own their authority, but must also preserve the existing
+// HTTP fixture lease history. Keep that regression in the seeded PG15/18 main
+// matrix rather than an empty isolated service, with required ordering gates.
 test('v3 hot-path roots and shared fixtures are strict required seeded PostgreSQL gates', () => {
   const job = validateWorkflow(workflow);
   const http = rootStep(job, HTTP);

@@ -165,8 +165,8 @@ jobs:
           MODEL_ROUTER_SAAS_GATEWAY_E2E_CONTROL_PLANE_URL: postgresql://model_router_saas_control_plane@postgres:5432/model_router_saas_ci
           MODEL_ROUTER_SAAS_GATEWAY_E2E_GATEWAY_URL: postgresql://model_router_saas_gateway@postgres:5432/model_router_saas_ci
         run: node --import tsx --test tests/saas/gateway/managed-postgres-commercial-gateway.integration.test.ts
-      # Native candidate probes require the real gateway-e2e account and lease
-      # seeded by HTTP E2E. Run both v3 gates here, never on an empty service.
+      # Candidate probes own independent authority fixtures and verify the HTTP
+      # lease history stays untouched. Keep this regression after the HTTP E2E.
       - name: Run required real PostgreSQL native candidate live-read batching gate
         env:
           NODE_ENV: test

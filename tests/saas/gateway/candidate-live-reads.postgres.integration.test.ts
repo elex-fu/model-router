@@ -11,6 +11,7 @@ import type {
   RequestPreparationCaller,
   RequestPreparationCandidateAuthority,
 } from '../../../src/saas/gateway/request-preparation-service.js';
+import { seedFixture } from '../metering/normal-success-postgres-fixture.js';
 import {
   HEALTH_CLOCK_REQUIRED,
   healthClockDatabases,
@@ -180,98 +181,132 @@ test(
   },
 );
 
-test(
-  'three native PostgreSQL scheduler instances coalesce batched stale probes and independently reread refreshed health',
-  required,
-  async () => {
-    const { databases, migrator, gateway } = await healthClockDatabases();
-    try {
-      // This is the real account seeded and dispatched by the preceding managed
-      // HTTP E2E, so the final probe lease performs native account authorization.
-      const row = (
-        await migrator.query<{
-          tenant_id: string;
-          owner_kind: 'tenant' | 'platform';
-          account_id: string;
-          upstream_id: string;
-        }>(
-          `SELECT lease.tenant_id,lease.owner_kind,lease.account_id,lease.upstream_id
-         FROM saas_provider_account_leases lease
-         JOIN saas_provider_account_runtime_health health
-           ON health.account_id=lease.account_id AND health.owner_kind=lease.owner_kind
-          AND health.owner_tenant_id IS NOT DISTINCT FROM lease.owner_tenant_id
-        WHERE lease.account_id LIKE 'gateway-e2e-%' AND health.state='healthy'
-        ORDER BY health.observed_at DESC LIMIT 1`,
-        )
-      ).rows[0];
-      assert.ok(row, 'run the managed commercial HTTP E2E first');
-      const candidate = {
-        tenantId: row.tenant_id,
-        accountId: row.account_id,
-        upstreamId: row.upstream_id,
-        accountOwnerKind: row.owner_kind,
-        supplyMode: row.owner_kind === 'tenant' ? 'byok' : 'platform',
-      } as RequestPreparationCandidateAuthority;
-      const caller = { tenantId: row.tenant_id, supplyMode: candidate.supplyMode } as RequestPreparationCaller;
-      await delay(1100);
-      const count = 24;
-      let arrived = 0;
-      let release!: () => void;
-      const initialBarrier = new Promise<void>((resolve) => {
-        release = resolve;
-      });
-      const calls: string[] = [];
-      const database = observed(gateway, calls, async () => {
-        if (++arrived === count) release();
-        await initialBarrier;
-      });
-      const instances = Array.from({ length: 3 }, () => {
-        const store = new PostgresProviderAccountRuntimeHealthStore({ database, maxHealthAgeMs: 1000 });
-        return dependencies(
+for (const mode of ['byok', 'platform'] as const)
+  test(
+    `three native PostgreSQL scheduler instances coalesce ${mode} batched stale probes without changing HTTP fixture history`,
+    required,
+    async () => {
+      const { databases, migrator, gateway } = await healthClockDatabases();
+      try {
+        const httpHistory = () =>
+          migrator.query<{ row: string }>(
+            `SELECT to_jsonb(lease)::text AS row FROM saas_provider_account_leases lease
+          WHERE account_id LIKE 'gateway-e2e-%' ORDER BY id`,
+          );
+        const originalHttpHistory = (await httpHistory()).rows;
+        // Lease history is append-only. Own a complete tenant/account authority
+        // instead of borrowing the HTTP tenant whose exact probe history is
+        // checked by 056 and later gates. All ordinary setup guards stay enabled.
+        const fixture = await seedFixture(migrator, gateway, mode);
+        assert.ok(fixture.sent.accountId);
+        const candidate = {
+          tenantId: fixture.tenantId,
+          accountId: fixture.sent.accountId,
+          upstreamId: fixture.sent.upstreamId,
+          accountOwnerKind: mode === 'byok' ? 'tenant' : 'platform',
+          supplyMode: mode,
+        } as RequestPreparationCandidateAuthority;
+        const caller = { tenantId: fixture.tenantId, supplyMode: mode } as RequestPreparationCaller;
+        const initialStore = new PostgresProviderAccountRuntimeHealthStore({ database: gateway, maxHealthAgeMs: 1000 });
+        const initial = dependencies(
           new PostgresProviderAccountScheduler({
-            database,
-            health: store,
+            database: gateway,
+            health: initialStore,
             leaseConcurrencyLimit: 100,
             maxHealthAgeMs: 1000,
             healthProbe: {
-              store,
+              store: initialStore,
               leaseProvider: new PostgresProviderAccountLeaseService({
-                database,
+                database: gateway,
                 maxConcurrency: 100,
                 leaseTtlMs: 10_000,
               }),
             },
           }),
         );
-      });
-      const results = await Promise.all(
-        Array.from({ length: count }, (_, index) => {
-          const native = instances[index % instances.length];
-          return native.candidateReadScope({ phase: 'health', caller, candidates: [candidate] }, () =>
-            native.health.get({ caller, candidate, now: new Date(), clock: () => new Date() }),
+        assert.equal(
+          (await initial.health.get({ caller, candidate, now: new Date(), clock: () => new Date() })).decision,
+          'allow',
+          'warm the owned account through the real unobserved-health lease and probe path',
+        );
+        await delay(1100);
+        const count = 24;
+        let arrived = 0;
+        let release!: () => void;
+        const initialBarrier = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const calls: string[] = [];
+        const database = observed(gateway, calls, async () => {
+          if (++arrived === count) release();
+          await initialBarrier;
+        });
+        const instances = Array.from({ length: 3 }, () => {
+          const store = new PostgresProviderAccountRuntimeHealthStore({ database, maxHealthAgeMs: 1000 });
+          return dependencies(
+            new PostgresProviderAccountScheduler({
+              database,
+              health: store,
+              leaseConcurrencyLimit: 100,
+              maxHealthAgeMs: 1000,
+              healthProbe: {
+                store,
+                leaseProvider: new PostgresProviderAccountLeaseService({
+                  database,
+                  maxConcurrency: 100,
+                  leaseTtlMs: 10_000,
+                }),
+              },
+            }),
           );
-        }),
-      );
-      assert.deepEqual(
-        results.map((result) => result.decision),
-        Array(count).fill('allow'),
-      );
-      assert.equal(
-        calls.filter((sql) => sql.includes('authorized_lease AS')).length,
-        1,
-        'one fenced probe outcome across three instances',
-      );
-      assert.equal(
-        calls.filter((sql) => sql.includes('SELECT state, observed_at, cooldown_until, failure_count')).length >= count,
-        true,
-        'every local waiter and remote CAS loser reads current authority after its initial snapshot',
-      );
-      for (const native of instances)
-        assert.deepEqual(Reflect.ownKeys(native.health).sort(), ['leaseProvider', 'maxHealthAgeMs', 'store']);
-    } catch (error) {
-      throw safeHealthClockFailure(error);
-    } finally {
-      await Promise.allSettled(databases.map((database) => database.close()));
-    }
-  },
-);
+        });
+        const results = await Promise.all(
+          Array.from({ length: count }, (_, index) => {
+            const native = instances[index % instances.length];
+            return native.candidateReadScope({ phase: 'health', caller, candidates: [candidate] }, () =>
+              native.health.get({ caller, candidate, now: new Date(), clock: () => new Date() }),
+            );
+          }),
+        );
+        assert.deepEqual(
+          results.map((result) => result.decision),
+          Array(count).fill('allow'),
+        );
+        assert.equal(
+          calls.filter((sql) => sql.includes('authorized_lease AS')).length,
+          1,
+          'one fenced probe outcome across three instances',
+        );
+        assert.equal(
+          calls.filter((sql) => sql.includes('SELECT state, observed_at, cooldown_until, failure_count')).length >=
+            count,
+          true,
+          'every local waiter and remote CAS loser reads current authority after its initial snapshot',
+        );
+        for (const native of instances)
+          assert.deepEqual(Reflect.ownKeys(native.health).sort(), ['leaseProvider', 'maxHealthAgeMs', 'store']);
+        const ownLeases = await migrator.query<{ status: string; release_recorded: boolean }>(
+          `SELECT status, released_at IS NOT NULL AS release_recorded FROM saas_provider_account_leases
+          WHERE tenant_id = $1 AND account_id = $2 ORDER BY fencing_token`,
+          [fixture.tenantId, candidate.accountId],
+        );
+        assert.deepEqual(
+          ownLeases.rows,
+          [
+            { status: 'released', release_recorded: true },
+            { status: 'released', release_recorded: true },
+          ],
+          'only the owned warmup and the single coalesced probe leave durable released history',
+        );
+        assert.deepEqual(
+          (await httpHistory()).rows,
+          originalHttpHistory,
+          'the HTTP fixture lease history is untouched',
+        );
+      } catch (error) {
+        throw safeHealthClockFailure(error);
+      } finally {
+        await Promise.allSettled(databases.map((database) => database.close()));
+      }
+    },
+  );
