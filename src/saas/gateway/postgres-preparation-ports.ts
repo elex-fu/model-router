@@ -16,6 +16,7 @@ import {
   SaasRequestAdmissionService,
 } from './admission.js';
 import { SaasAdmissionAuthorizationError, type SaasRequestAdmissionAuthorizationPrelock } from './authorization-prelock.js';
+import { readPreparationTransactionRecords } from './postgres-request-admission-guard.js';
 import { readRequestAdmissionIpPolicy } from './request-admission-ip-policy.js';
 import {
   BillingGroupSpendAdmissionDeniedError,
@@ -1139,10 +1140,15 @@ export function createPostgresPreparationPorts(options: PostgresPreparationPorts
         return { decision: 'reject', code: 'binding_mismatch', message: SAFE_ATTEMPT_FAILURE };
       }
       try {
-        const [request, storedAttempt] = await Promise.all([
-          options.metering.getRequest(input.caller.tenantId, input.requestId, { executor }),
-          options.metering.getAttempt(input.caller.tenantId, input.requestId, input.attemptId, { executor }),
-        ]);
+        const remembered = await readPreparationTransactionRecords(
+          sqlOptions.executor, input.caller.tenantId, input.requestId, input.attemptId,
+        );
+        const [request, storedAttempt] = remembered
+          ? [remembered.request, remembered.attempt]
+          : await Promise.all([
+              options.metering.getRequest(input.caller.tenantId, input.requestId, { executor }),
+              options.metering.getAttempt(input.caller.tenantId, input.requestId, input.attemptId, { executor }),
+            ]);
         if (
           !request ||
           !storedAttempt ||

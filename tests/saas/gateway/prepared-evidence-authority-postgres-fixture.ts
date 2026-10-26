@@ -3,6 +3,10 @@ import { generateKeyPairSync, randomUUID, sign } from 'node:crypto';
 import type { SaasDatabase, SqlExecutor } from '../../../src/saas/db/types.js';
 import { PostgresPreparationCapacityAdapter } from '../../../src/saas/gateway/postgres-preparation-capacity.js';
 import {
+  bindPreparationTransactionEvidence,
+  withPreparationTransactionFacts,
+} from '../../../src/saas/gateway/preparation-transaction-facts.js';
+import {
   canonicalPreparedRequestEvidencePayload,
   type PreparedRequestEvidenceInput,
   type PreparedRequestEvidenceRecord,
@@ -18,7 +22,12 @@ export async function evidenceAuthorityFixture(
   migrator: SaasDatabase,
   gateway: SaasDatabase,
   mode: 'byok' | 'platform',
-  options: { readonly evidenceTtlMs?: number; readonly rollbackRegistration?: boolean } = {},
+  options: {
+    readonly evidenceTtlMs?: number;
+    readonly rollbackRegistration?: boolean;
+    readonly reusePreparationFacts?: boolean;
+    readonly beforeRegister?: (tx: SqlExecutor, input: PreparedRequestEvidenceInput) => Promise<void>;
+  } = {},
 ) {
   const evidenceTtlMs = options.evidenceTtlMs === undefined ? 5 * 60_000 : options.evidenceTtlMs;
   assert.ok(Number.isSafeInteger(evidenceTtlMs) && evidenceTtlMs > 0, 'evidence TTL must be a positive safe integer');
@@ -51,7 +60,7 @@ export async function evidenceAuthorityFixture(
   };
   let registered: PreparedRequestEvidenceRecord | undefined;
   const registrationDatabase = options.rollbackRegistration ? rollbackEvidenceDatabase(gateway) : gateway;
-  const input = await registrationDatabase.transaction(async (tx) => {
+  const prepare = async (tx: SqlExecutor) => {
     const admitted = await harness.admit(tx, requestId, attemptId, label);
     assert.equal(admitted.kind, 'created');
     if (admitted.kind !== 'created') throw new Error('fresh evidence authority fixture admission required');
@@ -94,9 +103,20 @@ export async function evidenceAuthorityFixture(
         keys.privateKey,
       ).toString('base64'),
     };
+    if (options.beforeRegister) await options.beforeRegister(tx, signed);
+    bindPreparationTransactionEvidence(tx, canonicalPreparedRequestEvidencePayload(signed));
     registered = await evidenceService.register(signed, { executor: tx });
     return signed;
-  });
+  };
+  const input = await registrationDatabase.transaction((tx) =>
+    options.reusePreparationFacts
+      ? withPreparationTransactionFacts(
+          tx,
+          { tenantId: original.tenantId, requestId, attemptId, payloadSha256: String(candidate.payloadSha256) },
+          prepare,
+        )
+      : prepare(tx),
+  );
   assert.ok(input.evidenceId);
   assert.ok(registered);
   return { original, input, registered, options: serviceOptions, evidenceService, evidenceId: input.evidenceId };

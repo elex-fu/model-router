@@ -13,6 +13,17 @@ export interface PostgresPreparationObservation {
 export type PostgresPreparationObserver = (observation: PostgresPreparationObservation) => void;
 
 const PREPARATION_EXECUTOR = Symbol('postgres-preparation-executor');
+const observedExecutors = new WeakMap<SqlExecutor, SqlExecutor>();
+
+/** Only actual forwarding wrappers created below can unwrap to an executor. */
+export function unwrapPreparationExecutor(executor: SqlExecutor): SqlExecutor {
+  let underlying = observedExecutors.get(executor);
+  while (underlying) {
+    executor = underlying;
+    underlying = observedExecutors.get(executor);
+  }
+  return executor;
+}
 interface ObservedPreparationExecutor extends SqlExecutor {
   readonly [PREPARATION_EXECUTOR]: {
     readonly executor: SqlExecutor;
@@ -65,17 +76,18 @@ export function observePreparationExecutor(
       emit(activeObserver, { kind: 'query', phase, operation, durationMs: performance.now() - started, outcome });
     }
   }
+  const query = underlying.query.bind(underlying);
   const observed: ObservedPreparationExecutor = {
-    [PREPARATION_EXECUTOR]: { executor: underlying, observer },
-    query: <Row>(sql: string, values?: readonly unknown[]) =>
-      observeQuery(sql, () => underlying.query<Row>(sql, values)),
+    [PREPARATION_EXECUTOR]: Object.freeze({ executor: underlying, observer }),
+    query: <Row>(sql: string, values?: readonly unknown[]) => observeQuery(sql, () => query<Row>(sql, values)),
   };
   if (typeof underlying.queryPrepared === 'function') {
     const queryPrepared = underlying.queryPrepared.bind(underlying);
     observed.queryPrepared = <Row>(statement: PreparedSqlStatement, values?: readonly unknown[]) =>
       observeQuery<Row>(statement.text, () => queryPrepared<Row>(statement, values));
   }
-  return observed;
+  observedExecutors.set(observed, underlying);
+  return Object.freeze(observed);
 }
 
 export async function observePreparationPhase<T>(

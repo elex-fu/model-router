@@ -6,6 +6,7 @@ import type { ProviderEligibilityResult } from '../catalog/index.js';
 import { SaasCatalogError, SaasCatalogService } from '../catalog/index.js';
 import { saasAdvisoryKey, sortAndDedupeAdvisoryKeys } from '../db/advisory-lock-keys.js';
 import type { SaasDatabase, SqlExecutor } from '../db/index.js';
+import { mapStoredAttemptRecord, mapStoredRequestRecord } from '../metering/service.js';
 import type {
   AttemptRecord,
   AuthorizationBindingInput,
@@ -23,7 +24,6 @@ import {
   type SaasRequestAdmissionPlatformPriceHoldFacts,
 } from './admission.js';
 import type { ConservativePriceHold } from './hold-calculator.js';
-import { validateRequestAdmissionIpPolicy } from './request-admission-ip-policy.js';
 import {
   applyGroupMultiplierToHold,
   calculateConservativePriceHold,
@@ -34,8 +34,161 @@ import {
   observePreparationPhase,
   type PostgresPreparationObserver,
 } from './postgres-preparation-observer.js';
+import {
+  type PreparationTransactionContext,
+  type PreparationTransactionIdentity,
+  preparationTransactionContext,
+} from './preparation-transaction-facts.js';
+import { validateRequestAdmissionIpPolicy } from './request-admission-ip-policy.js';
 
 type Row = Record<string, unknown>;
+
+interface PreparationFacts {
+  readonly fences: readonly string[];
+  readonly authority: ReadonlyMap<string, readonly Row[]>;
+  readonly requestRow: Row;
+  readonly attemptRow: Row;
+  readonly request: RequestRecord;
+  readonly attempt: AttemptRecord;
+}
+// The issuer and registry live ONLY in the concrete guard. Importing the
+// scope/read APIs cannot mint facts or alias a different SQL executor.
+const preparationFacts = new WeakMap<object, { revision: object; recordsRevision: object; facts: PreparationFacts }>();
+
+function rememberPreparationTransactionFacts(
+  executor: SqlExecutor,
+  context: PreparationTransactionContext | undefined,
+  facts: PreparationFacts,
+): void {
+  const current = preparationTransactionContext(executor);
+  if (!context || !current || current.token !== context.token || current.revision !== context.revision) return;
+  const { identity } = current;
+  if (
+    facts.request.tenantId !== identity.tenantId ||
+    facts.request.id !== identity.requestId ||
+    facts.attempt.tenantId !== identity.tenantId ||
+    facts.attempt.requestId !== identity.requestId ||
+    facts.attempt.id !== identity.attemptId ||
+    facts.attempt.payloadSha256 !== identity.payloadSha256
+  )
+    return;
+  preparationFacts.set(current.token, {
+    revision: current.revision,
+    recordsRevision: context.recordsRevision,
+    facts: structuredClone(facts),
+  });
+}
+
+export async function readPreparationTransactionRecords(
+  executor: SqlExecutor,
+  tenantId: string,
+  requestId: string,
+  attemptId: string,
+): Promise<{ request: RequestRecord; attempt: AttemptRecord } | undefined> {
+  const context = preparationTransactionContext(executor);
+  if (
+    !context ||
+    context.identity.tenantId !== tenantId ||
+    context.identity.requestId !== requestId ||
+    context.identity.attemptId !== attemptId
+  )
+    return;
+  const stored = preparationFacts.get(context.token);
+  if (!stored || stored.revision !== context.revision) return;
+  if (stored.recordsRevision !== context.recordsRevision) {
+    // A reviewed Redis receipt changes request bookkeeping. Refresh BOTH rows
+    // under the guard's still-held locks, then share those reads with register.
+    // This API cannot install caller-supplied rows or mint authority facts.
+    const requestRow = await lockOne(
+      executor,
+      'request',
+      'saas_requests',
+      'tenant_id = $1 AND id = $2',
+      [tenantId, requestId],
+      'UPDATE',
+    );
+    const attemptRow = await lockOne(
+      executor,
+      'attempt',
+      'saas_attempts',
+      'tenant_id = $1 AND id = $2',
+      [tenantId, attemptId],
+      'UPDATE',
+    );
+    const current = preparationTransactionContext(executor);
+    if (
+      !current ||
+      current.token !== context.token ||
+      current.revision !== context.revision ||
+      current.recordsRevision !== context.recordsRevision
+    )
+      return;
+    if (
+      requestRow.tenant_id !== tenantId ||
+      requestRow.id !== requestId ||
+      attemptRow.tenant_id !== tenantId ||
+      attemptRow.request_id !== requestId ||
+      attemptRow.id !== attemptId
+    )
+      return;
+    stored.facts = structuredClone({
+      ...stored.facts,
+      requestRow,
+      attemptRow,
+      request: mapStoredRequestRecord(requestRow),
+      attempt: mapStoredAttemptRecord(attemptRow),
+    });
+    stored.recordsRevision = current.recordsRevision;
+  }
+  return structuredClone({ request: stored.facts.request, attempt: stored.facts.attempt });
+}
+
+/** Single-use registration proof; preflight/claim never consume these facts. */
+export function takePreparationTransactionFacts(
+  executor: SqlExecutor,
+  identity: PreparationTransactionIdentity,
+  canonicalEvidence: string,
+  requiredFences: readonly string[],
+):
+  | (Pick<PreparationFacts, 'authority' | 'fences'> &
+      Partial<Pick<PreparationFacts, 'requestRow' | 'attemptRow'>> & { readonly isCurrent: () => boolean })
+  | undefined {
+  const context = preparationTransactionContext(executor);
+  if (
+    !context ||
+    context.canonicalEvidence !== canonicalEvidence ||
+    Object.entries(context.identity).some(
+      ([key, value]) => identity[key as keyof PreparationTransactionIdentity] !== value,
+    )
+  )
+    return;
+  const stored = preparationFacts.get(context.token);
+  if (
+    !stored ||
+    stored.revision !== context.revision ||
+    requiredFences.some((key) => !stored.facts.fences.includes(key))
+  )
+    return;
+  preparationFacts.delete(context.token);
+  const facts = structuredClone({
+    authority: stored.facts.authority,
+    fences: stored.facts.fences,
+    ...(stored.recordsRevision === context.recordsRevision
+      ? { requestRow: stored.facts.requestRow, attemptRow: stored.facts.attemptRow }
+      : {}),
+  });
+  return {
+    ...facts,
+    isCurrent: () => {
+      const current = preparationTransactionContext(executor);
+      return (
+        current?.token === context.token &&
+        current.revision === context.revision &&
+        current.recordsRevision === context.recordsRevision
+      );
+    },
+  };
+}
 
 export type PostgresRequestAdmissionGuardErrorCode =
   | 'INVALID_INPUT'
@@ -670,7 +823,7 @@ async function acquireAdmissionFences(
   executor: SqlExecutor,
   request: RequestRecord,
   candidate: AttemptRecord,
-): Promise<void> {
+): Promise<readonly string[]> {
   // One batched statement takes every shared fence in explicit input-ordinal
   // order. PostgreSQL evaluates the scalar volatile lock target after ORDER BY
   // because that target is not itself a sort/group/distinct expression. There
@@ -694,6 +847,7 @@ async function acquireAdmissionFences(
       ORDER BY fence.input_ordinal`,
     [keys],
   );
+  return keys;
 }
 
 async function lockOne(
@@ -750,7 +904,7 @@ const ADMISSION_AUTHORITY_VERSION_COLUMNS: Readonly<Record<string, readonly stri
 const ADMISSION_AUTHORITY_PROJECTIONS: Readonly<Record<string, string>> = {
   tenant: 'id, status, default_billing_group_id',
   project: 'tenant_id, id, inference_policy_version, inference_policy_status',
-  'project-policy': 'status',
+  'project-policy': 'version::text, status',
   principal: 'disabled_at, anonymized_at',
   key: `tenant_id, project_id, execution_principal_type, execution_principal_id, principal_user_id,
     entitlement_id, supply_profile_id, supply_mode, authz_version, entitlement_authz_version,
@@ -761,9 +915,9 @@ const ADMISSION_AUTHORITY_PROJECTIONS: Readonly<Record<string, string>> = {
     authz_version, current_version, credential_type, expires_at`,
   'credential-version': 'owner_kind, supply_mode, account_id, credential_id, version, status, expires_at',
   'customer-price-identity':
-    'public_model_id, public_model_version, provider_id, product_id, protocol, endpoint, currency',
+    'public_model_id, public_model_version, provider_id, product_id, protocol, endpoint, currency, effective_at, expires_at',
   'supplier-cost-identity': `public_model_id, public_model_version, provider_id, product_id,
-    protocol, endpoint, currency, resolved_model`,
+    protocol, endpoint, currency, resolved_model, effective_at, expires_at`,
 };
 
 /** Request-local facts, loaded only after all authorization fences are held. */
@@ -771,7 +925,11 @@ async function loadAdmissionAuthority(
   executor: SqlExecutor,
   request: RequestRecord,
   candidate: AttemptRecord,
-): Promise<{ one: (stage: string) => Row; many: (stage: string) => Row[] }> {
+): Promise<{
+  one: (stage: string) => Row;
+  many: (stage: string) => Row[];
+  facts: ReadonlyMap<string, readonly Row[]>;
+}> {
   const reads: Array<{ stage: string; sql: string; values: readonly unknown[] }> = [];
   const select = (stage: string, sql: string, values: readonly unknown[]) => reads.push({ stage, sql, values });
   const one = (stage: string, table: string, where: string, values: readonly unknown[]) =>
@@ -957,7 +1115,7 @@ async function loadAdmissionAuthority(
   }
   if (facts.size !== reads.length || reads.some(({ stage }) => !facts.has(stage))) storage();
   const many = (stage: string): Row[] => facts.get(stage) ?? storage();
-  return { many, one: (stage) => requiredOne(many(stage)) };
+  return { many, one: (stage) => requiredOne(many(stage)), facts };
 }
 
 export class PostgresRequestAdmissionGuard implements SaasRequestAdmissionGuard {
@@ -1016,8 +1174,9 @@ export class PostgresRequestAdmissionGuard implements SaasRequestAdmissionGuard 
     // Acquire every shared fence before reading any authority fact. Each layer sorts complete
     // helper-generated key text, so concurrent admission and authorization changes converge on
     // the same lock order and all post-wait SELECTs use a fresh READ COMMITTED snapshot.
-    await acquireAdmissionFences(executor, request, candidate);
+    const fences = await acquireAdmissionFences(executor, request, candidate);
     const authority = await loadAdmissionAuthority(executor, request, candidate);
+    const factRevision = preparationTransactionContext(executor);
 
     const tenant = authority.one('tenant');
     assertActiveStatus(tenant);
@@ -1090,6 +1249,22 @@ export class PostgresRequestAdmissionGuard implements SaasRequestAdmissionGuard 
       'UPDATE',
     );
     compareAttempt(persistedAttempt, candidate);
+    const rememberFacts = () => {
+      if (!factRevision) return;
+      const facts = new Map(authority.facts);
+      const customerPrice = facts.get('customer-price-identity');
+      const supplierCost = facts.get('supplier-cost-identity');
+      if (customerPrice) facts.set('customer-price', customerPrice);
+      if (supplierCost) facts.set('supplier-cost', supplierCost);
+      rememberPreparationTransactionFacts(executor, factRevision, {
+        fences,
+        authority: facts,
+        requestRow: persistedRequest,
+        attemptRow: persistedAttempt,
+        request: mapStoredRequestRecord(persistedRequest),
+        attempt: mapStoredAttemptRecord(persistedAttempt),
+      });
+    };
     if (persistedAttempt.request_id !== request.id) deny('AUTHORITY_MISMATCH');
     if (
       candidate.protocol !== request.protocol ||
@@ -1535,6 +1710,7 @@ export class PostgresRequestAdmissionGuard implements SaasRequestAdmissionGuard 
         commercial.supplier_cost_version != null
       )
         deny('AUTHORITY_MISMATCH');
+      rememberFacts();
       return {
         authorization: this.authorizationFrom(request),
         candidate: toInitialAttempt(candidate),
@@ -1762,6 +1938,7 @@ export class PostgresRequestAdmissionGuard implements SaasRequestAdmissionGuard 
       customerPriceVersion,
       supplierCostVersion,
     };
+    rememberFacts();
     return {
       authorization: this.authorizationFrom(request),
       candidate: toInitialAttempt(candidate),

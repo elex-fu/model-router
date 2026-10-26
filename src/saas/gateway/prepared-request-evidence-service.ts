@@ -4,6 +4,7 @@ import type { SaasDatabase, SqlExecutor } from '../db/index.js';
 import { mapStoredAttemptRecord, storedAttemptColumns } from '../metering/service.js';
 import type { AttemptRecord } from '../metering/types.js';
 import type { ModelResolutionProvenance } from './contracts.js';
+import { takePreparationTransactionFacts } from './postgres-request-admission-guard.js';
 
 export const PREPARED_REQUEST_EVIDENCE_SCHEMA_VERSION = 1;
 export const PREPARED_REQUEST_EVIDENCE_DOMAIN = 'model-router/saas/prepared-request-evidence/v1';
@@ -1925,7 +1926,30 @@ export class SaasPreparedRequestEvidenceService {
     const normalized = normalizeInput(input, true);
     const statementSha256 = verifyEvidenceSignature(normalized, this.options.trustedVerifierPublicKeys);
     const work = async (tx: SqlExecutor): Promise<PreparedRequestEvidenceRecord> => {
-      const lockedAt = await this.revalidateAuthorities(tx, normalized, 'UPDATE');
+      const remembered = takePreparationTransactionFacts(
+        tx,
+        normalized,
+        canonicalPreparedRequestEvidencePayload(input),
+        evidenceAdvisoryFenceLayers(normalized).flatMap(([, keys]) => keys),
+      );
+      const lockedAt = await this.revalidateAuthorities(
+        tx,
+        normalized,
+        'UPDATE',
+        remembered
+          ? {
+              fencesAlreadyHeld: true,
+              prelockedRequest: remembered.requestRow,
+              prelockedAttempt: remembered.attemptRow,
+              authorityFacts: remembered.authority,
+            }
+          : undefined,
+      );
+      // A concurrently queued same-transaction statement can invalidate a
+      // consumed proof during the awaited final clock. Never insert from it.
+      if (remembered && !remembered.isCurrent()) {
+        fail('AUTHORITY_MISMATCH', 'preparation transaction facts changed during registration');
+      }
       this.assertWindow(normalized, lockedAt);
       const placeholders = EVIDENCE_COLUMNS.map((_, index) => `$${String(index + 1)}`).join(', ');
       const result = await tx.query<EvidenceRow>(
@@ -2203,10 +2227,17 @@ export class SaasPreparedRequestEvidenceService {
       readonly prelockedRequest?: EvidenceRow;
       readonly prelockedAttempt?: EvidenceRow;
       readonly fencesAlreadyHeld?: boolean;
+      readonly authorityFacts?: ReadonlyMap<string, readonly EvidenceRow[]>;
     } = {},
   ): Promise<Date> {
     if (!options.fencesAlreadyHeld) await acquireEvidenceAdvisoryFences(tx, input);
-    const authority = await loadEvidenceAuthority(tx, input);
+    const authority = options.authorityFacts
+      ? {
+          many: (stage: string) =>
+            options.authorityFacts?.get(stage) ?? fail('STORAGE_ERROR', 'preparation authority fact missing'),
+          one: (stage: string) => requiredRow(options.authorityFacts?.get(stage) ?? [], stage),
+        }
+      : await loadEvidenceAuthority(tx, input);
     const tenant = authority.one('tenant');
     if (tenant.status !== 'active') fail('AUTHORITY_MISMATCH', 'tenant is not active');
 

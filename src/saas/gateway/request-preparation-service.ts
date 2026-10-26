@@ -14,6 +14,10 @@ import { createModelResolutionProvenance } from './contracts.js';
 import type { NormalSuccessSettlementSnapshot } from './dispatch-usage-settlement.js';
 import { observePreparationPhase, type PostgresPreparationObserver } from './postgres-preparation-observer.js';
 import {
+  bindPreparationTransactionEvidence,
+  withPreparationTransactionFacts,
+} from './preparation-transaction-facts.js';
+import {
   canonicalPreparedRequestEvidencePayload,
   type PreparedRequestEvidenceAudit,
   type PreparedRequestEvidenceInput,
@@ -2641,6 +2645,7 @@ export class SaasRequestPreparationService {
           this.invokeDecision(
             'evidence',
             async () => {
+              bindPreparationTransactionEvidence(executor, canonicalPreparedRequestEvidencePayload(signedEvidence));
               const registered = await registrar.register(signedEvidence, { executor });
               return isDecision<PreparedRequestEvidenceRecord>(registered)
                 ? registered
@@ -2741,7 +2746,11 @@ export class SaasRequestPreparationService {
 
     try {
       return await transaction.transaction(async (executor) => {
-        const result = await durableWork(executor);
+        const result = await withPreparationTransactionFacts(
+          executor,
+          { tenantId: caller.tenantId, requestId: ids.requestId, attemptId: ids.attemptId, payloadSha256 },
+          durableWork,
+        );
         if (result.outcome !== 'prepared') throw new RequestPreparationTransactionRollback(result);
         return result;
       });

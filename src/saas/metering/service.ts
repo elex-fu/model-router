@@ -3084,5 +3084,6 @@ export class SaasMeteringService {
 
 export type { MeteringServiceOptions };
 
-// Evidence operations decode the same persisted attempt shape without another database read.
+// Strict persisted-row decoders shared by same-transaction proof consumers.
 export { attemptColumns as storedAttemptColumns, mapAttempt as mapStoredAttemptRecord };
+export { mapRequest as mapStoredRequestRecord };
