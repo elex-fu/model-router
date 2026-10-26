@@ -6,6 +6,7 @@ import type { SaasDatabase, SqlExecutor } from '../../db/types.js';
 import { calculatePriceVersion } from '../../pricing/calculator.js';
 import type { CustomerPriceVersionRecord, TokenUsageInput } from '../../pricing/types.js';
 import { calculateConservativePriceHold, INPUT_BILLING_BUCKETS } from '../hold-calculator.js';
+import { type FastCreditWaitResult, waitForFastCreditWork } from './credit-wait.js';
 
 export interface FastReserveIntentInput {
   readonly requestId: string;
@@ -368,7 +369,10 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
           break;
         // A timeout/cancel never cancels or frees a possibly committed grant.
         // The tracked singleflight remains available to later callers/drain.
-        if (!(await this.waitForCreditWork(this.scheduleReplenishment(input.tenantId, input.currency, true), input)))
+        if (
+          (await waitForFastCreditWork(this.scheduleReplenishment(input.tenantId, input.currency, true), input)) !==
+          'completed'
+        )
           return { kind: 'denied', reason: 'send_deadline' };
       }
     }
@@ -444,6 +448,8 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
       }
       const existing = await this.findExisting(input, identity);
       if (existing) return existing;
+      if (input.sendDeadlineMs <= Date.now() || input.signal?.aborted)
+        return { kind: 'denied', reason: 'send_deadline' };
       if (input.currency === null) break;
       if (performance.now() >= recoveryDeadline) break;
       if (unavailable === 'credit_busy') {
@@ -456,9 +462,9 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
         // already holding the wallet fence, so its restoration is committed
         // before reselection. Unfunded/capped wallets finish this pass promptly;
         // no receipt, unknown hold or merely elapsed time releases money.
-        let prepared = false;
+        let prepared: FastCreditWaitResult | undefined;
         try {
-          prepared = await this.waitForCreditWork(
+          prepared = await waitForFastCreditWork(
             recoverable
               ? this.scheduleReplenishment(input.tenantId, input.currency, true)
               : (this.running ?? Promise.resolve()).then(() => undefined),
@@ -469,11 +475,9 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
           // Replenishment already reports its own failure. Do not turn a known
           // admission denial into new sending authority or an uncertain retry.
         }
-        if (!prepared) {
-          if (input.sendDeadlineMs <= Date.now() || input.signal?.aborted)
-            return { kind: 'denied', reason: 'send_deadline' };
-          break;
-        }
+        if (prepared === 'cancelled' || prepared === 'authority_expired')
+          return { kind: 'denied', reason: 'send_deadline' };
+        if (prepared !== 'completed') break;
       }
       if (performance.now() >= recoveryDeadline) break;
       try {
@@ -482,6 +486,9 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
         /* telemetry cannot affect money authority */
       }
     }
+    // Every exhausted-budget/error exit still gives cancellation/authority
+    // expiry precedence over the last observed credit state.
+    if (input.sendDeadlineMs <= Date.now() || input.signal?.aborted) return { kind: 'denied', reason: 'send_deadline' };
     if (input.currency !== null) this.scheduleReplenishment(input.tenantId, input.currency);
     try {
       this.options.onCreditUnavailable?.(unavailable);
@@ -489,34 +496,6 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
       /* telemetry cannot affect money authority */
     }
     return { kind: 'denied', reason: unavailable };
-  }
-
-  /** Timeout/abort stops waiting, never the durable transaction or its tracking. */
-  private async waitForCreditWork(
-    work: Promise<void>,
-    input: FastReserveIntentInput,
-    recoveryDeadline = Number.POSITIVE_INFINITY,
-  ): Promise<boolean> {
-    let timer: NodeJS.Timeout | undefined;
-    let abort: (() => void) | undefined;
-    try {
-      return await Promise.race([
-        work.then(() => true),
-        new Promise<false>((resolve) => {
-          abort = () => resolve(false);
-          input.signal?.addEventListener('abort', abort, { once: true });
-          if (input.signal?.aborted) return resolve(false);
-          timer = setTimeout(
-            () => resolve(false),
-            Math.max(0, Math.min(input.sendDeadlineMs - Date.now(), recoveryDeadline - performance.now())),
-          );
-          timer.unref();
-        }),
-      ]);
-    } finally {
-      if (timer) clearTimeout(timer);
-      if (abort) input.signal?.removeEventListener('abort', abort);
-    }
   }
 
   private async findExisting(input: FastReserveIntentInput, identity: string): Promise<FastReserveResult | null> {

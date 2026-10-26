@@ -3,6 +3,11 @@ import { type TestContext, test } from 'node:test';
 import { setImmediate as flushMicrotasks } from 'node:timers/promises';
 import type { SaasDatabase, SqlResult } from '../../../../src/saas/db/types.js';
 import {
+  type FastCreditWaitClock,
+  type FastCreditWaitResult,
+  waitForFastCreditWork,
+} from '../../../../src/saas/gateway/fast/credit-wait.js';
+import {
   calculateFastReceiptCharge,
   fastJournalCanonicalJson,
   fastJournalDigest,
@@ -218,4 +223,99 @@ test('cache aggregate plus TTL detail is priced once, reasoning remains included
   assert.equal(calculateFastReceiptCharge(snapshot, usage), 17n);
   assert.throws(() => calculateFastReceiptCharge(snapshot, { ...usage, cacheWrite: '6' }), /INCONSISTENT_USAGE/);
   assert.throws(() => calculateFastReceiptCharge(snapshot, { ...usage, reasoningOutput: '8' }));
+});
+
+function creditWaitFixture() {
+  const state = { wall: 1000, monotonic: 0 };
+  const timers = new Map<number, { callback: () => void; delay: number }>();
+  const delays: number[] = [];
+  let sequence = 0;
+  const clock: FastCreditWaitClock = {
+    wallNow: () => state.wall,
+    monotonicNow: () => state.monotonic,
+    schedule: (callback, delay) => {
+      const id = sequence++;
+      delays.push(delay);
+      timers.set(id, { callback, delay });
+      return () => {
+        timers.delete(id);
+      };
+    },
+  };
+  let complete!: () => void, fail!: (error: Error) => void;
+  const work = new Promise<void>((resolve, reject) => {
+    complete = resolve;
+    fail = reject;
+  });
+  const fire = () => {
+    const timer = timers.entries().next().value;
+    assert.ok(timer, 'a bounded timer must be armed');
+    timers.delete(timer[0]);
+    timer[1].callback();
+  };
+  return { state, timers, delays, clock, work, complete, fail, fire };
+}
+
+test('credit wait re-arms an early timer instead of misclassifying an authority deadline as credit shortage', async () => {
+  const f = creditWaitFixture();
+  let result: FastCreditWaitResult | undefined;
+  const waiting = waitForFastCreditWork(f.work, { sendDeadlineMs: 1050 }, 100, f.clock).then((value) => {
+    result = value;
+    return value;
+  });
+  assert.deepEqual(f.delays, [50]);
+  f.state.wall = 1049;
+  f.state.monotonic = 49.8;
+  f.fire();
+  await Promise.resolve();
+  assert.equal(result, undefined, 'a timer callback is not proof that either clock reached its deadline');
+  assert.deepEqual(f.delays, [50, 1]);
+  f.state.wall = 1050;
+  f.state.monotonic = 50;
+  f.fire();
+  assert.equal(await waiting, 'authority_expired');
+  assert.equal(f.timers.size, 0);
+  f.state.wall = 1049;
+  f.complete();
+  await Promise.resolve();
+  assert.equal(result, 'authority_expired', 'the observed stop reason survives a later wall-clock read');
+});
+
+test('credit wait rounds fractional monotonic budget up, does not spin, and preserves authority precedence', async () => {
+  const f = creditWaitFixture();
+  const waiting = waitForFastCreditWork(f.work, { sendDeadlineMs: 2000 }, 1.2, f.clock);
+  assert.deepEqual(f.delays, [2]);
+  f.state.monotonic = 1.1;
+  f.fire();
+  assert.deepEqual(f.delays, [2, 1], 'even an early fractional wake has a one millisecond scheduling floor');
+  f.state.monotonic = 1.2;
+  f.fire();
+  assert.equal(await waiting, 'budget_exhausted');
+  assert.equal(f.timers.size, 0);
+  const both = creditWaitFixture();
+  const bothWaiting = waitForFastCreditWork(both.work, { sendDeadlineMs: 1050 }, 50, both.clock);
+  both.state.wall = 1050;
+  both.state.monotonic = 50;
+  both.fire();
+  assert.equal(await bothWaiting, 'authority_expired');
+});
+
+test('credit wait completion rechecks boundaries; cancellation and rejection clean up timers without cancelling durable work', async () => {
+  for (const stop of ['completed', 'authority_expired', 'budget_exhausted', 'cancelled'] as const) {
+    const f = creditWaitFixture();
+    const controller = new AbortController();
+    const waiting = waitForFastCreditWork(f.work, { sendDeadlineMs: 1050, signal: controller.signal }, 100, f.clock);
+    if (stop === 'authority_expired') f.state.wall = 1050;
+    if (stop === 'budget_exhausted') f.state.monotonic = 100;
+    if (stop === 'cancelled') controller.abort();
+    f.complete();
+    assert.equal(await waiting, stop);
+    assert.equal(f.timers.size, 0);
+  }
+  const failed = creditWaitFixture();
+  const waiting = waitForFastCreditWork(failed.work, { sendDeadlineMs: 1050 }, 100, failed.clock);
+  const error = new Error('tracked credit transaction failure');
+  failed.fail(error);
+  await assert.rejects(waiting, (caught) => caught === error);
+  assert.equal(failed.timers.size, 0);
 });

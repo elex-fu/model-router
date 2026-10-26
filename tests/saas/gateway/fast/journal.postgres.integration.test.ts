@@ -1074,66 +1074,67 @@ test('fast money journal real PostgreSQL: atomic reserve, durable completion, ex
   );
   await t.test(
     'recovery cancellation, original authority deadline and bounded wait never issue a late CAS or release unresolved money',
-    async () => {
+    async (t) => {
       for (const stop of ['cancel', 'authority', 'budget'] as const) {
-        let pause = false,
-          waiting!: () => void,
-          release!: () => void,
-          statements = 0;
-        const started = new Promise<void>((resolve) => {
-          waiting = resolve;
-        });
-        const gate = new Promise<void>((resolve) => {
-          release = resolve;
-        });
-        const measured: SaasDatabase = {
-          ...gateway,
-          query: async <Row>(sql: string, values?: readonly unknown[]): Promise<SqlResult<Row>> => {
-            if (pause && sql.includes('fast-journal:reserve-intent')) statements++;
-            return gateway.query<Row>(sql, values);
-          },
-          transaction: async (work) => {
-            if (pause) {
-              waiting();
-              await gate;
-            }
-            return gateway.transaction(work);
-          },
-        };
-        const scope = await setup('2560', '2560', randomUUID(), measured, 8);
-        const intents: FastIntent[] = [];
-        for (let i = 0; i < 32; i++)
-          intents.push(await reserve(scope.journal, intentFixture(scope.tenantId, scope.owner)));
-        await Promise.all(
-          intents.slice(0, 8).map((intent) => scope.journal.appendReceipt(receiptFixture(intent, '1'))),
-        );
-        await scope.journal.runOnce();
-        const controller = new AbortController();
-        const input = {
-          ...intentFixture(scope.tenantId, scope.owner),
-          signal: controller.signal,
-          sendDeadlineMs: Date.now() + (stop === 'authority' ? 50 : 60_000),
-        };
-        pause = true;
-        const before = performance.now();
-        const pending = scope.journal.reserveIntent(input);
-        await started;
-        if (stop === 'cancel') controller.abort();
-        try {
-          assert.deepEqual(await pending, {
-            kind: 'denied',
-            reason: stop === 'budget' ? 'credit_not_ready' : 'send_deadline',
+        await t.test(stop, async () => {
+          const controller = new AbortController();
+          let pause = false,
+            release!: () => void,
+            statements = 0;
+          const gate = new Promise<void>((resolve) => {
+            release = resolve;
           });
-          assert.ok(performance.now() - before < 250, 'no unbounded queue on a stalled credit transaction');
-          assert.equal(statements, 1, 'no new intent SQL after abort/deadline/recovery wait expires');
-          assert.equal((await facts(scope.tenantId)).intents, '32');
-          assert.equal((await facts(scope.tenantId)).backing, '2552');
-        } finally {
-          release();
-        }
-        await scope.journal.close();
-        assert.equal(statements, 1, 'late completion of tracked refill cannot issue an intent');
-        assert.equal((await facts(scope.tenantId)).backing, '1920');
+          const measured: SaasDatabase = {
+            ...gateway,
+            query: async <Row>(sql: string, values?: readonly unknown[]): Promise<SqlResult<Row>> => {
+              const result = await gateway.query<Row>(sql, values);
+              if (pause && sql.includes('fast-journal:reserve-intent')) {
+                statements++;
+                // Cancel exactly after a real acknowledged no-write, not after
+                // a race between recovery and a final background refill.
+                if (stop === 'cancel') controller.abort();
+              }
+              return result;
+            },
+            transaction: async (work) => {
+              if (pause) {
+                await gate;
+              }
+              return gateway.transaction(work);
+            },
+          };
+          const scope = await setup('2560', '2560', randomUUID(), measured, 8);
+          const intents: FastIntent[] = [];
+          for (let i = 0; i < 32; i++)
+            intents.push(await reserve(scope.journal, intentFixture(scope.tenantId, scope.owner)));
+          await Promise.all(
+            intents.slice(0, 8).map((intent) => scope.journal.appendReceipt(receiptFixture(intent, '1'))),
+          );
+          await scope.journal.runOnce();
+          const input = {
+            ...intentFixture(scope.tenantId, scope.owner),
+            signal: controller.signal,
+            sendDeadlineMs: Date.now() + (stop === 'authority' ? 50 : 60_000),
+          };
+          pause = true;
+          const before = performance.now();
+          const pending = scope.journal.reserveIntent(input);
+          try {
+            assert.deepEqual(await pending, {
+              kind: 'denied',
+              reason: stop === 'budget' ? 'credit_not_ready' : 'send_deadline',
+            });
+            assert.ok(performance.now() - before < 250, 'no unbounded queue on a stalled credit transaction');
+            assert.equal(statements, 1, 'no new intent SQL after abort/deadline/recovery wait expires');
+            assert.equal((await facts(scope.tenantId)).intents, '32');
+            assert.equal((await facts(scope.tenantId)).backing, '2552');
+          } finally {
+            release();
+          }
+          await scope.journal.close();
+          assert.equal(statements, 1, 'late completion of tracked refill cannot issue an intent');
+          assert.equal((await facts(scope.tenantId)).backing, '1920');
+        });
       }
     },
   );
