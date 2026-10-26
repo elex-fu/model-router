@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import { PlatformWalletLedgerService } from '../../../src/saas/billing/service.js';
 import type { ReserveBillingInput, SettleBillingInput } from '../../../src/saas/billing/types.js';
 import { createSaasDatabase, verifySaasRuntimeDatabasePrivileges } from '../../../src/saas/db/index.js';
-import type { SaasDatabase, SqlExecutor } from '../../../src/saas/db/types.js';
+import type { SaasDatabase, SqlExecutor, SqlResult } from '../../../src/saas/db/types.js';
 
 // The managed PG15/18 job provisions these identities and all registered
 // migrations before this file runs. REQUIRED=1 must turn missing config red.
@@ -560,8 +560,8 @@ test('FIN-01: bounded real PostgreSQL wallet financial invariants under restrict
         transaction(gateway, (tx) =>
           service.reserve(
             {
-              async query(sql, values) {
-                const result = await tx.query(sql, values);
+              async query<Row>(sql: string, values?: readonly unknown[]): Promise<SqlResult<Row>> {
+                const result = await tx.query<Row>(sql, values);
                 if (sql.includes('billing:reserve-wallet-snapshot')) {
                   assert.equal((result.rows[0] as { reservation_exists: boolean }).reservation_exists, false);
                   if (++snapshots === 2) bothSnapshots.resolve();
@@ -798,8 +798,8 @@ test('FIN-01: bounded real PostgreSQL wallet financial invariants under restrict
         transaction(gateway, (tx) =>
           service.settle(
             {
-              async query(sql, values) {
-                const result = await tx.query(
+              async query<Row>(sql: string, values?: readonly unknown[]): Promise<SqlResult<Row>> {
+                const result = await tx.query<Row>(
                   sql.includes('billing:project-ledger')
                     ? sql.replace('WHERE id = $1', 'WHERE false AND id = $1')
                     : sql,

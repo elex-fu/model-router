@@ -73,6 +73,11 @@ jobs:
           src/types/busboy.d.ts
           tests/saas/gateway/authorization-prelock-postgres.integration.test.ts
           tests/saas/gateway/managed-postgres-commercial-gateway.integration.test.ts
+          tests/saas/gateway/candidate-live-reads.postgres.integration.test.ts
+          tests/saas/gateway/reservation-planning.postgres.integration.test.ts
+          tests/saas/gateway/admission-bench-fixture.ts
+          tests/saas/gateway/runtime-health-clock-postgres-fixture.ts
+          tests/saas/gateway/prepared-evidence-authority-postgres-fixture.ts
           tests/saas/billing/managed-postgres-financial-invariants.integration.test.ts
           tests/saas/supply/platform-inference-access.postgres.integration.test.ts
           tests/saas/gateway/responses-continuation.postgres.integration.test.ts
@@ -160,6 +165,24 @@ jobs:
           MODEL_ROUTER_SAAS_GATEWAY_E2E_CONTROL_PLANE_URL: postgresql://model_router_saas_control_plane@postgres:5432/model_router_saas_ci
           MODEL_ROUTER_SAAS_GATEWAY_E2E_GATEWAY_URL: postgresql://model_router_saas_gateway@postgres:5432/model_router_saas_ci
         run: node --import tsx --test tests/saas/gateway/managed-postgres-commercial-gateway.integration.test.ts
+      # Native candidate probes require the real gateway-e2e account and lease
+      # seeded by HTTP E2E. Run both v3 gates here, never on an empty service.
+      - name: Run required real PostgreSQL native candidate live-read batching gate
+        env:
+          NODE_ENV: test
+          MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED: "1"
+          MODEL_ROUTER_SAAS_GATEWAY_E2E_MIGRATOR_URL: postgresql://model_router_saas_migrator@postgres:5432/model_router_saas_ci
+          MODEL_ROUTER_SAAS_GATEWAY_E2E_CONTROL_PLANE_URL: postgresql://model_router_saas_control_plane@postgres:5432/model_router_saas_ci
+          MODEL_ROUTER_SAAS_GATEWAY_E2E_GATEWAY_URL: postgresql://model_router_saas_gateway@postgres:5432/model_router_saas_ci
+        run: node --import tsx --test tests/saas/gateway/candidate-live-reads.postgres.integration.test.ts
+      - name: Run required real PostgreSQL fenced reservation-planning gate
+        env:
+          NODE_ENV: test
+          MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED: "1"
+          MODEL_ROUTER_SAAS_GATEWAY_E2E_MIGRATOR_URL: postgresql://model_router_saas_migrator@postgres:5432/model_router_saas_ci
+          MODEL_ROUTER_SAAS_GATEWAY_E2E_CONTROL_PLANE_URL: postgresql://model_router_saas_control_plane@postgres:5432/model_router_saas_ci
+          MODEL_ROUTER_SAAS_GATEWAY_E2E_GATEWAY_URL: postgresql://model_router_saas_gateway@postgres:5432/model_router_saas_ci
+        run: node --import tsx --test tests/saas/gateway/reservation-planning.postgres.integration.test.ts
       # 055 reuses only this fresh database's successful synthetic HTTP fixture;
       # configured roles with no successful BYOK/platform fixture fail closed.
       - name: Run required real PostgreSQL 055 prepared optional validity gate
