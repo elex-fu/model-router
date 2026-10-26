@@ -7,8 +7,9 @@ const path = '.github/workflows/fast-gateway-required.yml';
 const workflow = read(path);
 const nativeScenarioMatrix = `\${{ matrix.native-scenario }}`;
 const journal = 'tests/saas/gateway/fast/journal.postgres.integration.test.ts';
+const upgrade = 'tests/saas/gateway/fast/populated-upgrade.postgres.integration.test.ts';
 const resolution = 'tests/saas/gateway/fast/resolution.postgres.integration.test.ts';
-const journalCommand = `node --import tsx --test --test-concurrency=1 ${journal} ${resolution}`;
+const journalCommand = `node --import tsx --test --test-concurrency=1 ${journal} ${resolution} ${upgrade}`;
 const redis = 'tests/saas/gateway/fast/redis-admission.local.integration.test.ts';
 const native = 'tests/saas/gateway/fast/native-http.postgres.integration.test.ts';
 const runtime = 'tests/saas/gateway/fast/native-http-runtime-fixture.ts';
@@ -18,6 +19,7 @@ const strictRoots = [
   'executor.test.ts',
   'journal.test.ts',
   'journal.postgres.integration.test.ts',
+  'populated-upgrade.postgres.integration.test.ts',
   'journal-crash-child.ts',
   'redis-admission.test.ts',
   'redis-admission.local.integration.test.ts',
@@ -100,7 +102,11 @@ function validate(source: string): void {
   );
   assert.equal(actual[5]?.run, provision);
   for (const [index, command, env] of [
-    [6, journalCommand, roleEnv],
+    [
+      6,
+      journalCommand,
+      { ...roleEnv, SAAS_TEST_DATABASE_ADMIN_URL: 'postgresql://postgres@postgres:5432/model_router_saas_ci' },
+    ],
     [
       7,
       `node --import tsx --test ${redis}`,
@@ -144,6 +150,9 @@ test('required fast wiring rejects disabled roots, altered roles, missing tools 
     [`          ${runtime}\n`, ''],
     [`          ${seed}\n`, ''],
     [`          ${resolution}\n`, ''],
+    [`          ${upgrade}\n`, ''],
+    [journalCommand, `node --import tsx --test --test-concurrency=1 ${journal} ${resolution}`],
+    ['          SAAS_TEST_DATABASE_ADMIN_URL: postgresql://postgres@postgres:5432/model_router_saas_ci\n', ''],
     [journalCommand, `node --import tsx --test ${journal}`],
     ['MODEL_ROUTER_NATIVE_FAST_HTTP_REQUIRED: "1"', 'MODEL_ROUTER_NATIVE_FAST_HTTP_REQUIRED: "0"'],
     ['MODEL_ROUTER_FAST_ADMISSION_REDIS_TEST: "1"', 'MODEL_ROUTER_FAST_ADMISSION_REDIS_TEST: "0"'],
@@ -265,4 +274,21 @@ test('required PG15/18 roots retain receipt-v2 money, race, restart and native p
   assert.match(nativeSource, /upstreamRequests, sentBeforeDenial/);
   assert.match(nativeSource, /upstreamRequests, Number\(expected\.count\)/);
   assert.match(nativeSource, /finalLiability\.releases, expected\.count/);
+});
+
+test('required populated145 upgrade gate uses real migration history and restricted-role money evidence', () => {
+  validate(workflow);
+  const source = read(upgrade);
+  assert.match(source, /process\.env\[REQUIRED_FLAG\] === '1' \|\| anyRoleConfigured/);
+  assert.match(source, /skip: !enabled/);
+  assert.match(source, /const urls = roleUrls\(\)/);
+  assert.match(source, /runSaasMigrations\(pool, legacyMigrations\)/);
+  assert.match(source, /runSaasMigrations\(pool\)/);
+  assert.match(source, /historyFingerprint\(beforeHistory\), legacyFingerprint/);
+  assert.match(source, /upgrade changes no existing business row/);
+  assert.match(source, /schema145 worker claim cannot see compacted v2 jobs/);
+  assert.match(source, /already charged job is never reposted/);
+  assert.match(source, /unknown outcome keeps its full M/);
+  assert.doesNotMatch(source, /\bt(?:est)?\.(?:skip|todo)\s*\(/);
+  assert.doesNotMatch(source, /INSERT INTO saas_schema_migrations|DISABLE TRIGGER|session_replication_role/);
 });
