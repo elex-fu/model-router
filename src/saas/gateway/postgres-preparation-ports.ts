@@ -10,17 +10,16 @@ import {
   createRequestAdmissionReservationBusinessKey,
   PLATFORM_REQUEST_ADMISSION_UPPER_BOUNDS_KIND,
   type PlatformRequestAdmissionHoldEvidence,
+  type SaasBillingReservationPort,
   type SaasMeteringAdmissionPort,
   type SaasRequestAdmissionCommand,
   type SaasRequestAdmissionGuard,
   SaasRequestAdmissionService,
 } from './admission.js';
-import { SaasAdmissionAuthorizationError, type SaasRequestAdmissionAuthorizationPrelock } from './authorization-prelock.js';
 import {
-  PostgresRequestAdmissionGuard,
-  readPreparationTransactionRecords,
-} from './postgres-request-admission-guard.js';
-import { readRequestAdmissionIpPolicy } from './request-admission-ip-policy.js';
+  SaasAdmissionAuthorizationError,
+  type SaasRequestAdmissionAuthorizationPrelock,
+} from './authorization-prelock.js';
 import {
   BillingGroupSpendAdmissionDeniedError,
   type BillingGroupSpendAdmissionPort,
@@ -32,6 +31,11 @@ import {
   observePreparationPhase,
   type PostgresPreparationObserver,
 } from './postgres-preparation-observer.js';
+import {
+  PostgresRequestAdmissionGuard,
+  readPreparationTransactionRecords,
+} from './postgres-request-admission-guard.js';
+import { readRequestAdmissionIpPolicy } from './request-admission-ip-policy.js';
 import {
   type GatewayRequestIdempotencyClaimResult,
   type GatewayRequestIdempotencyStore,
@@ -77,6 +81,11 @@ export interface PostgresPreparationCapacityReservation {
  * transaction executor and make reserve idempotent by tenant/request ID.
  */
 export interface PostgresPreparationCapacityPort {
+  /** Stages only fenced immutable reads; invocation retains the original mutable-lock position. */
+  prepareReserve?(
+    executor: SqlExecutor,
+    input: Parameters<PostgresPreparationCapacityPort['reserve']>[1],
+  ): Promise<() => Promise<RequestPreparationDecision<PostgresPreparationCapacityReservation>>>;
   /** Redis mode supplies immutable reservation facts before their SQL projection arrives. */
   cachedReservation?: (requestId: string) => Promise<Record<string, unknown> | null>;
   reserve(
@@ -114,7 +123,8 @@ export interface PostgresPreparationCapacityPort {
 export interface PostgresPreparationPortsOptions {
   readonly database: SaasDatabase;
   readonly metering: Pick<SaasMeteringService, 'admitPreparedRequest' | 'getRequest' | 'getAttempt'>;
-  readonly billing: Pick<PlatformWalletLedgerService, 'reserve' | 'release'>;
+  readonly billing: Pick<PlatformWalletLedgerService, 'reserve' | 'release'> &
+    Pick<SaasBillingReservationPort, 'prepareReserve'>;
   readonly guard: SaasRequestAdmissionGuard;
   readonly authorizationPrelock: SaasRequestAdmissionAuthorizationPrelock;
   /** Existing DB-backed project/supply entitlement resolver. */
@@ -623,46 +633,82 @@ export function createPostgresPreparationPorts(options: PostgresPreparationPorts
     },
   };
 
-  const revalidateAuthorization: NonNullable<RequestPreparationAdmissionPort['revalidateAuthorization']> = async (input, sqlOptions) => {
+  const revalidateAuthorization: NonNullable<RequestPreparationAdmissionPort['revalidateAuthorization']> = async (
+    input,
+    sqlOptions,
+  ) => {
     const caller = input.caller;
     try {
       await options.authorizationPrelock.prelock({
         executor: sqlOptions.executor,
         request: {
-          tenantId: caller.tenantId, projectId: caller.projectId, proxyKeyId: caller.proxyKeyId,
+          tenantId: caller.tenantId,
+          projectId: caller.projectId,
+          proxyKeyId: caller.proxyKeyId,
           projectPolicyVersion: input.entitlement.projectPolicyVersion,
-          entitlementId: caller.entitlementId, supplyProfileId: caller.supplyProfileId, supplyMode: caller.supplyMode,
-          principalKind: caller.principalKind, principalId: caller.principalId,
-          authzVersion: caller.authzVersion, entitlementVersion: caller.entitlementVersion,
-          supplyProfileVersion: caller.supplyProfileVersion, modelScopeVersion: caller.modelScopeVersion,
+          entitlementId: caller.entitlementId,
+          supplyProfileId: caller.supplyProfileId,
+          supplyMode: caller.supplyMode,
+          principalKind: caller.principalKind,
+          principalId: caller.principalId,
+          authzVersion: caller.authzVersion,
+          entitlementVersion: caller.entitlementVersion,
+          supplyProfileVersion: caller.supplyProfileVersion,
+          modelScopeVersion: caller.modelScopeVersion,
           publicModel: input.publicModel,
         },
-        authenticatedKey: { authorization: {
-          keyId: caller.proxyKeyId, tenantId: caller.tenantId, projectId: caller.projectId,
-          principalKind: caller.principalKind, principalId: caller.principalId,
-          entitlementId: caller.entitlementId, supplyProfileId: caller.supplyProfileId, supplyMode: caller.supplyMode,
-          modelScopes: [...caller.modelScopes], authzVersion: Number(caller.authzVersion),
-          modelScopeVersion: Number(caller.modelScopeVersion), entitlementAuthzVersion: Number(caller.entitlementVersion),
-          supplyProfileAuthzVersion: Number(caller.supplyProfileVersion),
-        } },
+        authenticatedKey: {
+          authorization: {
+            keyId: caller.proxyKeyId,
+            tenantId: caller.tenantId,
+            projectId: caller.projectId,
+            principalKind: caller.principalKind,
+            principalId: caller.principalId,
+            entitlementId: caller.entitlementId,
+            supplyProfileId: caller.supplyProfileId,
+            supplyMode: caller.supplyMode,
+            modelScopes: [...caller.modelScopes],
+            authzVersion: Number(caller.authzVersion),
+            modelScopeVersion: Number(caller.modelScopeVersion),
+            entitlementAuthzVersion: Number(caller.entitlementVersion),
+            supplyProfileAuthzVersion: Number(caller.supplyProfileVersion),
+          },
+        },
       });
-      const clock = await sqlOptions.executor.query<{ observed_at: Date | string }>('SELECT clock_timestamp() AS observed_at');
+      const clock = await sqlOptions.executor.query<{ observed_at: Date | string }>(
+        'SELECT clock_timestamp() AS observed_at',
+      );
       const observedAt = clock.rows[0]?.observed_at;
-      const lockedNow = observedAt instanceof Date ? observedAt : new Date(typeof observedAt === 'string' ? observedAt : NaN);
+      const lockedNow =
+        observedAt instanceof Date ? observedAt : new Date(typeof observedAt === 'string' ? observedAt : NaN);
       if (clock.rows.length !== 1 || !Number.isFinite(lockedNow.getTime())) {
         return blockRequestPreparation('storage_failure', SAFE_ADMISSION_FAILURE);
       }
-      const fresh = await entitlement.resolve({ caller, publicModel: input.publicModel, protocol: input.protocol },
-        { executor: sqlOptions.executor, now: lockedNow });
+      const fresh = await entitlement.resolve(
+        { caller, publicModel: input.publicModel, protocol: input.protocol },
+        { executor: sqlOptions.executor, now: lockedNow },
+      );
       if (fresh.decision !== 'allow') return fresh;
-      if (!entitlementMatchesCaller(caller, fresh.value, input.publicModel) ||
-        exactVersion(fresh.value.projectPolicyVersion) !== exactVersion(input.entitlement.projectPolicyVersion)) {
-        return rejectRequestPreparation('entitlement_denied', 'The current entitlement does not authorize this request.');
+      if (
+        !entitlementMatchesCaller(caller, fresh.value, input.publicModel) ||
+        exactVersion(fresh.value.projectPolicyVersion) !== exactVersion(input.entitlement.projectPolicyVersion)
+      ) {
+        return rejectRequestPreparation(
+          'entitlement_denied',
+          'The current entitlement does not authorize this request.',
+        );
       }
-      const ip = await readRequestAdmissionIpPolicy(sqlOptions.executor, {
-        tenantId: caller.tenantId, projectId: caller.projectId, proxyKeyId: caller.proxyKeyId,
-      }, input.clientAddress);
-      if (ip === 'caller_denied') return rejectRequestPreparation('caller_denied', 'The client address is not permitted for this API key.');
+      const ip = await readRequestAdmissionIpPolicy(
+        sqlOptions.executor,
+        {
+          tenantId: caller.tenantId,
+          projectId: caller.projectId,
+          proxyKeyId: caller.proxyKeyId,
+        },
+        input.clientAddress,
+      );
+      if (ip === 'caller_denied')
+        return rejectRequestPreparation('caller_denied', 'The client address is not permitted for this API key.');
       if (ip !== 'allow') return blockRequestPreparation('storage_failure', SAFE_ADMISSION_FAILURE);
       return fresh;
     } catch (error) {
@@ -685,11 +731,21 @@ export function createPostgresPreparationPorts(options: PostgresPreparationPorts
       // A trusted wrapper already ran revalidateAuthorization earlier in this
       // same transaction (fences held, claim ordered after the fence), so the
       // entry revalidation would repeat identical reads on the same snapshot.
-      const lockedAuthorization = input.prevalidatedAuthorization === undefined
-        ? await revalidateAuthorization({ caller: resolvedCaller, entitlement: resolvedEntitlement,
-          publicModel: authority.route.publicModel, protocol: authority.route.protocol, clientAddress: input.clientAddress,
-          clientKey: input.idempotencyKey, requestId: input.requestId }, { executor })
-        : allowRequestPreparation(input.prevalidatedAuthorization);
+      const lockedAuthorization =
+        input.prevalidatedAuthorization === undefined
+          ? await revalidateAuthorization(
+              {
+                caller: resolvedCaller,
+                entitlement: resolvedEntitlement,
+                publicModel: authority.route.publicModel,
+                protocol: authority.route.protocol,
+                clientAddress: input.clientAddress,
+                clientKey: input.idempotencyKey,
+                requestId: input.requestId,
+              },
+              { executor },
+            )
+          : allowRequestPreparation(input.prevalidatedAuthorization);
       if (lockedAuthorization.decision !== 'allow') return lockedAuthorization;
       if (
         !entitlementMatchesCaller(resolvedCaller, resolvedEntitlement, authority.route.publicModel) ||
@@ -754,9 +810,18 @@ export function createPostgresPreparationPorts(options: PostgresPreparationPorts
           };
         }
         if (claimResult.kind === 'existing') {
-          const freshAuthorization = await revalidateAuthorization({ caller: resolvedCaller, entitlement: resolvedEntitlement,
-            publicModel: authority.route.publicModel, protocol: authority.route.protocol, clientAddress: input.clientAddress,
-            clientKey: input.idempotencyKey, requestId: input.requestId }, { executor });
+          const freshAuthorization = await revalidateAuthorization(
+            {
+              caller: resolvedCaller,
+              entitlement: resolvedEntitlement,
+              publicModel: authority.route.publicModel,
+              protocol: authority.route.protocol,
+              clientAddress: input.clientAddress,
+              clientKey: input.idempotencyKey,
+              requestId: input.requestId,
+            },
+            { executor },
+          );
           if (freshAuthorization.decision !== 'allow') return freshAuthorization;
           return rejectRequestPreparation(
             'idempotency_replay',
@@ -861,6 +926,23 @@ export function createPostgresPreparationPorts(options: PostgresPreparationPorts
           })) as RequestAdmission;
         },
       };
+      let reserveKeyBudget: (() => Promise<void>) | undefined;
+      let reserveGroupSpend: (() => Promise<void>) | undefined;
+      let reserveCapacity:
+        | (() => Promise<RequestPreparationDecision<PostgresPreparationCapacityReservation>>)
+        | undefined;
+      const capacityInput = {
+        tenantId: resolvedCaller.tenantId,
+        projectId: resolvedCaller.projectId,
+        proxyKeyId: resolvedCaller.proxyKeyId,
+        requestId: canonicalRequestId,
+        attemptId: input.attemptId,
+        supplyMode: resolvedCaller.supplyMode,
+        payloadBounds: input.payloadBounds,
+        idempotencyScopeKey,
+        requestFingerprint,
+        requestFingerprintVersion,
+      };
       try {
         const service = new SaasRequestAdmissionService(
           options.database,
@@ -868,7 +950,41 @@ export function createPostgresPreparationPorts(options: PostgresPreparationPorts
           options.billing,
           guard,
           options.authorizationPrelock,
-          { idFactory, now },
+          {
+            idFactory,
+            now,
+            beforeReservations: async ({ platformPriceHold }) => {
+              const charge =
+                platformPriceHold === null
+                  ? null
+                  : {
+                      currency: platformPriceHold.currency,
+                      amountMinorUnits: String(platformPriceHold.amountMinorUnits),
+                    };
+              if (options.keyBudget?.prepareReserve)
+                reserveKeyBudget = await options.keyBudget.prepareReserve(executor, {
+                  tenantId: resolvedCaller.tenantId,
+                  projectId: resolvedCaller.projectId,
+                  keyId: resolvedCaller.proxyKeyId,
+                  requestId: canonicalRequestId,
+                  supplyMode: resolvedCaller.supplyMode,
+                  payloadBounds: input.payloadBounds,
+                  charge,
+                });
+              if (options.billingGroupSpend?.prepareReserve)
+                reserveGroupSpend = await options.billingGroupSpend.prepareReserve(executor, {
+                  tenantId: resolvedCaller.tenantId,
+                  requestId: canonicalRequestId,
+                  supplyMode: resolvedCaller.supplyMode,
+                  charge,
+                });
+              if (options.capacity?.prepareReserve)
+                reserveCapacity = await options.capacity.prepareReserve(executor, {
+                  ...capacityInput,
+                  newRequest: true,
+                });
+            },
+          },
         );
         const result = await observePreparationPhase('admission', 'metering-guard-wallet', options.observe, () =>
           service.admit(command, { executor }),
@@ -941,36 +1057,40 @@ export function createPostgresPreparationPorts(options: PostgresPreparationPorts
         // KEY-BUD (contract C-4): only fresh admissions reserve budget;
         // replays already carry the original admission's reservation row.
         if (result.kind === 'created' && options.keyBudget) {
-          await options.keyBudget.reserve(executor, {
-            tenantId: resolvedCaller.tenantId,
-            projectId: resolvedCaller.projectId,
-            keyId: resolvedCaller.proxyKeyId,
-            requestId: canonicalRequestId,
-            supplyMode: resolvedCaller.supplyMode,
-            payloadBounds: input.payloadBounds,
-            charge: holdReservation
-              ? {
-                  currency: holdReservation.currency,
-                  amountMinorUnits: String(holdReservation.amountMinorUnits),
-                }
-              : null,
-          });
+          if (reserveKeyBudget) await reserveKeyBudget();
+          else
+            await options.keyBudget.reserve(executor, {
+              tenantId: resolvedCaller.tenantId,
+              projectId: resolvedCaller.projectId,
+              keyId: resolvedCaller.proxyKeyId,
+              requestId: canonicalRequestId,
+              supplyMode: resolvedCaller.supplyMode,
+              payloadBounds: input.payloadBounds,
+              charge: holdReservation
+                ? {
+                    currency: holdReservation.currency,
+                    amountMinorUnits: String(holdReservation.amountMinorUnits),
+                  }
+                : null,
+            });
         }
         // R1 (roadmap 1.3, phase 3): the group spend windows reserve the same
         // platform hold, after billing.reserve on this admission transaction.
         // Only fresh admissions reserve; replays carry the original rows.
         if (result.kind === 'created' && options.billingGroupSpend) {
-          await options.billingGroupSpend.reserve(executor, {
-            tenantId: resolvedCaller.tenantId,
-            requestId: canonicalRequestId,
-            supplyMode: resolvedCaller.supplyMode,
-            charge: holdReservation
-              ? {
-                  currency: holdReservation.currency,
-                  amountMinorUnits: String(holdReservation.amountMinorUnits),
-                }
-              : null,
-          });
+          if (reserveGroupSpend) await reserveGroupSpend();
+          else
+            await options.billingGroupSpend.reserve(executor, {
+              tenantId: resolvedCaller.tenantId,
+              requestId: canonicalRequestId,
+              supplyMode: resolvedCaller.supplyMode,
+              charge: holdReservation
+                ? {
+                    currency: holdReservation.currency,
+                    amountMinorUnits: String(holdReservation.amountMinorUnits),
+                  }
+                : null,
+            });
         }
         const persistedAttempt =
           result.kind === 'created'
@@ -991,42 +1111,22 @@ export function createPostgresPreparationPorts(options: PostgresPreparationPorts
             clientAddress: input.clientAddress ?? null,
           });
         }
-        /* R9 P4/P16 (de-serialized admission): the capacity reservation — and
-           with it the exclusive tenant-scope advisory fence that serializes
-           the shared-counter read-check-write — is the LAST reservation this
-           stage acquires. The authorization prelock's shared fences, the
-           metering request/attempt inserts, the admission guard, the account
-           rate counter, the outbox and audit writes, and the per-wallet
-           billing hold (advisory fence, batch 1.2 step 3) all run BEFORE it,
-           so none of that work sits inside the capacity fence. This changes no committed state ordering: the
-           whole stage is one caller-owned transaction, and every reject path
-           (including a capacity rate/quota rejection) still rolls the
-           transaction back through RequestPreparationTransactionRollback,
-           removing the metering and billing writes exactly as before. The
-           one observable difference is error precedence: a request that
-           fails both the guard and a capacity limit now reports the guard
-           failure, because the guard runs first. Lock-order safety: only
-           admission takes the `model-router:request-capacity:*` advisory
-           namespace, and within a tenant the exclusive fence linearizes
-           every later writer (key budget, reservation INSERT), so no wait
-           cycle can form. */
+        // The capacity mutation remains the last reservation domain:
+        // account counter → wallet → key budget → group spend → capacity.
+        // Only immutable/fence-protected planning may run before those hot
+        // locks. Capacity's current usage read/check/write still occurs under
+        // its exclusive tenant fence, and every denial rolls back this same
+        // outer transaction. Other writer classes do not acquire that fence.
         let capacityResult: RequestPreparationDecision<PostgresPreparationCapacityReservation>;
         try {
           const capacity = options.capacity;
           capacityResult = await observePreparationPhase('admission', 'capacity', options.observe, () =>
-            capacity.reserve(executor, {
-              tenantId: resolvedCaller.tenantId,
-              projectId: resolvedCaller.projectId,
-              proxyKeyId: resolvedCaller.proxyKeyId,
-              requestId: canonicalRequestId,
-              attemptId: input.attemptId,
-              newRequest: result.kind === 'created',
-              supplyMode: resolvedCaller.supplyMode,
-              payloadBounds: input.payloadBounds,
-              idempotencyScopeKey,
-              requestFingerprint,
-              requestFingerprintVersion,
-            }),
+            reserveCapacity
+              ? reserveCapacity()
+              : capacity.reserve(executor, {
+                  ...capacityInput,
+                  newRequest: result.kind === 'created',
+                }),
           );
         } catch {
           return blockRequestPreparation('storage_failure', SAFE_ADMISSION_FAILURE);
@@ -1158,7 +1258,10 @@ export function createPostgresPreparationPorts(options: PostgresPreparationPorts
       }
       try {
         const remembered = await readPreparationTransactionRecords(
-          sqlOptions.executor, input.caller.tenantId, input.requestId, input.attemptId,
+          sqlOptions.executor,
+          input.caller.tenantId,
+          input.requestId,
+          input.attemptId,
         );
         const [request, storedAttempt] = remembered
           ? [remembered.request, remembered.attempt]

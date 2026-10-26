@@ -112,6 +112,12 @@ export async function withPreparationTransactionFacts<T>(
   }
 }
 
+/** Lifetime only, including invalidated scopes: lets staged work fall back before, never after, COMMIT. */
+export function isPreparationTransactionScopeActive(executor: SqlExecutor, token: object): boolean {
+  const scope = scopes.get(unwrapPreparationExecutor(executor));
+  return scope?.active === true && scope.token === token;
+}
+
 /** Read-only context; only the concrete guard owns the private fact issuer. */
 export function preparationTransactionContext(executor: SqlExecutor): PreparationTransactionContext | undefined {
   const scope = activeScope(executor);

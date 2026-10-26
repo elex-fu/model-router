@@ -149,10 +149,6 @@ interface LedgerPosting {
   readonly created: boolean;
 }
 
-function isUniqueViolation(error: unknown): boolean {
-  return typeof error === 'object' && error !== null && 'code' in error && error.code === '23505';
-}
-
 function normalizeText(value: unknown, code: 'INVALID_INPUT' | 'FUNDING_REFERENCE_REQUIRED' = 'INVALID_INPUT'): string {
   if (typeof value !== 'string' || value.length === 0 || value.length > MAX_TEXT_LENGTH) {
     throw new SaasBillingError(code);
@@ -332,73 +328,111 @@ export class PlatformWalletLedgerService {
    * fallback, so admission can be composed with request/outbox writes.
    */
   async reserve(executor: BillingTransactionExecutor, input: ReserveBillingInput): Promise<BillingReservationResult> {
+    return (await this.prepareReserve(executor, input))();
+  }
+
+  /**
+   * Stage only input validation and the non-locking idempotency probe before
+   * admission's contended counters. The one-shot closure captures this exact
+   * executor; the caller must invoke it while that transaction remains active.
+   * This low-level helper cannot prove the lifetime of an arbitrary executor.
+   * Native staged callers must check their opaque live transaction scope before
+   * invocation; reserve() consumes the plan immediately instead of exporting it.
+   * It never caches a replay result, wallet, freeze, hold total or authorization
+   * decision. Only copied immutable input and a wallet-identity hint survive.
+   */
+  async prepareReserve(
+    executor: BillingTransactionExecutor,
+    input: ReserveBillingInput,
+  ): Promise<() => Promise<BillingReservationResult>> {
     this.requireExecutor(executor);
     return this.withSafeStorage(async () => {
-      const normalized = this.normalizeReserveInput(input);
+      const validated = this.normalizeReserveInput(input);
+      const normalized = Object.freeze({ ...validated, identity: Object.freeze({ ...validated.identity }) });
       const existing = await this.findReservation(executor, normalized.identity, false, normalized.tenantId);
-      if (existing) {
-        const wallet = await this.lockWallet(executor, existing.tenant_id, existing.currency);
-        const current = await this.findReservation(executor, normalized.identity, true, normalized.tenantId);
-        if (!current) throw new SaasBillingError('BILLING_STORAGE_ERROR');
-        this.assertReservationReplay(current, normalized);
-        return this.result(executor, current, wallet);
-      }
+      const existingWallet =
+        existing === null ? null : Object.freeze({ tenantId: existing.tenant_id, currency: existing.currency });
+      let consumed = false;
+      return () =>
+        this.withSafeStorage(async () => {
+          if (consumed) throw new SaasBillingError('BILLING_STORAGE_ERROR');
+          consumed = true;
+          if (new Date(normalized.expiresAt).getTime() <= this.now().getTime()) {
+            throw new SaasBillingError('INVALID_INPUT');
+          }
+          if (existingWallet) {
+            const wallet = await this.lockWallet(executor, existingWallet.tenantId, existingWallet.currency);
+            const current = await this.findReservation(executor, normalized.identity, true, normalized.tenantId);
+            if (!current) throw new SaasBillingError('BILLING_STORAGE_ERROR');
+            this.assertReservationReplay(current, normalized);
+            return this.result(executor, current, wallet);
+          }
 
-      const snapshot = await this.lockReservationWalletSnapshot(executor, normalized.tenantId, normalized.currency);
-      const { wallet, freeze } = snapshot;
-      if (freeze) throw new SaasBillingError('SPENDING_FROZEN');
+          const snapshot = await this.lockReservationWalletSnapshot(
+            executor,
+            normalized.tenantId,
+            normalized.currency,
+            normalized.identity,
+          );
+          const { wallet, freeze } = snapshot;
+          if (freeze) throw new SaasBillingError('SPENDING_FROZEN');
 
-      const raced = await this.findReservation(executor, normalized.identity, true, normalized.tenantId);
-      if (raced) {
-        this.assertReservationReplay(raced, normalized);
-        return this.result(executor, raced, wallet, freeze);
-      }
+          // The exact idempotency predicate shares the fresh wallet snapshot.
+          // Same-wallet writers hold this fence; a cross-currency key collision
+          // is still resolved by INSERT's unique conflict and a fresh winner read.
+          if (snapshot.reservationExists) {
+            const raced = await this.findReservation(executor, normalized.identity, true, normalized.tenantId);
+            if (!raced) throw new SaasBillingError('BILLING_STORAGE_ERROR');
+            this.assertReservationReplay(raced, normalized);
+            return this.result(executor, raced, wallet, freeze);
+          }
 
-      const before = this.walletSummaryFromFacts(
-        wallet,
-        snapshot.activeHoldMinorUnits,
-        snapshot.activeRefundFreezeMinorUnits,
-        freeze,
-      );
-      if (before.availableMinorUnits < normalized.amountMinorUnits) {
-        throw new SaasBillingError('INSUFFICIENT_FUNDS');
-      }
-
-      const createdAt = this.now().toISOString();
-      const inserted = await this.insertReservation(executor, {
-        id: this.idFactory(),
-        tenantId: normalized.tenantId,
-        walletId: wallet.id,
-        currency: normalized.currency,
-        requestId: normalized.requestId,
-        identity: normalized.identity,
-        amountMinorUnits: normalized.amountMinorUnits,
-        priceSnapshotRef: normalized.priceSnapshotRef,
-        metadataRef: normalized.metadataRef,
-        expiresAt: normalized.expiresAt,
-        createdAt,
-      });
-      if (inserted) {
-        // All reservation writers and refund-freeze inserts use this wallet
-        // fence. A failed refund may delete its existing freeze without the
-        // fence, so only the zero-refund case can reuse the complete snapshot.
-        // Nonzero refund freezes retain the original post-insert observation.
-        if (before.activeRefundFreezesMinorUnits === 0n) {
-          const after = this.walletSummaryFromFacts(
+          const before = this.walletSummaryFromFacts(
             wallet,
-            before.activeHoldsMinorUnits + this.amount(inserted),
-            0n,
+            snapshot.activeHoldMinorUnits,
+            snapshot.activeRefundFreezeMinorUnits,
             freeze,
           );
-          return this.resultFromSummary(inserted, after);
-        }
-        return this.result(executor, inserted, wallet, freeze);
-      }
+          if (before.availableMinorUnits < normalized.amountMinorUnits) {
+            throw new SaasBillingError('INSUFFICIENT_FUNDS');
+          }
 
-      const winner = await this.findReservation(executor, normalized.identity, true, normalized.tenantId);
-      if (!winner) throw new SaasBillingError('BILLING_STORAGE_ERROR');
-      this.assertReservationReplay(winner, normalized);
-      return this.result(executor, winner, wallet, freeze);
+          const createdAt = this.now().toISOString();
+          const inserted = await this.insertReservation(executor, {
+            id: this.idFactory(),
+            tenantId: normalized.tenantId,
+            walletId: wallet.id,
+            currency: normalized.currency,
+            requestId: normalized.requestId,
+            identity: normalized.identity,
+            amountMinorUnits: normalized.amountMinorUnits,
+            priceSnapshotRef: normalized.priceSnapshotRef,
+            metadataRef: normalized.metadataRef,
+            expiresAt: normalized.expiresAt,
+            createdAt,
+          });
+          if (inserted) {
+            // All reservation writers and refund-freeze inserts use this wallet
+            // fence. A failed refund may delete its existing freeze without the
+            // fence, so only the zero-refund case can reuse the complete snapshot.
+            // Nonzero refund freezes retain the original post-insert observation.
+            if (before.activeRefundFreezesMinorUnits === 0n) {
+              const after = this.walletSummaryFromFacts(
+                wallet,
+                before.activeHoldsMinorUnits + this.amount(inserted),
+                0n,
+                freeze,
+              );
+              return this.resultFromSummary(inserted, after);
+            }
+            return this.result(executor, inserted, wallet, freeze);
+          }
+
+          const winner = await this.findReservation(executor, normalized.identity, true, normalized.tenantId);
+          if (!winner) throw new SaasBillingError('BILLING_STORAGE_ERROR');
+          this.assertReservationReplay(winner, normalized);
+          return this.result(executor, winner, wallet, freeze);
+        });
     });
   }
 
@@ -995,9 +1029,54 @@ export class PlatformWalletLedgerService {
   ): Promise<LockedReservation> {
     const found = await this.findReservation(executor, identity, false, tenantId);
     if (!found) throw new SaasBillingError('RESERVATION_NOT_FOUND');
-    const wallet = await this.lockWallet(executor, found.tenant_id, found.currency);
-    const row = await this.findReservation(executor, identity, true, tenantId);
-    if (!row) throw new SaasBillingError('BILLING_STORAGE_ERROR');
+    await executor.query(WALLET_FENCE_SQL, [saasAdvisoryKey.walletFence(found.tenant_id, found.currency)]);
+    // This is a separate command after the advisory wait. Both records share
+    // its fresh snapshot, and only the reservation receives a tuple lock.
+    const selected = await executor.query<
+      ReservationRow & {
+        wallet_posted_balance_minor_units: StoredMinorUnits;
+        wallet_created_at: StoredTimestamp;
+        wallet_updated_at: StoredTimestamp;
+      }
+    >(
+      `/* billing:locked-reservation-wallet */
+       SELECT reservation.id, reservation.tenant_id, reservation.wallet_id, reservation.currency,
+              reservation.request_id, reservation.idempotency_namespace, reservation.business_key,
+              reservation.amount_minor_units, reservation.state, reservation.price_snapshot_ref,
+              reservation.metadata_ref, reservation.expires_at, reservation.settlement_id,
+              reservation.settlement_amount_minor_units, reservation.usage_evidence_ref,
+              reservation.reconciliation_reference, reservation.reconciliation_evidence_ref,
+              reservation.release_id, reservation.release_evidence_ref, reservation.ledger_transaction_id,
+              reservation.created_at, reservation.updated_at,
+              wallet.posted_balance_minor_units AS wallet_posted_balance_minor_units,
+              wallet.created_at AS wallet_created_at, wallet.updated_at AS wallet_updated_at
+         FROM saas_billing_reservations reservation
+         JOIN saas_wallets wallet ON wallet.id = reservation.wallet_id
+           AND wallet.tenant_id = reservation.tenant_id AND wallet.currency = reservation.currency
+        WHERE reservation.tenant_id = $1 AND reservation.idempotency_namespace = $2
+          AND reservation.business_key = $3 AND wallet.currency = $4
+        FOR UPDATE OF reservation`,
+      [tenantId, identity.namespace, identity.businessKey, found.currency],
+    );
+    if (!rowsHaveOne(selected)) {
+      // Preserve the prior missing-wallet distinction on the rare corrupt or
+      // custom-executor path; the normal FK-protected path is one joined read.
+      if (selected.rows.length === 0) await this.lockWallet(executor, found.tenant_id, found.currency, false);
+      throw new SaasBillingError('BILLING_STORAGE_ERROR');
+    }
+    const row = selected.rows[0];
+    if (!row || row.tenant_id !== tenantId || row.currency !== found.currency || row.wallet_id !== found.wallet_id) {
+      throw new SaasBillingError('BILLING_STORAGE_ERROR');
+    }
+    const wallet: WalletRow = {
+      id: row.wallet_id,
+      tenant_id: row.tenant_id,
+      currency: row.currency,
+      posted_balance_minor_units: row.wallet_posted_balance_minor_units,
+      created_at: row.wallet_created_at,
+      updated_at: row.wallet_updated_at,
+    };
+    mapWalletRow(wallet);
     return { row, wallet };
   }
 
@@ -1026,6 +1105,10 @@ export class PlatformWalletLedgerService {
    * longer holds a wallet row lock across the capacity fence, and lock waits
    * no longer queue on the row's tuple lock. `forUpdate=false` callers
    * (read-only wallet queries) take no fence, exactly as before.
+   *
+   * Spending-freeze rows are tenant-wide while this fence is per currency.
+   * Cross-currency freeze coordination is an existing gap, not fixed by this
+   * batching or by combining the post-fence reads into one snapshot.
    */
   private async lockWallet(
     executor: BillingTransactionExecutor,
@@ -1054,11 +1137,13 @@ export class PlatformWalletLedgerService {
     executor: BillingTransactionExecutor,
     tenantId: string,
     currency: string,
+    identity: ReservationIdentity,
   ): Promise<{
     wallet: WalletRow;
     freeze: FreezeRow | null;
     activeHoldMinorUnits: StoredMinorUnits;
     activeRefundFreezeMinorUnits: StoredMinorUnits;
+    reservationExists: boolean;
   }> {
     await executor.query(WALLET_FENCE_SQL, [saasAdvisoryKey.walletFence(tenantId, currency)]);
     const selected = await executor.query<
@@ -1068,6 +1153,7 @@ export class PlatformWalletLedgerService {
         freeze_frozen_at: StoredTimestamp | null;
         active_hold_minor_units: StoredMinorUnits;
         active_refund_freeze_minor_units: StoredMinorUnits;
+        reservation_exists: boolean;
       }
     >(
       `/* billing:reserve-wallet-snapshot */
@@ -1081,19 +1167,23 @@ export class PlatformWalletLedgerService {
                 AS active_hold_minor_units,
               (SELECT COALESCE(SUM(amount_minor_units), 0)::text
                  FROM saas_refund_wallet_freezes WHERE tenant_id = $1 AND currency = $2)
-                AS active_refund_freeze_minor_units
+                AS active_refund_freeze_minor_units,
+              EXISTS (SELECT 1 FROM saas_billing_reservations
+                       WHERE tenant_id = $1 AND idempotency_namespace = $3 AND business_key = $4)
+                AS reservation_exists
          FROM saas_wallets wallet
          LEFT JOIN LATERAL (
            SELECT tenant_id, reason_ref, frozen_at FROM saas_billing_spending_freezes WHERE tenant_id = $1
          ) frozen ON true
         WHERE wallet.tenant_id = $1 AND wallet.currency = $2`,
-      [tenantId, currency],
+      [tenantId, currency, identity.namespace, identity.businessKey],
     );
     const wallet = selected.rows[0];
     if (!wallet) throw new SaasBillingError('WALLET_NOT_FOUND');
     if (wallet.tenant_id !== tenantId || wallet.currency !== currency)
       throw new SaasBillingError('BILLING_STORAGE_ERROR');
     mapWalletRow(wallet);
+    if (typeof wallet.reservation_exists !== 'boolean') throw new SaasBillingError('BILLING_STORAGE_ERROR');
     let freeze: FreezeRow | null = null;
     if (wallet.freeze_tenant_id !== null) {
       if (
@@ -1110,6 +1200,7 @@ export class PlatformWalletLedgerService {
       freeze,
       activeHoldMinorUnits: wallet.active_hold_minor_units,
       activeRefundFreezeMinorUnits: wallet.active_refund_freeze_minor_units,
+      reservationExists: wallet.reservation_exists,
     };
   }
 
@@ -1135,16 +1226,6 @@ export class PlatformWalletLedgerService {
     };
   }
 
-  private async readFreeze(executor: BillingTransactionExecutor, tenantId: string): Promise<FreezeRow | null> {
-    const result = await executor.query<FreezeRow>(
-      `SELECT tenant_id, reason_ref, frozen_at
-       FROM saas_billing_spending_freezes
-       WHERE tenant_id = $1`,
-      [tenantId],
-    );
-    return result.rows[0] ?? null;
-  }
-
   private async walletSummary(
     executor: BillingTransactionExecutor,
     wallet: WalletRow,
@@ -1155,6 +1236,9 @@ export class PlatformWalletLedgerService {
     const totals = await executor.query<{
       active_hold_minor_units: StoredMinorUnits;
       active_refund_freeze_minor_units: StoredMinorUnits;
+      freeze_tenant_id: string | null;
+      freeze_reason_ref: string | null;
+      freeze_frozen_at: StoredTimestamp | null;
     }>(
       `SELECT
          (SELECT COALESCE(SUM(amount_minor_units), 0)::text
@@ -1165,15 +1249,22 @@ export class PlatformWalletLedgerService {
           FROM saas_refund_wallet_freezes
           WHERE tenant_id = $1 AND currency = $2
           ${excludeRefundOrderId === undefined ? '' : 'AND refund_order_id <> $3'})
-           AS active_refund_freeze_minor_units`,
+           AS active_refund_freeze_minor_units${
+             freezeRow === undefined
+               ? `,
+         frozen.tenant_id AS freeze_tenant_id, frozen.reason_ref AS freeze_reason_ref,
+         frozen.frozen_at AS freeze_frozen_at
+       FROM (SELECT 1) anchor
+       LEFT JOIN saas_billing_spending_freezes frozen ON frozen.tenant_id = $1`
+               : ''
+           }`,
       excludeRefundOrderId === undefined
         ? [wallet.tenant_id, wallet.currency]
         : [wallet.tenant_id, wallet.currency, excludeRefundOrderId],
     );
-    const activeHoldsMinorUnits = parseStoredMinorUnits(totals.rows[0]?.active_hold_minor_units ?? '0');
-    const activeRefundFreezesMinorUnits = parseStoredMinorUnits(
-      totals.rows[0]?.active_refund_freeze_minor_units ?? '0',
-    );
+    if (!rowsHaveOne(totals)) throw new SaasBillingError('BILLING_STORAGE_ERROR');
+    const activeHoldsMinorUnits = parseStoredMinorUnits(totals.rows[0]?.active_hold_minor_units);
+    const activeRefundFreezesMinorUnits = parseStoredMinorUnits(totals.rows[0]?.active_refund_freeze_minor_units);
     if (activeHoldsMinorUnits + activeRefundFreezesMinorUnits > base.postedBalanceMinorUnits) {
       throw new SaasBillingError('BILLING_STORAGE_ERROR');
     }
@@ -1182,7 +1273,20 @@ export class PlatformWalletLedgerService {
     // observation needs no row lock (and must not require UPDATE privilege).
     // A caller that already read the freeze inside this fenced transaction
     // passes it here to avoid a redundant read in the critical section.
-    const freeze = freezeRow === undefined ? await this.readFreeze(executor, wallet.tenant_id) : freezeRow;
+    const facts = totals.rows[0];
+    const freeze =
+      freezeRow === undefined
+        ? facts?.freeze_tenant_id == null
+          ? null
+          : {
+              tenant_id: facts.freeze_tenant_id,
+              reason_ref: facts.freeze_reason_ref,
+              frozen_at: facts.freeze_frozen_at,
+            }
+        : freezeRow;
+    if (freeze && (freeze.tenant_id !== wallet.tenant_id || freeze.reason_ref === null || freeze.frozen_at === null)) {
+      throw new SaasBillingError('BILLING_STORAGE_ERROR');
+    }
     return {
       ...base,
       activeHoldsMinorUnits,
@@ -1234,38 +1338,37 @@ export class PlatformWalletLedgerService {
       readonly createdAt: string;
     },
   ): Promise<ReservationRow | null> {
-    try {
-      const result = await executor.query<ReservationRow>(
-        `INSERT INTO saas_billing_reservations
+    const result = await executor.query<ReservationRow>(
+      `INSERT INTO saas_billing_reservations
           (id, tenant_id, wallet_id, currency, request_id, idempotency_namespace, business_key,
            amount_minor_units, state, price_snapshot_ref, metadata_ref, expires_at, created_at, updated_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'reserved', $9, $10, $11, $12, $12)
+         ON CONFLICT DO NOTHING
          RETURNING id, tenant_id, wallet_id, currency, request_id, idempotency_namespace, business_key,
                    amount_minor_units, state, price_snapshot_ref, metadata_ref, expires_at, settlement_id,
                    settlement_amount_minor_units, usage_evidence_ref, reconciliation_reference,
                    reconciliation_evidence_ref, release_id, release_evidence_ref, ledger_transaction_id,
                    created_at, updated_at`,
-        [
-          input.id,
-          input.tenantId,
-          input.walletId,
-          input.currency,
-          input.requestId,
-          input.identity.namespace,
-          input.identity.businessKey,
-          input.amountMinorUnits.toString(),
-          input.priceSnapshotRef,
-          input.metadataRef,
-          input.expiresAt,
-          input.createdAt,
-        ],
-      );
-      if (!rowsHaveOne(result)) throw new SaasBillingError('BILLING_STORAGE_ERROR');
-      return result.rows[0] ?? null;
-    } catch (error) {
-      if (isUniqueViolation(error)) return null;
-      throw error;
-    }
+      [
+        input.id,
+        input.tenantId,
+        input.walletId,
+        input.currency,
+        input.requestId,
+        input.identity.namespace,
+        input.identity.businessKey,
+        input.amountMinorUnits.toString(),
+        input.priceSnapshotRef,
+        input.metadataRef,
+        input.expiresAt,
+        input.createdAt,
+      ],
+    );
+    // DO NOTHING keeps the transaction usable for a fresh winner snapshot.
+    // A caught unique violation would instead leave PostgreSQL aborted.
+    if (result.rows.length === 0 && (result.rowCount === null || result.rowCount === 0)) return null;
+    if (!rowsHaveOne(result)) throw new SaasBillingError('BILLING_STORAGE_ERROR');
+    return result.rows[0] ?? null;
   }
 
   private assertReservationReplay(row: ReservationRow, input: NormalizedReserveInput): void {
@@ -1411,15 +1514,31 @@ export class PlatformWalletLedgerService {
       readonly counterpartyAccountRef: string;
     },
   ): Promise<LedgerPosting> {
-    const inserted = await executor.query<LedgerTransactionRow>(
-      `INSERT INTO saas_ledger_transactions
-        (id, tenant_id, currency, idempotency_namespace, business_key, source_type,
-         amount_minor_units, metadata_ref, source_order_ref, price_snapshot_ref, usage_evidence_ref, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-       ON CONFLICT DO NOTHING
-       RETURNING id, tenant_id, currency, idempotency_namespace, business_key, source_type,
-                 amount_minor_units, metadata_ref, source_order_ref, price_snapshot_ref,
-                 usage_evidence_ref, created_at`,
+    const inserted = await executor.query<LedgerTransactionRow & { inserted_entry_count: string }>(
+      `/* billing:post-ledger-pair */
+       WITH posting AS (
+         INSERT INTO saas_ledger_transactions
+           (id, tenant_id, currency, idempotency_namespace, business_key, source_type,
+            amount_minor_units, metadata_ref, source_order_ref, price_snapshot_ref, usage_evidence_ref, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+         ON CONFLICT DO NOTHING
+         RETURNING id, tenant_id, currency, idempotency_namespace, business_key, source_type,
+                   amount_minor_units, metadata_ref, source_order_ref, price_snapshot_ref,
+                   usage_evidence_ref, created_at
+       ), entries AS (
+         INSERT INTO saas_ledger_entries
+           (id, transaction_id, tenant_id, currency, direction, amount_minor_units,
+            account_type, account_ref, wallet_id, created_at)
+         SELECT entry.id, posting.id, posting.tenant_id, posting.currency, entry.direction,
+                posting.amount_minor_units, entry.account_type, entry.account_ref, entry.wallet_id, posting.created_at
+           FROM posting
+           CROSS JOIN (VALUES
+             ($13::uuid, $15::text, 'wallet'::text, $16::text, $16::uuid),
+             ($14::uuid, $17::text, $18::text, $19::text, NULL::uuid)
+           ) entry(id, direction, account_type, account_ref, wallet_id)
+         RETURNING 1 AS inserted
+       )
+       SELECT posting.*, (SELECT count(*)::text FROM entries) AS inserted_entry_count FROM posting`,
       [
         input.id,
         input.tenantId,
@@ -1433,11 +1552,18 @@ export class PlatformWalletLedgerService {
         input.priceSnapshotRef,
         input.usageEvidenceRef,
         this.now().toISOString(),
+        this.idFactory(),
+        this.idFactory(),
+        input.walletDirection,
+        input.walletId,
+        input.walletDirection === 'debit' ? 'credit' : 'debit',
+        input.counterpartyAccountType,
+        input.counterpartyAccountRef,
       ],
     );
     if (rowsHaveOne(inserted)) {
+      if (inserted.rows[0]?.inserted_entry_count !== '2') throw new SaasBillingError('BILLING_STORAGE_ERROR');
       const transaction = mapLedgerTransactionRow(inserted.rows[0]);
-      await this.insertLedgerEntries(executor, input, transaction);
       return { transaction, created: true };
     }
 
@@ -1483,53 +1609,6 @@ export class PlatformWalletLedgerService {
     return { transaction, created: false };
   }
 
-  private async insertLedgerEntries(
-    executor: BillingTransactionExecutor,
-    input: {
-      readonly tenantId: string;
-      readonly currency: string;
-      readonly amountMinorUnits: bigint;
-      readonly walletId: string;
-      readonly walletDirection: 'debit' | 'credit';
-      readonly counterpartyAccountType: 'funding_source' | 'billing_revenue';
-      readonly counterpartyAccountRef: string;
-    },
-    transaction: LedgerTransactionRow,
-  ): Promise<void> {
-    const walletEntry = {
-      direction: input.walletDirection,
-      accountType: 'wallet',
-      accountRef: input.walletId,
-      walletId: input.walletId,
-    } as const;
-    const counterpartyEntry = {
-      direction: input.walletDirection === 'debit' ? 'credit' : 'debit',
-      accountType: input.counterpartyAccountType,
-      accountRef: input.counterpartyAccountRef,
-      walletId: null,
-    } as const;
-    for (const entry of [walletEntry, counterpartyEntry]) {
-      await executor.query(
-        `INSERT INTO saas_ledger_entries
-          (id, transaction_id, tenant_id, currency, direction, amount_minor_units,
-           account_type, account_ref, wallet_id, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-        [
-          this.idFactory(),
-          transaction.id,
-          input.tenantId,
-          input.currency,
-          entry.direction,
-          input.amountMinorUnits.toString(),
-          entry.accountType,
-          entry.accountRef,
-          entry.walletId,
-          this.now().toISOString(),
-        ],
-      );
-    }
-  }
-
   private async adjustWalletProjection(
     executor: BillingTransactionExecutor,
     wallet: WalletRow,
@@ -1538,18 +1617,22 @@ export class PlatformWalletLedgerService {
   ): Promise<WalletRow> {
     const current = parseStoredMinorUnits(wallet.posted_balance_minor_units);
     const next = delta >= 0n ? addMinorUnits(current, delta) : subtractMinorUnits(current, -delta);
-    await executor.query(
-      `SELECT set_config('saas.billing_ledger_projection_write', 'on', true),
-              set_config('saas.billing_ledger_transaction_id', $1, true)`,
-      [transactionId],
-    );
+    // Materialization plus the FROM dependency evaluates both volatile settings
+    // before the wallet trigger. The ledger pair was posted in the preceding
+    // command, so the trigger observes it under a fresh command snapshot.
     const updated = await executor.query<WalletRow>(
-      `UPDATE saas_wallets
+      `/* billing:project-ledger */
+       WITH projection_context AS MATERIALIZED (
+         SELECT set_config('saas.billing_ledger_projection_write', 'on', true),
+                set_config('saas.billing_ledger_transaction_id', $6, true)
+       )
+       UPDATE saas_wallets
        SET posted_balance_minor_units = posted_balance_minor_units + $4, updated_at = $5
+       FROM projection_context
        WHERE id = $1 AND tenant_id = $2 AND currency = $3
          AND posted_balance_minor_units + $4 >= 0
        RETURNING id, tenant_id, currency, posted_balance_minor_units, created_at, updated_at`,
-      [wallet.id, wallet.tenant_id, wallet.currency, delta.toString(), this.now().toISOString()],
+      [wallet.id, wallet.tenant_id, wallet.currency, delta.toString(), this.now().toISOString(), transactionId],
     );
     if (!rowsHaveOne(updated)) throw new SaasBillingError('INSUFFICIENT_FUNDS');
     const updatedWallet = updated.rows[0];

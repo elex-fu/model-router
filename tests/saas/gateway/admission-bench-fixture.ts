@@ -6,6 +6,7 @@ import {
   type SaasRequestAdmissionCommand,
   type SaasRequestAdmissionGuard,
   SaasRequestAdmissionService,
+  type SaasRequestAdmissionServiceOptions,
 } from '../../../src/saas/gateway/admission.js';
 import { PostgresSaasRequestAdmissionAuthorizationPrelock } from '../../../src/saas/gateway/authorization-prelock.js';
 import type { PostgresPreparationObserver } from '../../../src/saas/gateway/postgres-preparation-observer.js';
@@ -405,7 +406,11 @@ export async function createAdmissionHarness(
   fixture: Fixture,
   mode: Mode,
   pool?: PlatformPoolFacts,
-  options: { readonly guard?: SaasRequestAdmissionGuard; readonly observe?: PostgresPreparationObserver } = {},
+  options: {
+    readonly guard?: SaasRequestAdmissionGuard;
+    readonly observe?: PostgresPreparationObserver;
+    readonly beforeReservations?: SaasRequestAdmissionServiceOptions['beforeReservations'];
+  } = {},
 ): Promise<AdmissionHarness> {
   // The FIN057 fixture leaves capacity limits unset; raise them (appending
   // one configured policy version) so the full admission path — including the
@@ -430,6 +435,7 @@ export async function createAdmissionHarness(
     };
     const service = new SaasRequestAdmissionService(gateway, meteringPort, fixture.billing, guard, prelock, {
       idFactory: randomUUID,
+      beforeReservations: options.beforeReservations,
     });
     const built = plan.command(requestId, attemptId, label);
     return service.admit(built as unknown as SaasRequestAdmissionCommand, { executor });

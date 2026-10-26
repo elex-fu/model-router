@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -13,11 +14,12 @@ import { validateClaudeCodeClient } from './claude/claude-code-validator.js';
 import type { GatewayProtocol } from './contracts.js';
 import { evaluateGrokFreeTierGateSnapshot } from './grok/free-tier-gate.js';
 import { effectiveWeight, parseHealthScoreColumn } from './health-score.js';
-import type {
-  ProviderAccountHalfOpenProbeAdmissionPort,
-  ProviderAccountHealthProbeLeaseProvider,
-  ProviderAccountHealthSchedulingPort,
-  ProviderAccountRuntimeHealthWriter,
+import {
+  PostgresProviderAccountRuntimeHealthStore,
+  type ProviderAccountHalfOpenProbeAdmissionPort,
+  type ProviderAccountHealthProbeLeaseProvider,
+  type ProviderAccountHealthSchedulingPort,
+  type ProviderAccountRuntimeHealthWriter,
 } from './postgres-provider-account-runtime-health-store.js';
 import {
   accountWindowStatsOrZero,
@@ -733,6 +735,37 @@ SELECT count(*)::text AS in_flight
    AND account_id = $3
    AND status = 'held'
    AND lease_expires_at > clock_timestamp()`;
+
+const CONCURRENCY_BATCH_SQL = `/* postgres-provider-account-scheduler:concurrency-batch */
+SELECT requested.request_index, count(lease.account_id)::text AS in_flight
+  FROM unnest($1::text[], $2::uuid[], $3::text[])
+       WITH ORDINALITY AS requested(owner_kind, owner_tenant_id, account_id, request_index)
+  LEFT JOIN saas_provider_account_leases lease
+    ON lease.owner_kind = requested.owner_kind
+   AND lease.owner_tenant_id IS NOT DISTINCT FROM requested.owner_tenant_id
+   AND lease.account_id = requested.account_id
+   AND lease.status = 'held'
+   AND lease.lease_expires_at > clock_timestamp()
+ GROUP BY requested.request_index`;
+
+interface InitialConcurrencyRead {
+  readonly rows: { in_flight: unknown }[];
+  readonly failed: boolean;
+}
+
+function concurrencyReadKey(input: {
+  readonly caller: RequestPreparationCaller;
+  readonly candidate: RequestPreparationCandidateAuthority;
+}): string {
+  return JSON.stringify([
+    input.caller.tenantId,
+    input.candidate.tenantId,
+    input.candidate.supplyMode,
+    input.candidate.accountOwnerKind,
+    input.candidate.accountId,
+    input.candidate.upstreamId,
+  ]);
+}
 
 /*
  * R6 (migration 098): the trailing 60-second per-account consumption window.
@@ -1825,6 +1858,7 @@ async function postgresConcurrency(
     readonly caller: RequestPreparationCaller;
     readonly candidate: RequestPreparationCandidateAuthority;
   },
+  initial?: InitialConcurrencyRead,
 ): Promise<ProviderAccountSchedulerConcurrencyDecision> {
   if (!isLeaseConcurrencyLimit(leaseConcurrencyLimit)) {
     return {
@@ -1836,11 +1870,14 @@ async function postgresConcurrency(
   try {
     const ownerKind = input.candidate.supplyMode === 'byok' ? 'tenant' : 'platform';
     const ownerTenantId = ownerKind === 'tenant' ? input.caller.tenantId : null;
-    const result = await database.query<{ in_flight: unknown }>(CONCURRENCY_SQL, [
-      ownerKind,
-      ownerTenantId,
-      input.candidate.accountId,
-    ]);
+    if (initial?.failed) throw new Error('initial concurrency batch unavailable');
+    const result =
+      initial ??
+      (await database.query<{ in_flight: unknown }>(CONCURRENCY_SQL, [
+        ownerKind,
+        ownerTenantId,
+        input.candidate.accountId,
+      ]));
     if (result.rows.length !== 1) {
       return { decision: 'block', reason: 'provider account lease concurrency snapshot is unavailable' };
     }
@@ -1994,6 +2031,11 @@ class HalfOpenProbeHealthPort implements ProviderAccountSchedulerHealthPort {
     input: Parameters<ProviderAccountSchedulerHealthPort['get']>[0],
     cause: 'stale' | 'unobserved',
   ): Promise<ProviderAccountSchedulerHealthDecision> {
+    // A probe can await a remote write. Later candidates must not resurrect
+    // observations taken before that wait (including a newly committed deny).
+    if (this.store instanceof PostgresProviderAccountRuntimeHealthStore) {
+      this.store.discardSchedulingReadBatch();
+    }
     const { candidate } = input;
     const key = JSON.stringify([
       candidate.supplyMode,
@@ -2168,6 +2210,10 @@ const SCHEDULER_SELECTION_AUDIT_ACTION = 'provider_account_scheduler.selection';
  * the PostgreSQL lease snapshot (default off; fail-open; PG stays final).
  */
 export class PostgresProviderAccountScheduler implements ProviderAccountSchedulerPort {
+  readonly #initialConcurrencyReads = new AsyncLocalStorage<{
+    active: boolean;
+    reads: Map<string, InitialConcurrencyRead>;
+  }>();
   private readonly scheduler: ProviderAccountScheduler;
   private readonly hintScope: PostgresProviderAccountSchedulerOptions['hintScope'];
   private readonly healthAuthorityConfigured: boolean;
@@ -2228,9 +2274,25 @@ export class PostgresProviderAccountScheduler implements ProviderAccountSchedule
       }),
       options.staticEligibilityCache,
     );
+    const nativeHealth = options.healthProbe?.store ?? options.health;
+    const candidateReadScope =
+      nativeHealth instanceof PostgresProviderAccountRuntimeHealthStore
+        ? <T>(
+            input: {
+              readonly phase: 'health' | 'concurrency';
+              readonly caller: RequestPreparationCaller;
+              readonly candidates: readonly RequestPreparationCandidateAuthority[];
+            },
+            work: () => Promise<T>,
+          ): Promise<T> =>
+            input.phase === 'health'
+              ? nativeHealth.withSchedulingReadBatch(input, work)
+              : this.#withConcurrencyReadBatch(input, work)
+        : undefined;
     this.scheduler = new ProviderAccountScheduler(
       {
         eligibility,
+        candidateReadScope,
         health: options.healthProbe
           ? new HalfOpenProbeHealthPort(
               options.healthProbe.store,
@@ -2240,9 +2302,7 @@ export class PostgresProviderAccountScheduler implements ProviderAccountSchedule
           : (options.health ?? MISSING_HEALTH),
         concurrency: {
           get: (input) =>
-            this.redisSlots === undefined
-              ? postgresConcurrency(options.database, options.leaseConcurrencyLimit, input)
-              : this.concurrencyWithRedisSlotPreCheck(input),
+            this.redisSlots === undefined ? this.#readConcurrency(input) : this.concurrencyWithRedisSlotPreCheck(input),
         },
         affinity: options.affinity ?? MISSING_AFFINITY,
         // H5c (P8): in-process post-failure cooldown; absent keeps the
@@ -2253,6 +2313,72 @@ export class PostgresProviderAccountScheduler implements ProviderAccountSchedule
       },
       options,
     );
+  }
+
+  async #withConcurrencyReadBatch<T>(
+    input: {
+      readonly caller: RequestPreparationCaller;
+      readonly candidates: readonly RequestPreparationCandidateAuthority[];
+    },
+    work: () => Promise<T>,
+  ): Promise<T> {
+    // Redis must remain a pre-check: do not read counts for saturated slots.
+    // That optional shape keeps its original per-candidate PostgreSQL path.
+    if (this.redisSlots || !isLeaseConcurrencyLimit(this.leaseConcurrencyLimit)) return work();
+    const reads = new Map<string, InitialConcurrencyRead>();
+    for (const candidate of input.candidates) {
+      reads.set(concurrencyReadKey({ caller: input.caller, candidate }), { rows: [], failed: true });
+    }
+    if (input.candidates.length > 0) {
+      try {
+        const result = await this.database.query<{ request_index: unknown; in_flight: unknown }>(
+          CONCURRENCY_BATCH_SQL,
+          [
+            input.candidates.map((candidate) => candidate.accountOwnerKind),
+            input.candidates.map((candidate) => (candidate.supplyMode === 'byok' ? input.caller.tenantId : null)),
+            input.candidates.map((candidate) => candidate.accountId),
+          ],
+        );
+        const grouped = input.candidates.map(() => [] as { in_flight: unknown }[]);
+        for (const row of result.rows) {
+          const index =
+            typeof row.request_index === 'string' && /^[1-9][0-9]*$/.test(row.request_index)
+              ? Number(row.request_index)
+              : row.request_index;
+          if (typeof index !== 'number' || !Number.isSafeInteger(index) || index < 1 || index > grouped.length) {
+            throw new TypeError('invalid concurrency batch row index');
+          }
+          grouped[index - 1].push(row);
+        }
+        for (let i = 0; i < input.candidates.length; i++) {
+          reads.set(concurrencyReadKey({ caller: input.caller, candidate: input.candidates[i] }), {
+            rows: grouped[i],
+            failed: false,
+          });
+        }
+      } catch {
+        // A failed batch stays fail-closed without a per-candidate retry storm.
+      }
+    }
+    const context = { active: true, reads };
+    try {
+      return await this.#initialConcurrencyReads.run(context, work);
+    } finally {
+      context.active = false;
+      reads.clear();
+    }
+  }
+
+  #readConcurrency(input: {
+    readonly caller: RequestPreparationCaller;
+    readonly candidate: RequestPreparationCandidateAuthority;
+  }): Promise<ProviderAccountSchedulerConcurrencyDecision> {
+    const context = this.#initialConcurrencyReads.getStore();
+    const reads = context?.active ? context.reads : undefined;
+    const key = concurrencyReadKey(input);
+    const initial = reads?.get(key);
+    reads?.delete(key);
+    return postgresConcurrency(this.database, this.leaseConcurrencyLimit, input, initial);
   }
 
   async select(
@@ -2671,7 +2797,7 @@ export class PostgresProviderAccountScheduler implements ProviderAccountSchedule
         });
       }
     }
-    return postgresConcurrency(this.database, this.leaseConcurrencyLimit, input);
+    return this.#readConcurrency(input);
   }
 
   /** Releases every non-winning (or, on failure, every) slot acquired for a request. */

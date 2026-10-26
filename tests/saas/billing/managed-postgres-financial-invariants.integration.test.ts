@@ -478,21 +478,16 @@ test('FIN-01: bounded real PostgreSQL wallet financial invariants under restrict
       const abort = new Error('FIN-01 intentional caller rollback');
       await assert.rejects(
         transaction(gateway, async (tx) => {
-          const entryInserts: { rowCount: number | null; values: readonly unknown[] }[] = [];
-          // The gateway has no ledger-entry SELECT privilege. Delegate every
-          // service query unchanged to this real transaction, returning the real
-          // driver result; observe only acknowledged entry INSERTs, never reads.
+          const pairInserts: { rowCount: number | null; rows: unknown[]; values: readonly unknown[] }[] = [];
+          // RETURNING a constant counts acknowledged entry inserts without
+          // granting the gateway SELECT on immutable ledger-entry columns.
           const observedTx: SqlExecutor = {
             async query<Row>(sql: string, values?: readonly unknown[]) {
               const result = await tx.query<Row>(sql, values);
-              if (/^\s*INSERT INTO saas_ledger_entries\b/i.test(sql)) {
-                assert.match(
-                  sql,
-                  /\(id,\s*transaction_id,\s*tenant_id,\s*currency,\s*direction,\s*amount_minor_units,\s*account_type,\s*account_ref,\s*wallet_id,\s*created_at\)/,
-                );
+              if (sql.includes('/* billing:post-ledger-pair */')) {
+                assert.match(sql, /RETURNING 1 AS inserted/);
                 assert.ok(values);
-                assert.equal(values.length, 10);
-                entryInserts.push({ rowCount: result.rowCount, values: [...values] });
+                pairInserts.push({ rowCount: result.rowCount, rows: result.rows, values: [...values] });
               }
               return result;
             },
@@ -501,44 +496,22 @@ test('FIN-01: bounded real PostgreSQL wallet financial invariants under restrict
           assert.equal(settled.state, 'settled');
           assert.equal(settled.walletPostedBalanceMinorUnits, 70n);
           assert.ok(typeof settled.ledgerTransactionId === 'string');
-          assert.equal(entryInserts.length, 2, 'rollback must occur after both real entry INSERTs were acknowledged');
-          assert.deepEqual(
-            entryInserts.map(({ rowCount, values }) => ({
-              rowCount,
-              transactionId: values[1],
-              tenantId: values[2],
-              currency: values[3],
-              direction: values[4],
-              amount: values[5],
-              accountType: values[6],
-              accountRef: values[7],
-              walletId: values[8],
-            })),
-            [
-              {
-                rowCount: 1,
-                transactionId: settled.ledgerTransactionId,
-                tenantId: fixture.tenantId,
-                currency: 'USD',
-                direction: 'debit',
-                amount: '30',
-                accountType: 'wallet',
-                accountRef: fixture.walletId,
-                walletId: fixture.walletId,
-              },
-              {
-                rowCount: 1,
-                transactionId: settled.ledgerTransactionId,
-                tenantId: fixture.tenantId,
-                currency: 'USD',
-                direction: 'credit',
-                amount: '30',
-                accountType: 'billing_revenue',
-                accountRef: 'platform-revenue:USD',
-                walletId: null,
-              },
-            ],
-          );
+          assert.equal(pairInserts.length, 1, 'rollback occurs after the real atomic pair INSERT');
+          const pair = pairInserts[0];
+          assert.ok(pair);
+          assert.equal(pair.rowCount, 1);
+          assert.equal((pair.rows[0] as { inserted_entry_count: string }).inserted_entry_count, '2');
+          assert.equal(pair.values[0], settled.ledgerTransactionId);
+          assert.equal(pair.values[1], fixture.tenantId);
+          assert.equal(pair.values[2], 'USD');
+          assert.equal(pair.values[6], '30');
+          assert.deepEqual(pair.values.slice(14), [
+            'debit',
+            fixture.walletId,
+            'credit',
+            'billing_revenue',
+            'platform-revenue:USD',
+          ]);
           throw abort;
         }),
         (error: unknown) => error === abort,
@@ -567,6 +540,304 @@ test('FIN-01: bounded real PostgreSQL wallet financial invariants under restrict
         settlements: '1',
         unbalanced: '0',
       });
+    });
+
+    await t.test('cross-currency same-identity race keeps the unique winner and returns a fresh conflict', async () => {
+      const fixture = await seedFixture(migrator);
+      await transaction(controlPlane, (tx) =>
+        service.postVerifiedFunding(tx, {
+          tenantId: fixture.tenantId,
+          currency: 'EUR',
+          amountMinorUnits: '100',
+          sourceOrderRef: `eur:${fixture.label}`,
+          idempotencyKey: `eur:${fixture.label}`,
+        }),
+      );
+      const input = reserveInput(fixture, 'cross-currency-race');
+      const bothSnapshots = deferred<void>();
+      let snapshots = 0;
+      const race = (currency: string) =>
+        transaction(gateway, (tx) =>
+          service.reserve(
+            {
+              async query(sql, values) {
+                const result = await tx.query(sql, values);
+                if (sql.includes('billing:reserve-wallet-snapshot')) {
+                  assert.equal((result.rows[0] as { reservation_exists: boolean }).reservation_exists, false);
+                  if (++snapshots === 2) bothSnapshots.resolve();
+                  await bothSnapshots.promise;
+                }
+                return result;
+              },
+            },
+            { ...input, currency },
+          ),
+        );
+      const results = await Promise.allSettled([race('USD'), race('EUR')]);
+      assert.equal(snapshots, 2);
+      assert.equal(results.filter((result) => result.status === 'fulfilled').length, 1);
+      const loser = results.find((result) => result.status === 'rejected');
+      assert.ok(loser && loser.status === 'rejected');
+      billingCode('IDEMPOTENCY_CONFLICT')(loser.reason);
+      const state = await snapshot(migrator, fixture);
+      assert.equal(state.reservations, '1');
+      assert.equal(state.holds, '70');
+      assert.equal(state.settlements, '0');
+      assert.equal(state.transactions, '2');
+    });
+
+    await t.test('an unrelated reservation UUID collision cannot become a replay', async () => {
+      const fixture = await seedFixture(migrator);
+      const first = await transaction(gateway, (tx) => service.reserve(tx, reserveInput(fixture, 'uuid-first', '10')));
+      const before = await snapshot(migrator, fixture);
+      const collided = new PlatformWalletLedgerService({ idFactory: () => first.id });
+      await assert.rejects(
+        transaction(gateway, (tx) => collided.reserve(tx, reserveInput(fixture, 'uuid-other', '10'))),
+        billingCode('BILLING_STORAGE_ERROR'),
+      );
+      assert.deepEqual(await snapshot(migrator, fixture), before);
+    });
+
+    for (const terminal of ['settled', 'released'] as const) {
+      await t.test(`a staged absent reserve re-reads a concurrent ${terminal} winner`, async () => {
+        const fixture = await seedFixture(migrator);
+        const input = reserveInput(fixture, `staged-${terminal}`);
+        const staged = deferred<void>();
+        const winnerCommitted = deferred<void>();
+        const waiter = transaction(gateway, async (tx) => {
+          const apply = await service.prepareReserve(tx, input);
+          staged.resolve();
+          await winnerCommitted.promise;
+          return apply();
+        });
+        await staged.promise;
+        try {
+          await transaction(gateway, async (tx) => {
+            await service.reserve(tx, input);
+            if (terminal === 'settled') await service.settle(tx, settleInput(input));
+            else
+              await service.release(tx, {
+                supplyMode: 'platform',
+                tenantId: fixture.tenantId,
+                requestId: input.requestId,
+                businessKey: input.businessKey,
+                currency: input.currency,
+                releaseId: `release:${fixture.label}`,
+                releaseEvidenceRef: `cancelled:${fixture.label}`,
+              });
+          });
+        } finally {
+          winnerCommitted.resolve();
+        }
+        const replay = await waiter;
+        assert.equal(replay.state, terminal);
+        assert.equal(replay.activeHoldsMinorUnits, 0n);
+        const state = await snapshot(migrator, fixture);
+        assert.equal(state.reservations, '1');
+        assert.equal(state.settlements, terminal === 'settled' ? '1' : '0');
+      });
+    }
+
+    await t.test('batched verified refund preserves active holds and posts exactly one contra-pair', async () => {
+      const fixture = await seedFixture(migrator, true);
+      await transaction(gateway, (tx) => service.reserve(tx, reserveInput(fixture, 'refund-compatible-hold', '20')));
+      await transaction(controlPlane, async (tx) => {
+        const refund = await tx.query<{ id: string }>(
+          'SELECT id FROM saas_refund_orders WHERE tenant_id = $1 FOR UPDATE',
+          [fixture.tenantId],
+        );
+        const id = refund.rows[0]?.id;
+        assert.ok(id);
+        const input = { tenantId: fixture.tenantId, currency: 'USD', amountMinorUnits: '40', refundOrderId: id };
+        const posting = await service.postVerifiedWalletRefund(tx, input);
+        assert.equal(posting.replayed, false);
+        assert.equal(posting.wallet.postedBalanceMinorUnits, 60n);
+        assert.equal(posting.wallet.activeHoldsMinorUnits, 20n);
+        assert.equal(posting.wallet.availableMinorUnits, 40n);
+        const replay = await service.postVerifiedWalletRefund(tx, input);
+        assert.equal(replay.replayed, true);
+        assert.equal(replay.transactionId, posting.transactionId);
+        await tx.query(
+          "UPDATE saas_refund_orders SET state = 'succeeded', completed_at = clock_timestamp(), wallet_refund_transaction_id = $2 WHERE id = $1",
+          [id, posting.transactionId],
+        );
+        assert.equal(
+          (await tx.query('DELETE FROM saas_refund_wallet_freezes WHERE refund_order_id = $1', [id])).rowCount,
+          1,
+        );
+      });
+      assert.deepEqual(await snapshot(migrator, fixture), {
+        posted: '60',
+        wallet_ledger: '60',
+        holds: '20',
+        refund_freezes: '0',
+        reservations: '1',
+        transactions: '2',
+        entries: '4',
+        settlements: '0',
+        unbalanced: '0',
+      });
+    });
+
+    await t.test('joined wallet read and ledger pair retain integers beyond JavaScript safe range', async () => {
+      const fixture = await seedFixture(migrator);
+      const amount = '9007199254740993';
+      await transaction(controlPlane, (tx) =>
+        service.postVerifiedFunding(tx, {
+          tenantId: fixture.tenantId,
+          currency: 'USD',
+          amountMinorUnits: amount,
+          sourceOrderRef: `large:${fixture.label}`,
+          idempotencyKey: `large:${fixture.label}`,
+        }),
+      );
+      const input = reserveInput(fixture, 'large-integer', amount);
+      const reservation = await transaction(gateway, (tx) => service.reserve(tx, input));
+      assert.equal(reservation.amountMinorUnits, 9007199254740993n);
+      const settled = await transaction(gateway, (tx) =>
+        service.settle(tx, { ...settleInput(input), amountMinorUnits: amount }),
+      );
+      assert.equal(settled.settlementAmountMinorUnits, 9007199254740993n);
+      assert.equal(settled.walletPostedBalanceMinorUnits, 100n);
+      const state = await snapshot(migrator, fixture);
+      assert.equal(state.posted, '100');
+      assert.equal(state.holds, '0');
+      assert.equal(state.settlements, '1');
+      assert.equal(state.entries, '6');
+    });
+
+    await t.test('the joined locked operation does not acquire a strong wallet tuple lock', async () => {
+      const fixture = await seedFixture(migrator);
+      const input = reserveInput(fixture, 'joined-lock');
+      await transaction(gateway, (tx) => service.reserve(tx, input));
+      await transaction(gateway, async (tx) => {
+        const settled = await service.settle(tx, { ...settleInput(input), amountMinorUnits: '0' });
+        assert.equal(settled.state, 'settled');
+        assert.equal(settled.walletPostedBalanceMinorUnits, 100n);
+        assert.equal(settled.ledgerTransactionId, null);
+        const probe = await migrator.query('SELECT id FROM saas_wallets WHERE id = $1 FOR NO KEY UPDATE NOWAIT', [
+          fixture.walletId,
+        ]);
+        assert.equal(probe.rowCount, 1, 'the reservation tuple lock must not propagate to the joined wallet');
+      });
+      const state = await snapshot(migrator, fixture);
+      assert.equal(state.settlements, '0');
+      assert.equal(state.entries, '2');
+      assert.equal(state.holds, '0');
+    });
+
+    await t.test('batched positive settlement has seven operations after the wallet fence', async () => {
+      const fixture = await seedFixture(migrator);
+      const input = reserveInput(fixture, 'statement-budget');
+      await transaction(gateway, (tx) => service.reserve(tx, input));
+      const statements: string[] = [];
+      await transaction(gateway, (tx) =>
+        service.settle(
+          {
+            query(sql, values) {
+              statements.push(sql);
+              return tx.query(sql, values);
+            },
+          },
+          settleInput(input),
+        ),
+      );
+      const fence = statements.findIndex((sql) => sql.includes('pg_advisory_xact_lock'));
+      assert.equal(fence, 1);
+      assert.equal(statements.length, 9);
+      assert.equal(statements.length - fence - 1, 7);
+      assert.equal(statements.filter((sql) => sql.includes('billing:post-ledger-pair')).length, 1);
+      const state = await snapshot(migrator, fixture);
+      assert.equal(state.settlements, '1');
+      assert.equal(state.entries, '4');
+      assert.equal(state.holds, '0');
+    });
+
+    await t.test('a failing second ledger entry rolls back its CTE header and first entry', async () => {
+      const fixture = await seedFixture(migrator);
+      const input = reserveInput(fixture, 'second-entry-rollback');
+      await transaction(gateway, (tx) => service.reserve(tx, input));
+      const before = await snapshot(migrator, fixture);
+      const duplicateEntryId = randomUUID();
+      let ids = 0;
+      const failing = new PlatformWalletLedgerService({
+        idFactory: () => (++ids === 1 ? randomUUID() : duplicateEntryId),
+      });
+      let postgresCode: unknown;
+      await assert.rejects(
+        transaction(gateway, (tx) =>
+          failing.settle(
+            {
+              async query(sql, values) {
+                try {
+                  return await tx.query(sql, values);
+                } catch (error) {
+                  postgresCode = (error as { code?: string }).code;
+                  throw error;
+                }
+              },
+            },
+            settleInput(input),
+          ),
+        ),
+        billingCode('BILLING_STORAGE_ERROR'),
+      );
+      assert.equal(postgresCode, '23505', 'real entry primary key rejects the second entry');
+      assert.deepEqual(await snapshot(migrator, fixture), before);
+      await transaction(gateway, (tx) => service.settle(tx, settleInput(input)));
+      assert.equal((await snapshot(migrator, fixture)).settlements, '1');
+    });
+
+    await t.test('a zero-row projection rolls back the acknowledged ledger pair', async () => {
+      const fixture = await seedFixture(migrator);
+      const input = reserveInput(fixture, 'projection-rollback');
+      await transaction(gateway, (tx) => service.reserve(tx, input));
+      const before = await snapshot(migrator, fixture);
+      let entries = 0;
+      await assert.rejects(
+        transaction(gateway, (tx) =>
+          service.settle(
+            {
+              async query(sql, values) {
+                const result = await tx.query(
+                  sql.includes('billing:project-ledger')
+                    ? sql.replace('WHERE id = $1', 'WHERE false AND id = $1')
+                    : sql,
+                  values,
+                );
+                if (sql.includes('billing:post-ledger-pair'))
+                  entries = Number((result.rows[0] as { inserted_entry_count: string }).inserted_entry_count);
+                return result;
+              },
+            },
+            settleInput(input),
+          ),
+        ),
+        billingCode('INSUFFICIENT_FUNDS'),
+      );
+      assert.equal(entries, 2);
+      assert.deepEqual(await snapshot(migrator, fixture), before);
+    });
+
+    await t.test('lost commit acknowledgement replays without a second charge', async () => {
+      const fixture = await seedFixture(migrator);
+      const input = reserveInput(fixture, 'ambiguous-commit');
+      await transaction(gateway, (tx) => service.reserve(tx, input));
+      const lostAcknowledgement = new Error('intentional lost commit acknowledgement');
+      await assert.rejects(
+        (async () => {
+          await transaction(gateway, (tx) => service.settle(tx, settleInput(input)));
+          throw lostAcknowledgement;
+        })(),
+        (error) => error === lostAcknowledgement,
+      );
+      const committed = await snapshot(migrator, fixture);
+      const replay = await transaction(gateway, (tx) => service.settle(tx, settleInput(input)));
+      assert.equal(replay.state, 'settled');
+      assert.equal(committed.settlements, '1');
+      assert.equal(committed.entries, '4');
+      assert.equal(committed.posted, '70');
+      assert.deepEqual(await snapshot(migrator, fixture), committed);
     });
 
     await t.test('unknown outcome retains an expired hold and rejects TTL-only release', async () => {

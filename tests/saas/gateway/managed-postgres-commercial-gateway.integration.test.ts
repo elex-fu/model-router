@@ -216,6 +216,7 @@ function observePreparationFailures(
   report: (diagnostic: SafePreparationDiagnostic) => void,
   registerCleanup: (cleanup: () => void) => void,
   observeNativeLeaseProvider: (provider: PostgresProviderAccountLeaseService) => void,
+  observeCandidateRead?: (kind: 'health' | 'concurrency') => void,
 ): () => SafePreparationDiagnostic | null {
   const gateway = runtime.gateway;
   assert.ok(gateway, 'the real managed gateway composition must be present');
@@ -254,7 +255,7 @@ function observePreparationFailures(
     'dispatch_failed',
     'storage_failure',
   ]);
-  const observations = new AsyncLocalStorage<{ sqlStates: Set<string>; boundaries: SafePreparationBoundary[] }>();
+  const observations = new AsyncLocalStorage<{ sqlStates: Set<string>; boundaries: SafePreparationBoundary[]; reservationOrder: string[] }>();
   let lastFailure: SafePreparationDiagnostic | null = null;
   const recordSqlState = (error: unknown) => {
     // Never inspect message/detail/context/stack, SQL text, parameters, caller
@@ -271,7 +272,18 @@ function observePreparationFailures(
   };
   const observeExecutor = (executor: SqlExecutor): SqlExecutor => ({
     async query<Row>(sql: string, values?: readonly unknown[]) {
+      // Test-only fixed labels prove the native runtime, not just the standalone
+      // harness, stages fenced reads before its first shared mutable counter.
+      const stage = sql.includes('INSERT INTO saas_provider_account_rate_counters') ? 'account-counter'
+        : sql.includes('FROM saas_api_key_budget_policies') ? 'key-policy'
+        : sql.includes('SELECT billing_group_id, group_daily_limit_minor_units') ? 'group-terms'
+        : sql.includes('SELECT t.status AS tenant_status') ? 'capacity-authority'
+        : sql.includes('postgres-preparation-capacity:billing-group-terms') ? 'group-rate-terms'
+        : null;
+      if (stage !== null) observations.getStore()?.reservationOrder.push(stage);
       try {
+        if (sql.includes('provider-account-runtime-health:scheduling-batch')) observeCandidateRead?.('health');
+        if (sql.includes('postgres-provider-account-scheduler:concurrency-batch')) observeCandidateRead?.('concurrency');
         return await executor.query<Row>(sql, values);
       } catch (error) {
         recordSqlState(error);
@@ -527,9 +539,21 @@ function observePreparationFailures(
   // The HTTP handler retains this exact production telemetry wrapper. Delegate
   // to its real coordinator and unchanged ports, then project only fixed enums.
   preparation.prepare = (input) =>
-    observations.run({ sqlStates: new Set<string>(), boundaries: [] }, async () => {
+    observations.run({ sqlStates: new Set<string>(), boundaries: [], reservationOrder: [] }, async () => {
       const result = await realPrepare(input);
       assert.ok(observedCore, 'the telemetry wrapper must delegate to the real preparation service');
+      if (result.outcome === 'prepared') {
+        const order = observations.getStore()?.reservationOrder ?? [];
+        const counterAt = order.indexOf('account-counter');
+        assert.ok(counterAt >= 0, 'native successful preparation must persist account consumption');
+        const reads = result.authority.candidate.supplyMode === 'platform'
+          ? ['key-policy', 'group-terms', 'capacity-authority', 'group-rate-terms']
+          : ['key-policy', 'capacity-authority'];
+        for (const read of reads) {
+          assert.equal(order.filter((stage) => stage === read).length, 1, `native ${read} must not silently fall back`);
+          assert.ok(order.indexOf(read) < counterAt, `native ${read} must precede the account/wallet locks`);
+        }
+      }
       if (result.outcome === 'blocked' || result.outcome === 'rejected') {
         lastFailure = {
           outcome: result.outcome,
@@ -2926,6 +2950,7 @@ test('real PostgreSQL commercial gateway E2E launches managed control-plane and 
     assert.equal(gatewayUser.rows[0]?.current_user, 'model_router_saas_gateway');
     assert.deepEqual(Object.keys(gatewayRuntime.listeners), ['gateway']);
     let nativeLeaseProvider: PostgresProviderAccountLeaseService | undefined;
+    const candidateReadCounts = { health: 0, concurrency: 0 };
     const preparationDiagnostic = observePreparationFailures(
       gatewayRuntime,
       (diagnostic) => {
@@ -2939,6 +2964,9 @@ test('real PostgreSQL commercial gateway E2E launches managed control-plane and 
           'the one native preparation core must expose its lease authority once',
         );
         nativeLeaseProvider = provider;
+      },
+      (kind) => {
+        candidateReadCounts[kind] += 1;
       },
     );
     const dispatchDiagnostic = observeDispatchFailures(
@@ -3003,6 +3031,11 @@ test('real PostgreSQL commercial gateway E2E launches managed control-plane and 
       publicCallsBefore,
     );
     assert.equal(publicResponse.status, 200, publicResponseDiagnostic);
+    assert.deepEqual(
+      candidateReadCounts,
+      { health: 1, concurrency: 1 },
+      'the real managed BYOK HTTP path must consume both native live-read batches',
+    );
     assert.match(publicResponse.headers.get('content-type') ?? '', /text\/event-stream/i);
     assert.match(publicBody, /e2e-ok/);
     assert.match(publicBody, /\[DONE\]/);
@@ -3137,6 +3170,11 @@ test('real PostgreSQL commercial gateway E2E launches managed control-plane and 
       platformCallsBefore,
     );
     assert.equal(platformResponse.status, 200, platformResponseDiagnostic);
+    assert.deepEqual(
+      candidateReadCounts,
+      { health: 2, concurrency: 2 },
+      'the real managed platform HTTP path must consume its own live-read batches',
+    );
     assert.match(platformResponse.headers.get('content-type') ?? '', /text\/event-stream/i);
     assert.match(platformBody, /e2e-ok/);
     assert.match(platformBody, /\[DONE\]/);

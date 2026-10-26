@@ -18,6 +18,7 @@ import type {
   SaasRequestAdmissionAuthorizationPrelock,
 } from './authorization-prelock.js';
 import type { ClientAddressResolution } from './client-address.js';
+import { prepareFencedReservation } from './fenced-reservation-plan.js';
 
 const REQUEST_ADMISSION_OUTBOX_EVENT_TYPE = 'request.admitted' as const;
 const REQUEST_ADMISSION_OUTBOX_SCHEMA_VERSION = 1 as const;
@@ -135,6 +136,12 @@ export interface SaasRequestAdmissionServiceOptions {
   readonly idFactory?: () => string;
   /** Used only for deterministic outbox timestamps. */
   readonly now?: () => Date;
+  /** Native preparation can stage fenced read-only plans before shared mutable reservations. */
+  readonly beforeReservations?: (input: {
+    readonly executor: SqlExecutor;
+    readonly admission: RequestAdmissionCreated;
+    readonly platformPriceHold: SaasRequestAdmissionPlatformPriceHoldFacts | null;
+  }) => Promise<void>;
 }
 
 export interface SaasMeteringAdmissionPort {
@@ -143,6 +150,10 @@ export interface SaasMeteringAdmissionPort {
 
 export interface SaasBillingReservationPort {
   reserve(executor: BillingTransactionExecutor, input: ReserveBillingInput): Promise<BillingReservationResult>;
+  prepareReserve?(
+    executor: BillingTransactionExecutor,
+    input: ReserveBillingInput,
+  ): Promise<() => Promise<BillingReservationResult>>;
 }
 
 /** The authoritative platform price and hold snapshot returned by the DB guard. */
@@ -748,10 +759,11 @@ export function createRequestAdmissionEventKey(tenantId: string, requestId: stri
 
 /**
  * Composes request admission, bookkeeping, and an optional platform hold in
- * one database transaction. The platform wallet hold is reserved LAST so the
- * per-wallet billing fence covers only the balance check, the reservation
- * insert, and the commit (R9 finding P4: shrink, never weaken, the
- * double-spend critical section). The outbox is metadata-only and is not a
+ * one database transaction. Read-only planning and unique-request metadata
+ * precede the hot account counter and wallet fence. Outer preparation still
+ * reserves key/group/capacity after the wallet, in the established mutable
+ * lock order; no claim is made that reserve is adjacent to COMMIT.
+ * The outbox is metadata-only and is not a
  * dispatch queue: the live caller remains responsible for post-commit I/O.
  */
 export class SaasRequestAdmissionService {
@@ -764,7 +776,7 @@ export class SaasRequestAdmissionService {
     private readonly billing: SaasBillingReservationPort,
     private readonly guard: SaasRequestAdmissionGuard,
     private readonly authorizationPrelock: SaasRequestAdmissionAuthorizationPrelock,
-    options: SaasRequestAdmissionServiceOptions = {},
+    private readonly options: SaasRequestAdmissionServiceOptions = {},
   ) {
     if (!guard || typeof guard.revalidate !== 'function') {
       throw new TypeError('SaasRequestAdmissionGuard is required');
@@ -824,20 +836,13 @@ export class SaasRequestAdmissionService {
         normalized.supplyMode,
       );
 
-      // R9 finding P4 (critical-section shrink): bookkeeping writes run BEFORE
-      // the platform hold so the per-wallet advisory fence — acquired inside
-      // billing.reserve (saasAdvisoryKey.walletFence, roadmap batch 1.2 step 3)
-      // and held until COMMIT — covers only the wallet balance check, the
-      // reservation insert, and the commit itself. The rate counter, outbox,
-      // and audit writes never read billing state, and the wallet fence
-      // remains the LAST wallet-domain lock this transaction acquires, so lock
-      // ordering is unchanged. If the reserve fails (insufficient funds,
-      // spending freeze), these writes roll back with the transaction exactly
-      // as before.
-      await this.recordAccountRateConsumption(tx, initialAttempt, holdEvidenceSnapshot);
-
+      // Unique-request metadata and fenced planning must not sit behind the
+      // sticky account counter. All writes remain in this transaction and
+      // roll back if any later money/budget/capacity reservation is denied.
       const outboxEvent = await this.enqueueAdmissionEvent(tx, admission, normalized.supplyMode, initialAttempt);
+      await this.options.beforeReservations?.({ executor: tx, admission, platformPriceHold });
 
+      let reserve: (() => Promise<BillingReservationResult>) | undefined;
       let reservation: BillingReservationResult | null = null;
       if (normalized.supplyMode === 'platform') {
         if (!platformPriceHold) {
@@ -847,7 +852,7 @@ export class SaasRequestAdmissionService {
           admission.request.tenantId,
           admission.request.id,
         );
-        reservation = await this.billing.reserve(tx, {
+        const input: ReserveBillingInput = {
           supplyMode: 'platform',
           tenantId: admission.request.tenantId,
           requestId: admission.request.id,
@@ -856,9 +861,24 @@ export class SaasRequestAdmissionService {
           priceSnapshotRef: platformPriceHold.priceSnapshotRef,
           expiresAt: platformPriceHold.expiresAt,
           businessKey,
-        });
+        };
+        const prepareReserve = this.billing.prepareReserve?.bind(this.billing);
+        reserve = prepareReserve
+          ? await prepareFencedReservation(
+              tx,
+              { tenantId: input.tenantId, requestId: admission.request.id },
+              () => prepareReserve(tx, input),
+              (apply) => apply(),
+              () => this.billing.reserve(tx, input),
+            )
+          : () => this.billing.reserve(tx, input);
       }
 
+      // Preserve the established relative mutable order: account → wallet →
+      // key budget → group spend → capacity. Planning never reads shared
+      // balances/counters and cannot authorize bypassing any locked check.
+      await this.recordAccountRateConsumption(tx, initialAttempt, holdEvidenceSnapshot);
+      if (reserve) reservation = await reserve();
       return { ...admission, reservation, outboxEvent };
     };
     return options.executor ? work(options.executor) : this.database.transaction(work);

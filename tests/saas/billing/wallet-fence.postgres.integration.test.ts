@@ -124,8 +124,8 @@ test('wallet advisory fence: no tuple lock while fenced, mutual exclusion under 
         );
         assert.equal(
           reserveStatements.length,
-          5,
-          'fresh reserve keeps only five SQL operations inside the transaction',
+          4,
+          'fresh reserve keeps only four SQL operations inside the transaction',
         );
         assert.equal(reserveStatements.filter((sql) => sql.includes('AS active_hold_minor_units')).length, 1);
         // While this fenced transaction is open, another session can take a

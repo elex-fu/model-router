@@ -3,11 +3,12 @@ import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import type { PreparedSqlStatement, SaasDatabase, SqlExecutor, SqlResult } from '../../../src/saas/db/index.js';
 import { effectiveWeight } from '../../../src/saas/gateway/health-score.js';
-import type {
-  ProviderAccountHalfOpenProbeAdmissionPort,
-  ProviderAccountHealthSchedulingPort,
-  ProviderAccountHealthSchedulingView,
-  ProviderAccountRuntimeHealthWriter,
+import {
+  PostgresProviderAccountRuntimeHealthStore,
+  type ProviderAccountHalfOpenProbeAdmissionPort,
+  type ProviderAccountHealthSchedulingPort,
+  type ProviderAccountHealthSchedulingView,
+  type ProviderAccountRuntimeHealthWriter,
 } from '../../../src/saas/gateway/postgres-provider-account-runtime-health-store.js';
 import {
   PostgresProviderAccountScheduler,
@@ -2624,4 +2625,552 @@ test('remote probe waiting is bounded and never retries a real health or storage
       }
     });
   }
+});
+
+/** Native-only candidate read batching: custom ports above stay sequential. */
+function nativeBatchSetup(
+  mode: Mode = 'byok',
+  options: Partial<PostgresProviderAccountSchedulerOptions> = {},
+  overrides: Partial<FakeDatabaseState> = {},
+) {
+  const base = setup(mode, overrides);
+  const healthRows = new Map<string, Row[]>();
+  const healthRow = (): Row => ({
+    state: 'healthy',
+    observed_at: NOW,
+    cooldown_until: null,
+    failure_count: '0',
+    health_score: '1.000',
+    half_open_probe_at: null,
+  });
+  let healthBatchFailure = false;
+  let concurrencyBatchFailure = false;
+  let healthBatchTransform = (rows: Row[]): Row[] => rows;
+  let concurrencyBatchTransform = (rows: Row[]): Row[] => rows;
+  const query = base.database.query.bind(base.database);
+  base.database.query = async <T>(sql: string, values: readonly unknown[] = []): Promise<SqlResult<T>> => {
+    let rows: Row[];
+    if (sql.includes('provider-account-runtime-health:scheduling-batch')) {
+      base.state.statements.push({ sql, values });
+      if (healthBatchFailure) throw new Error('health batch unavailable');
+      rows = healthBatchTransform(
+        (values[1] as string[]).flatMap((accountId, index) =>
+          (healthRows.get(accountId) ?? [healthRow()]).map((row) => ({ ...row, request_index: String(index + 1) })),
+        ),
+      );
+    } else if (sql.includes('postgres-provider-account-scheduler:concurrency-batch')) {
+      base.state.statements.push({ sql, values });
+      if (concurrencyBatchFailure) throw new Error('concurrency batch unavailable');
+      rows = concurrencyBatchTransform(
+        (values[2] as string[]).map((accountId, index) => ({
+          request_index: String(index + 1),
+          in_flight: base.state.inFlight?.get(accountId) ?? '0',
+        })),
+      );
+    } else if (sql.includes('FROM saas_provider_account_runtime_health')) {
+      base.state.statements.push({ sql, values });
+      rows = healthRows.get(String(values[1])) ?? [healthRow()];
+    } else {
+      return query<T>(sql, values);
+    }
+    return { rows: rows as T[], rowCount: rows.length };
+  };
+  const store = new PostgresProviderAccountRuntimeHealthStore({ database: base.database, maxHealthAgeMs: 60_000 });
+  const configured = {
+    database: base.database,
+    leaseConcurrencyLimit: 2,
+    now: () => NOW,
+    maxHealthAgeMs: 60_000,
+    health: store,
+    ...options,
+  };
+  return {
+    ...base,
+    store,
+    healthRows,
+    healthRow,
+    scheduler: new PostgresProviderAccountScheduler(configured),
+    sequential: new PostgresProviderAccountScheduler({ ...configured, health: { get: store.get.bind(store) } }),
+    failHealthBatch: () => {
+      healthBatchFailure = true;
+    },
+    failConcurrencyBatch: () => {
+      concurrencyBatchFailure = true;
+    },
+    transformHealthBatch: (transform: typeof healthBatchTransform) => {
+      healthBatchTransform = transform;
+    },
+    transformConcurrencyBatch: (transform: typeof concurrencyBatchTransform) => {
+      concurrencyBatchTransform = transform;
+    },
+  };
+}
+
+function liveReads(statements: FakeDatabaseState['statements']) {
+  return statements.filter(
+    ({ sql }) =>
+      sql.includes('provider-account-runtime-health:scheduling-batch') ||
+      sql.includes('FROM saas_provider_account_runtime_health') ||
+      sql.includes('postgres-provider-account-scheduler:concurrency'),
+  );
+}
+
+for (const mode of ['byok', 'platform'] as const) {
+  test(`native ${mode} four-account live reads drop 8 to 2 with the same selection and owner scope`, async () => {
+    const h = nativeBatchSetup(mode);
+    const candidates = ['a', 'b', 'c', 'd'].map((id) => candidate(mode, id));
+    const reference = await h.sequential.select(h.input(candidates));
+    assert.equal(reference.decision, 'allow');
+    assert.equal(liveReads(h.state.statements).length, 8);
+    h.state.statements.length = 0;
+    assert.deepEqual(await h.scheduler.select(h.input(candidates)), reference);
+    const reads = liveReads(h.state.statements);
+    assert.equal(reads.length, 2);
+    assert.deepEqual(reads[0].values, [
+      Array(4).fill(mode === 'byok' ? 'tenant-a' : 'platform'),
+      ['a', 'b', 'c', 'd'],
+      Array(4).fill(mode === 'byok' ? 'tenant' : 'platform'),
+      Array(4).fill(mode === 'byok' ? 'tenant-a' : null),
+    ]);
+    assert.deepEqual(reads[1].values, [
+      Array(4).fill(mode === 'byok' ? 'tenant' : 'platform'),
+      Array(4).fill(mode === 'byok' ? 'tenant-a' : null),
+      ['a', 'b', 'c', 'd'],
+    ]);
+  });
+}
+
+test('native batching only reads validated, unattempted candidates that passed the window gate', async () => {
+  const h = nativeBatchSetup(
+    'byok',
+    {
+      windowCost: {
+        resolveWindowCostSchedulability: async ({ candidate: value }) =>
+          value.accountId === 'paused' ? 'paused' : 'admit',
+      },
+    },
+    { eligibilityRows: new Map([['ineligible', []]]) },
+  );
+  const input = {
+    ...h.input([
+      candidate('byok', 'good'),
+      candidate('byok', 'ineligible'),
+      candidate('byok', 'paused'),
+      candidate('byok', 'attempted'),
+      { ...candidate('byok', 'foreign'), tenantId: 'other-tenant' },
+    ]),
+    scheduling: { attemptedAccountIds: ['attempted'] },
+  };
+  const result = await h.scheduler.select(input);
+  assert.equal(result.decision, 'allow');
+  if (result.decision === 'allow') assert.equal(result.value.accountId, 'good');
+  const reads = liveReads(h.state.statements);
+  assert.equal(reads.length, 2);
+  assert.deepEqual(reads[0].values[1], ['good']);
+  assert.deepEqual(reads[1].values[2], ['good']);
+});
+
+for (const [name, patch] of [
+  ['unhealthy', { state: 'unhealthy' }],
+  ['cooldown', { state: 'cooldown', cooldown_until: new Date(NOW.getTime() + 10_000) }],
+  ['stale', { observed_at: new Date(NOW.getTime() - 60_001) }],
+  ['future', { observed_at: new Date(NOW.getTime() + 60_000) }],
+  ['malformed', { state: 'not-a-health-state' }],
+] as const) {
+  test(`native batching retains ${name} decisions and never counts denied health candidates`, async () => {
+    const h = nativeBatchSetup();
+    h.healthRows.set('a', [{ ...h.healthRow(), ...patch }]);
+    const input = h.input([candidate('byok', 'a'), candidate('byok', 'b')]);
+    const reference = await h.sequential.select(input);
+    h.state.statements.length = 0;
+    assert.deepEqual(await h.scheduler.select(input), reference);
+    for (const read of liveReads(h.state.statements).filter(({ sql }) => sql.includes('concurrency'))) {
+      assert.deepEqual(read.values[2], ['b']);
+    }
+  });
+}
+
+test('missing health rows and failed/malformed health batches fail closed without N+1 fallback', async () => {
+  for (const scenario of ['missing', 'failure', 'bad-index', 'duplicate'] as const) {
+    const h = nativeBatchSetup();
+    if (scenario === 'missing') h.healthRows.set('a', []);
+    if (scenario === 'failure') h.failHealthBatch();
+    if (scenario === 'bad-index') h.transformHealthBatch((rows) => [{ ...rows[0], request_index: 'invalid' }]);
+    if (scenario === 'duplicate') h.transformHealthBatch((rows) => [...rows, rows[0]]);
+    assert.equal(
+      (await h.scheduler.select(h.input(['a', 'b', 'c', 'd'].map((id) => candidate('byok', id))))).decision,
+      'block',
+    );
+    assert.equal(liveReads(h.state.statements).length, 1, scenario);
+  }
+});
+
+test('failed, missing and malformed concurrency batches block without direct fallback', async () => {
+  for (const scenario of ['failure', 'missing', 'bad-count', 'duplicate', 'bad-index'] as const) {
+    const h = nativeBatchSetup();
+    if (scenario === 'failure') h.failConcurrencyBatch();
+    if (scenario === 'missing') h.transformConcurrencyBatch(() => []);
+    if (scenario === 'bad-count') h.transformConcurrencyBatch((rows) => [{ ...rows[0], in_flight: '-1' }]);
+    if (scenario === 'duplicate') h.transformConcurrencyBatch((rows) => [...rows, rows[0]]);
+    if (scenario === 'bad-index') h.transformConcurrencyBatch((rows) => [{ ...rows[0], request_index: 0 }]);
+    assert.equal((await h.scheduler.select(h.input([candidate('byok', 'a')]))).decision, 'block');
+    assert.equal(liveReads(h.state.statements).length, 2, scenario);
+  }
+});
+
+test('native selections and hint-fallback passes never reuse prior allow or deny observations', async () => {
+  const h = nativeBatchSetup('byok', { failureFeedback: { isExcluded: () => true } });
+  const input = h.input([candidate('byok', 'a')]);
+  assert.equal((await h.scheduler.select(input)).decision, 'allow');
+  h.healthRows.set('a', [{ ...h.healthRow(), state: 'unhealthy' }]);
+  assert.equal((await h.scheduler.select(input)).decision, 'block');
+  h.healthRows.set('a', [h.healthRow()]);
+  assert.equal((await h.scheduler.select(input)).decision, 'allow');
+  assert.equal(liveReads(h.state.statements).length, 5);
+});
+
+test('native probe invalidates later prefetched health and independently re-reads after refresh', async () => {
+  for (const finalB of ['unhealthy', 'malformed'] as const) {
+    const h = nativeBatchSetup();
+    h.healthRows.set('a', [{ ...h.healthRow(), observed_at: new Date(NOW.getTime() - 60_001) }]);
+    h.store.tryAdmitHalfOpenProbe = async () => 'admitted';
+    h.store.recordRuntimeOutcome = async () => {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      h.healthRows.set('a', [h.healthRow()]);
+      h.healthRows.set('b', [{ ...h.healthRow(), state: finalB }]);
+      return 'applied';
+    };
+    const scheduler = new PostgresProviderAccountScheduler({
+      database: h.database,
+      leaseConcurrencyLimit: 2,
+      health: h.store,
+      now: () => NOW,
+      maxHealthAgeMs: 60_000,
+      healthProbe: {
+        store: h.store,
+        leaseProvider: { acquire: async () => ({ fencingToken: '9001', release: async () => {} }) },
+      },
+    });
+    const result = await scheduler.select(h.input([candidate('byok', 'a'), candidate('byok', 'b')]));
+    if (finalB === 'unhealthy') {
+      assert.equal(result.decision, 'allow');
+      if (result.decision === 'allow') assert.equal(result.value.accountId, 'a');
+    } else {
+      assert.equal(result.decision, 'block');
+    }
+    const reads = liveReads(h.state.statements);
+    assert.equal(reads.filter(({ sql }) => sql.includes('scheduling-batch')).length, 1);
+    assert.deepEqual(
+      reads
+        .filter(({ sql }) => sql.includes('FROM saas_provider_account_runtime_health'))
+        .map(({ values }) => values[1]),
+      ['a', 'b'],
+    );
+    const health = (scheduler as unknown as { scheduler: { dependencies: { health: object } } }).scheduler.dependencies
+      .health;
+    assert.deepEqual(Reflect.ownKeys(health).sort(), ['leaseProvider', 'maxHealthAgeMs', 'store']);
+  }
+});
+
+test('health batch observations expire at consumption, not at the batch read start', async () => {
+  const h = nativeBatchSetup();
+  let now = NOW;
+  await h.store.withSchedulingReadBatch({ caller: caller('byok'), candidates: [candidate('byok', 'a')] }, async () => {
+    now = new Date(NOW.getTime() + 60_001);
+    const view = await h.store.getSchedulingView({
+      caller: caller('byok'),
+      candidate: candidate('byok', 'a'),
+      now: NOW,
+      clock: () => now,
+    });
+    assert.equal(view.decision, 'block');
+    if (view.decision === 'block') assert.equal(view.code, 'stale');
+  });
+  assert.equal(liveReads(h.state.statements).length, 1);
+});
+
+test('health snapshot keys isolate caller/upstream, nested scopes, and async descendants after close', async () => {
+  const h = nativeBatchSetup();
+  const a = candidate('byok', 'a');
+  const get = (value = a) => h.store.getSchedulingView({ caller: caller('byok'), candidate: value, now: NOW });
+  let resume!: () => void;
+  const barrier = new Promise<void>((resolve) => {
+    resume = resolve;
+  });
+  let orphan!: Promise<ProviderAccountHealthSchedulingView>;
+  await h.store.withSchedulingReadBatch({ caller: caller('byok'), candidates: [a] }, async () => {
+    await h.store.withSchedulingReadBatch({ caller: caller('byok'), candidates: [a] }, async () => {
+      assert.equal((await get()).decision, 'allow');
+    });
+    assert.equal((await get({ ...a, upstreamId: 'different-upstream' })).decision, 'allow');
+    orphan = (async () => {
+      await barrier;
+      return get();
+    })();
+  });
+  h.healthRows.set('a', [{ ...h.healthRow(), state: 'unhealthy' }]);
+  resume();
+  const view = await orphan;
+  assert.equal(view.decision, 'allow');
+  if (view.decision === 'allow') assert.equal(view.value.status, 'unhealthy');
+  assert.equal(
+    liveReads(h.state.statements).length,
+    4,
+    'two batch scopes, wrong-upstream direct read, and late descendant direct read',
+  );
+});
+
+test('overlapping native health writes invalidate healthy snapshots in other request contexts', async () => {
+  for (const writerStartsFirst of [false, true]) {
+    const h = nativeBatchSetup();
+    const a = candidate('byok', 'a');
+    let finishWrite!: () => void;
+    let writeEntered!: () => void;
+    const writerBarrier = new Promise<void>((resolve) => {
+      finishWrite = resolve;
+    });
+    const started = new Promise<void>((resolve) => {
+      writeEntered = resolve;
+    });
+    h.database.queryReadCommitted = async <R>() => {
+      writeEntered();
+      await writerBarrier;
+      h.healthRows.set('a', [{ ...h.healthRow(), state: 'unhealthy' }]);
+      return { rows: [{ revision: '2' }] as R[], rowCount: 1 };
+    };
+    let continueRead!: () => void;
+    let snapshotReady!: () => void;
+    const readBarrier = new Promise<void>((resolve) => {
+      continueRead = resolve;
+    });
+    const ready = new Promise<void>((resolve) => {
+      snapshotReady = resolve;
+    });
+    const mutate = () =>
+      h.store.recordRuntimeOutcome({
+        candidate: a,
+        attemptId: 'mutation',
+        fencingToken: '2',
+        evidence: { source: 'gateway', result: 'success' },
+      });
+    let write: Promise<'applied' | 'stale'> | undefined;
+    if (writerStartsFirst) {
+      write = mutate();
+      await started;
+    }
+    const selection = h.store.withSchedulingReadBatch({ caller: caller('byok'), candidates: [a] }, async () => {
+      snapshotReady();
+      await readBarrier;
+      return h.store.getSchedulingView({ caller: caller('byok'), candidate: a, now: NOW });
+    });
+    await ready;
+    if (!write) write = mutate();
+    await started;
+    finishWrite();
+    assert.equal(await write, 'applied');
+    continueRead();
+    const result = await selection;
+    assert.equal(result.decision, 'allow');
+    if (result.decision === 'allow') assert.equal(result.value.status, 'unhealthy');
+    assert.equal(
+      liveReads(h.state.statements).length,
+      2,
+      'one initial batch then one post-mutation authoritative read',
+    );
+  }
+});
+
+test('a batch completing after a concurrent failed health writer cannot clear the newer failure latch', async () => {
+  const h = nativeBatchSetup();
+  const a = candidate('byok', 'a');
+  const query = h.database.query.bind(h.database);
+  let finishBatch!: () => void;
+  let batchEntered!: () => void;
+  const barrier = new Promise<void>((resolve) => {
+    finishBatch = resolve;
+  });
+  const started = new Promise<void>((resolve) => {
+    batchEntered = resolve;
+  });
+  h.database.query = async <R>(sql: string, values?: readonly unknown[]) => {
+    const result = await query<R>(sql, values);
+    if (sql.includes('scheduling-batch')) {
+      batchEntered();
+      await barrier;
+    }
+    return result;
+  };
+  h.database.queryReadCommitted = async () => {
+    throw new Error('write unavailable');
+  };
+  const selection = h.store.withSchedulingReadBatch({ caller: caller('byok'), candidates: [a] }, () =>
+    h.store.getSchedulingView({ caller: caller('byok'), candidate: a, now: NOW }),
+  );
+  await started;
+  await assert.rejects(() =>
+    h.store.recordRuntimeOutcome({
+      candidate: a,
+      attemptId: 'mutation',
+      fencingToken: '2',
+      evidence: { source: 'gateway', result: 'success' },
+    }),
+  );
+  finishBatch();
+  const result = await selection;
+  assert.equal(result.decision, 'block');
+  if (result.decision === 'block') assert.equal(result.code, 'unavailable');
+  assert.equal(liveReads(h.state.statements).length, 1);
+});
+
+test('health mutation invalidation is account-scoped and shared platform rows cross caller/upstream contexts', async () => {
+  const h = nativeBatchSetup('platform');
+  const a = candidate('platform', 'a');
+  const b = candidate('platform', 'b');
+  let ready!: () => void;
+  let resume!: () => void;
+  const started = new Promise<void>((resolve) => {
+    ready = resolve;
+  });
+  const barrier = new Promise<void>((resolve) => {
+    resume = resolve;
+  });
+  h.database.queryReadCommitted = async <R>() => {
+    h.healthRows.set('b', [{ ...h.healthRow(), state: 'unhealthy' }]);
+    return { rows: [{ revision: '2' }] as R[], rowCount: 1 };
+  };
+  const selection = h.store.withSchedulingReadBatch({ caller: caller('platform'), candidates: [a, b] }, async () => {
+    ready();
+    await barrier;
+    const first = await h.store.getSchedulingView({ caller: caller('platform'), candidate: a, now: NOW });
+    const second = await h.store.getSchedulingView({ caller: caller('platform'), candidate: b, now: NOW });
+    return [first, second];
+  });
+  await started;
+  await h.store.recordRuntimeOutcome({
+    candidate: { ...b, tenantId: 'other-platform-consumer', upstreamId: 'other-pool' },
+    attemptId: 'mutation',
+    fencingToken: '2',
+    evidence: { source: 'gateway', result: 'success' },
+  });
+  resume();
+  const [first, second] = await selection;
+  assert.equal(first.decision, 'allow');
+  assert.equal(second.decision, 'allow');
+  if (first.decision === 'allow') assert.equal(first.value.status, 'healthy');
+  if (second.decision === 'allow') assert.equal(second.value.status, 'unhealthy');
+  const reads = liveReads(h.state.statements);
+  assert.equal(reads.length, 2);
+  assert.equal(reads[1].values[1], 'b', 'unrelated account a keeps its live batch observation');
+});
+
+test('native sticky rechecks use a new concurrency snapshot after the busy slot clears', async () => {
+  const counts = new Map<string, unknown>([
+    ['a', '2'],
+    ['b', '0'],
+  ]);
+  const h = nativeBatchSetup(
+    'byok',
+    {
+      stickyWait: { maxWaitMs: 1000, maxQueueLength: 2, tickMs: 1 },
+      affinity: {
+        resolve: async () => {
+          counts.set('a', '0');
+          return { decision: 'allow', accountId: 'a' };
+        },
+        bind: async () => ({ decision: 'allow' }),
+      },
+    },
+    { inFlight: counts },
+  );
+  const result = await h.scheduler.select(
+    h.input([candidate('byok', 'a'), candidate('byok', 'b')], { previousResponseId: 'sticky-live' }),
+  );
+  assert.equal(result.decision, 'allow');
+  if (result.decision === 'allow') assert.equal(result.value.accountId, 'a');
+  assert.deepEqual(
+    liveReads(h.state.statements)
+      .filter(({ sql }) => sql.includes('concurrency'))
+      .map(({ values }) => values[2]),
+    [
+      ['a', 'b'],
+      ['a', 'b'],
+    ],
+  );
+});
+
+test('native binding contention does not reuse a newly unhealthy winner from the initial collection', async () => {
+  let h: ReturnType<typeof nativeBatchSetup>;
+  h = nativeBatchSetup('byok', {
+    affinity: {
+      resolve: async () => ({ decision: 'allow', accountId: 'a' }),
+      bind: async () => {
+        h.healthRows.set('b', [{ ...h.healthRow(), state: 'unhealthy' }]);
+        return {
+          decision: 'block',
+          reason: 'provider account affinity binding conflict',
+          contention: { kind: 'active_binding', accountId: 'b' },
+        };
+      },
+    },
+  });
+  const result = await h.scheduler.selectAndBind({
+    ...h.input([candidate('byok', 'a'), candidate('byok', 'b')], { previousResponseId: 'bind-live' }),
+    route: { ...nativeRoute('byok'), providerProtocol: 'openai', providerOperation: 'chat.completions' },
+  });
+  assert.equal(result.decision, 'block');
+  assert.deepEqual(
+    liveReads(h.state.statements)
+      .filter(({ sql }) => sql.includes('scheduling-batch'))
+      .map(({ values }) => values[1]),
+    [['a', 'b'], ['b']],
+  );
+  assert.equal(liveReads(h.state.statements).filter(({ sql }) => sql.includes('concurrency')).length, 1);
+});
+
+test('a latch-skipped health batch can recover after expiry without inventing a failed SQL observation', async (t) => {
+  const h = nativeBatchSetup();
+  const a = candidate('byok', 'a');
+  let now = 1_000;
+  t.mock.method(Date, 'now', () => now);
+  h.database.queryReadCommitted = async () => {
+    throw new Error('write unavailable');
+  };
+  await assert.rejects(() =>
+    h.store.recordRuntimeOutcome({
+      candidate: a,
+      attemptId: 'mutation',
+      fencingToken: '2',
+      evidence: { source: 'gateway', result: 'success' },
+    }),
+  );
+  await h.store.withSchedulingReadBatch({ caller: caller('byok'), candidates: [a] }, async () => {
+    assert.equal(liveReads(h.state.statements).length, 0, 'the live write-failure latch must suppress batch SQL');
+    const blocked = await h.store.getSchedulingView({ caller: caller('byok'), candidate: a, now: NOW });
+    assert.equal(blocked.decision, 'block');
+    if (blocked.decision === 'block') assert.equal(blocked.code, 'unavailable');
+    assert.equal(liveReads(h.state.statements).length, 0);
+    now = 2_001;
+    assert.equal(
+      (await h.store.getSchedulingView({ caller: caller('byok'), candidate: a, now: NOW })).decision,
+      'allow',
+    );
+    assert.equal(liveReads(h.state.statements).length, 1, 'expired latch permits one fresh direct read');
+  });
+});
+
+test('an actually failed health batch remains poisoned after the clock advances', async (t) => {
+  const h = nativeBatchSetup();
+  const candidates = ['a', 'b', 'c', 'd'].map((id) => candidate('byok', id));
+  let now = 1_000;
+  t.mock.method(Date, 'now', () => now);
+  h.failHealthBatch();
+  await h.store.withSchedulingReadBatch({ caller: caller('byok'), candidates }, async () => {
+    now = 2_001;
+    for (const value of candidates) {
+      const blocked = await h.store.getSchedulingView({ caller: caller('byok'), candidate: value, now: NOW });
+      assert.equal(blocked.decision, 'block');
+      if (blocked.decision === 'block') assert.equal(blocked.code, 'unavailable');
+    }
+  });
+  assert.equal(liveReads(h.state.statements).length, 1, 'failed SQL must not expand into N direct retries');
 });

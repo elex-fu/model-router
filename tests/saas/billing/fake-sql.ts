@@ -186,6 +186,9 @@ export class FakeBillingDatabase {
           freeze_frozen_at: freeze?.frozen_at ?? null,
           active_hold_minor_units: activeHolds.toString(),
           active_refund_freeze_minor_units: activeRefunds.toString(),
+          reservation_exists: this.state.reservations.some(
+            (row) => row.tenant_id === a && row.idempotency_namespace === c && row.business_key === d,
+          ),
         } as Row,
       ]);
     }
@@ -228,6 +231,13 @@ export class FakeBillingDatabase {
         {
           active_hold_minor_units: activeHolds.toString(),
           active_refund_freeze_minor_units: activeRefundFreezes.toString(),
+          ...(statement.includes('frozen.tenant_id')
+            ? {
+                freeze_tenant_id: this.state.freezes.find((row) => row.tenant_id === a)?.tenant_id ?? null,
+                freeze_reason_ref: this.state.freezes.find((row) => row.tenant_id === a)?.reason_ref ?? null,
+                freeze_frozen_at: this.state.freezes.find((row) => row.tenant_id === a)?.frozen_at ?? null,
+              }
+            : {}),
         } as Row,
       ]);
     }
@@ -239,6 +249,24 @@ export class FakeBillingDatabase {
     ) {
       const freeze = this.state.refundWalletFreezes.find((row) => row.refund_order_id === a);
       return result<Row>(freeze ? [freeze as Row] : []);
+    }
+
+    if (statement.startsWith('/* billing:locked-reservation-wallet */')) {
+      const reservation = this.state.reservations.find(
+        (row) => row.tenant_id === a && row.idempotency_namespace === b && row.business_key === c,
+      );
+      const wallet =
+        reservation &&
+        this.state.wallets.find((row) => row.id === reservation.wallet_id && row.tenant_id === a && row.currency === d);
+      if (!reservation || !wallet) return result<Row>();
+      return result<Row>([
+        {
+          ...reservation,
+          wallet_posted_balance_minor_units: wallet.posted_balance_minor_units,
+          wallet_created_at: wallet.created_at,
+          wallet_updated_at: wallet.updated_at,
+        } as Row,
+      ]);
     }
 
     if (statement.startsWith('select id, tenant_id, wallet_id, currency, request_id')) {
@@ -256,6 +284,7 @@ export class FakeBillingDatabase {
             (row.tenant_id === b && row.request_id === e && row.business_key === g),
         )
       ) {
+        if (statement.includes('on conflict do nothing')) return result<Row>();
         throw uniqueError();
       }
       const reservation: FakeReservation = {
@@ -330,7 +359,10 @@ export class FakeBillingDatabase {
       return result<Row>([reservation as Row]);
     }
 
-    if (statement.startsWith('insert into saas_ledger_transactions')) {
+    if (
+      statement.startsWith('insert into saas_ledger_transactions') ||
+      statement.startsWith('/* billing:post-ledger-pair */')
+    ) {
       const duplicate = this.state.transactions.some(
         (row) =>
           (row.tenant_id === b && row.idempotency_namespace === d && row.business_key === e) ||
@@ -352,6 +384,37 @@ export class FakeBillingDatabase {
         created_at: asString(l),
       };
       this.state.transactions.push(transaction);
+      if (statement.startsWith('/* billing:post-ledger-pair */')) {
+        const [walletEntryId, counterpartyEntryId, direction, walletId, opposite, accountType, accountRef] =
+          values.slice(12);
+        this.state.entries.push(
+          {
+            id: asString(walletEntryId),
+            transaction_id: transaction.id,
+            tenant_id: transaction.tenant_id,
+            currency: transaction.currency,
+            direction: asString(direction) as 'credit' | 'debit',
+            amount_minor_units: transaction.amount_minor_units,
+            account_type: 'wallet',
+            account_ref: asString(walletId),
+            wallet_id: asString(walletId),
+            created_at: transaction.created_at,
+          },
+          {
+            id: asString(counterpartyEntryId),
+            transaction_id: transaction.id,
+            tenant_id: transaction.tenant_id,
+            currency: transaction.currency,
+            direction: asString(opposite) as 'credit' | 'debit',
+            amount_minor_units: transaction.amount_minor_units,
+            account_type: asString(accountType),
+            account_ref: asString(accountRef),
+            wallet_id: null,
+            created_at: transaction.created_at,
+          },
+        );
+        return result<Row>([{ ...transaction, inserted_entry_count: '2' } as Row]);
+      }
       return result<Row>([transaction as Row]);
     }
 
@@ -383,7 +446,10 @@ export class FakeBillingDatabase {
       return result<Row>();
     }
 
-    if (statement.startsWith('update saas_wallets set posted_balance_minor_units = posted_balance_minor_units +')) {
+    if (
+      statement.startsWith('update saas_wallets set posted_balance_minor_units = posted_balance_minor_units +') ||
+      statement.startsWith('/* billing:project-ledger */')
+    ) {
       const wallet = this.state.wallets.find((row) => row.id === a && row.tenant_id === b && row.currency === c);
       if (!wallet) return result<Row>();
       const next = asBigInt(wallet.posted_balance_minor_units) + asBigInt(d);

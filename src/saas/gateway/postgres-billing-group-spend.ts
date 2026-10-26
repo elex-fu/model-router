@@ -7,6 +7,7 @@ import {
 } from '../billing/groups/spend-store.js';
 import type { SqlExecutor } from '../db/types.js';
 import type { SupplyMode } from './contracts.js';
+import { prepareFencedReservation } from './fenced-reservation-plan.js';
 
 /**
  * R1 billing-group spend admission (roadmap 1.3, phase 3): runs inside the
@@ -29,6 +30,7 @@ export interface BillingGroupSpendAdmissionFacts {
 
 export interface BillingGroupSpendAdmissionPort {
   reserve(executor: SqlExecutor, facts: BillingGroupSpendAdmissionFacts): Promise<void>;
+  prepareReserve?(executor: SqlExecutor, facts: BillingGroupSpendAdmissionFacts): Promise<() => Promise<void>>;
 }
 
 export interface PostgresBillingGroupSpendAdmissionOptions {
@@ -81,43 +83,65 @@ export function createPostgresBillingGroupSpendAdmission(
   if (typeof options?.now !== 'function') {
     throw new SaasBillingGroupsError('GROUP_SPEND_STORAGE_ERROR');
   }
+  const read = async (executor: SqlExecutor, facts: BillingGroupSpendAdmissionFacts) => {
+    if (facts.supplyMode !== 'platform') {
+      if (facts.charge !== null) {
+        throw new SaasBillingGroupsError('GROUP_SPEND_STORAGE_ERROR');
+      }
+      return null;
+    }
+    if (facts.charge === null) {
+      throw new SaasBillingGroupsError('GROUP_SPEND_STORAGE_ERROR');
+    }
+    const terms = await selectFrozenGroupSpendTerms(executor, facts.tenantId, facts.requestId);
+    if (terms === null) {
+      // A platform admission without its price snapshot is authority drift;
+      // fail closed rather than silently waiving the group ceilings.
+      throw new SaasBillingGroupsError('GROUP_SPEND_STORAGE_ERROR');
+    }
+    return { terms, windows: windowsFromTerms(terms) };
+  };
+  const apply = async (
+    executor: SqlExecutor,
+    facts: BillingGroupSpendAdmissionFacts,
+    plan: Awaited<ReturnType<typeof read>>,
+  ) => {
+    if (plan === null) return;
+    if (facts.charge === null) throw new SaasBillingGroupsError('GROUP_SPEND_STORAGE_ERROR');
+    const { terms, windows } = plan;
+    if (windows.length === 0) return;
+    const reserved = await reserveBillingGroupSpend(
+      executor,
+      {
+        tenantId: facts.tenantId,
+        requestId: facts.requestId,
+        billingGroupId: terms.billingGroupId,
+        windows,
+        chargeMinorUnits: facts.charge.amountMinorUnits,
+        chargeCurrency: facts.charge.currency,
+      },
+      options.now(),
+    );
+    for (const window of reserved) {
+      const verdict = evaluateBillingGroupSpendWindow(window);
+      if (!verdict.allowed) {
+        throw new BillingGroupSpendAdmissionDeniedError(window.kind);
+      }
+    }
+  };
+  const reserve = async (executor: SqlExecutor, facts: BillingGroupSpendAdmissionFacts) =>
+    apply(executor, facts, await read(executor, facts));
   return {
-    async reserve(executor, facts) {
-      if (facts.supplyMode !== 'platform') {
-        if (facts.charge !== null) {
-          throw new SaasBillingGroupsError('GROUP_SPEND_STORAGE_ERROR');
-        }
-        return;
-      }
-      if (facts.charge === null) {
-        throw new SaasBillingGroupsError('GROUP_SPEND_STORAGE_ERROR');
-      }
-      const terms = await selectFrozenGroupSpendTerms(executor, facts.tenantId, facts.requestId);
-      if (terms === null) {
-        // A platform admission without its price snapshot is authority drift;
-        // fail closed rather than silently waiving the group ceilings.
-        throw new SaasBillingGroupsError('GROUP_SPEND_STORAGE_ERROR');
-      }
-      const windows = windowsFromTerms(terms);
-      if (windows.length === 0) return;
-      const reserved = await reserveBillingGroupSpend(
+    reserve,
+    prepareReserve: (executor, facts) => {
+      const snapshot = structuredClone(facts);
+      return prepareFencedReservation(
         executor,
-        {
-          tenantId: facts.tenantId,
-          requestId: facts.requestId,
-          billingGroupId: terms.billingGroupId,
-          windows,
-          chargeMinorUnits: facts.charge.amountMinorUnits,
-          chargeCurrency: facts.charge.currency,
-        },
-        options.now(),
+        snapshot,
+        () => read(executor, snapshot),
+        (plan) => apply(executor, snapshot, plan),
+        () => reserve(executor, snapshot),
       );
-      for (const window of reserved) {
-        const verdict = evaluateBillingGroupSpendWindow(window);
-        if (!verdict.allowed) {
-          throw new BillingGroupSpendAdmissionDeniedError(window.kind);
-        }
-      }
     },
   };
 }

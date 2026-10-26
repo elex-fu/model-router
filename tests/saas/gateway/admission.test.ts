@@ -626,9 +626,9 @@ test('platform admission prelocks first and uses one executor for all admission 
     'prelock',
     'metering',
     'guard',
-    'rate-counter',
     'outbox',
     'audit',
+    'rate-counter',
     'billing',
   ]);
   assert.equal(
@@ -710,7 +710,7 @@ test('joins a caller-owned outer executor without opening a nested transaction',
   assert.equal(metering.executors[0], outer);
   assert.equal(guard.inputs[0]?.executor, outer);
   assert.equal(billing.calls[0]?.executor, outer);
-  assert.deepEqual(outer.state.events, ['prelock', 'metering', 'guard', 'rate-counter', 'outbox', 'audit', 'billing']);
+  assert.deepEqual(outer.state.events, ['prelock', 'metering', 'guard', 'outbox', 'audit', 'rate-counter', 'billing']);
 });
 
 test('caller monetary fields cannot override the guard hold facts', async () => {
@@ -1062,9 +1062,9 @@ test('a reservation failure propagates and rolls back request, idempotency, and 
     'prelock',
     'metering',
     'guard',
-    'rate-counter',
     'outbox',
     'audit',
+    'rate-counter',
   ]);
   assert.equal(database.commits, 0);
   assert.equal(database.rollbacks, 1);
@@ -1258,23 +1258,23 @@ test('a replayed admission never double counts account rate', async () => {
 });
 
 test('a rolled-back admission leaves no rate counter residue', async () => {
-  const { database, service } = createService();
-  database.state.failOutbox = true;
+  const { database, billing, service } = createService();
+  billing.error = new Error('injected billing failure');
 
-  await assert.rejects(service.admit(platformCommand()), /injected outbox failure/);
+  await assert.rejects(service.admit(platformCommand()), /injected billing failure/);
 
   assert.equal(database.commits, 0);
   assert.equal(database.rollbacks, 1);
   assert.equal(database.state.rateCounters.length, 0);
-  // The upsert did run inside the doomed transaction, before the outbox write.
-  // With the wallet hold reserved last, no billing fence was ever acquired.
+  // Metadata now precedes the counter, but a later billing failure must still
+  // roll the already-completed counter increment back with every durable fact.
   const executor = database.executors[0];
   const events = executor?.state.events ?? [];
   assert.ok(!events.includes('billing'));
   assert.ok(events.includes('rate-counter'));
-  assert.ok(!events.includes('audit'));
+  assert.ok(events.includes('audit'));
   const statements = executor?.statements.map(({ sql }) => sql) ?? [];
   const counterAt = statements.findIndex((sql) => sql.includes('saas_provider_account_rate_counters'));
   const outboxAt = statements.findIndex((sql) => sql.includes('saas_request_admission_outbox'));
-  assert.ok(counterAt !== -1 && outboxAt !== -1 && counterAt < outboxAt);
+  assert.ok(counterAt !== -1 && outboxAt !== -1 && outboxAt < counterAt);
 });

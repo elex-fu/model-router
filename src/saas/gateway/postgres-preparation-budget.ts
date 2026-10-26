@@ -10,6 +10,7 @@ import {
   selectKeyBudgetRollingChargeWindows,
 } from '../keys/budget-store.js';
 import type { SupplyMode } from './contracts.js';
+import { prepareFencedReservation } from './fenced-reservation-plan.js';
 
 /**
  * KEY-BUD admission coordination (contract C-4, migration 081). Runs inside the
@@ -40,6 +41,8 @@ export interface KeyBudgetAdmissionFacts {
 
 export interface KeyBudgetAdmissionPort {
   reserve(executor: SqlExecutor, facts: KeyBudgetAdmissionFacts): Promise<void>;
+  /** Read immutable policy under native admission fences; apply keeps the original mutable-lock position. */
+  prepareReserve?(executor: SqlExecutor, facts: KeyBudgetAdmissionFacts): Promise<() => Promise<void>>;
 }
 
 export class KeyBudgetAdmissionDeniedError extends Error {
@@ -70,155 +73,172 @@ function storageFailure(): never {
 
 export function createPostgresKeyBudgetAdmission(options: PostgresKeyBudgetAdmissionOptions): KeyBudgetAdmissionPort {
   if (typeof options?.now !== 'function') storageFailure();
-  return {
-    async reserve(executor, facts) {
-      if (!executor || !facts || typeof facts !== 'object') storageFailure();
-      const head = await selectKeyBudgetPolicyHead(executor, facts.tenantId, facts.projectId, facts.keyId);
-      // 081 backfills every pre-existing key and create() seeds every new one;
-      // a missing head is drift, and missing budget linkage only ever over-denies.
-      if (!head || head.tenantId !== facts.tenantId || head.projectId !== facts.projectId) {
-        storageFailure();
-      }
-      const day = keyBudgetUtcDayFrom(options.now());
-      const tokenUnits = keyBudgetTokenUnitsFromBounds(facts.payloadBounds);
-      const charge =
-        facts.supplyMode === 'platform' && facts.charge !== null
-          ? { currency: facts.charge.currency, amountMinorUnits: facts.charge.amountMinorUnits }
-          : null;
-      if (facts.supplyMode === 'byok' && facts.charge !== null) storageFailure();
+  const read = async (executor: SqlExecutor, facts: KeyBudgetAdmissionFacts) => {
+    if (!executor || !facts || typeof facts !== 'object') storageFailure();
+    const head = await selectKeyBudgetPolicyHead(executor, facts.tenantId, facts.projectId, facts.keyId);
+    // The admission guard holds the key writer's shared authority fences.
+    if (!head || head.tenantId !== facts.tenantId || head.projectId !== facts.projectId) storageFailure();
+    return { head, tokenUnits: keyBudgetTokenUnitsFromBounds(facts.payloadBounds) };
+  };
+  const apply = async (
+    executor: SqlExecutor,
+    facts: KeyBudgetAdmissionFacts,
+    { head, tokenUnits }: Awaited<ReturnType<typeof read>>,
+  ) => {
+    // Time is deliberately sampled after the earlier hot-lock waits, not during planning.
+    const day = keyBudgetUtcDayFrom(options.now());
+    const charge =
+      facts.supplyMode === 'platform' && facts.charge !== null
+        ? { currency: facts.charge.currency, amountMinorUnits: facts.charge.amountMinorUnits }
+        : null;
+    if (facts.supplyMode === 'byok' && facts.charge !== null) storageFailure();
 
-      const reserved = await reserveKeyBudgetCounters(executor, {
+    const reserved = await reserveKeyBudgetCounters(executor, {
+      tenantId: facts.tenantId,
+      projectId: facts.projectId,
+      lineageId: head.lineageId,
+      requestId: facts.requestId,
+      day,
+      tokenUnits,
+      chargeMinorUnits: charge?.amountMinorUnits ?? '0',
+      chargeCurrency: charge?.currency ?? null,
+    });
+
+    const tokenUsage = {
+      daily: {
+        settled: reserved.daily.settled,
+        outstandingReserved: subtract(reserved.daily.outstandingReserved, tokenUnits),
+        newReservation: tokenUnits,
+      },
+      lifetime: {
+        settled: reserved.lifetime.settled,
+        outstandingReserved: subtract(reserved.lifetime.outstandingReserved, tokenUnits),
+        newReservation: tokenUnits,
+      },
+    };
+    const chargeCapsConfigured = head.chargeDaily !== null || head.chargeLifetime !== null;
+    const chargeCurrency = charge?.currency ?? reserved.chargeCurrency;
+    if (facts.supplyMode === 'platform' && chargeCapsConfigured && chargeCurrency === null) {
+      storageFailure();
+    }
+
+    const verdict = evaluateProxyKeyBudgetAdmission(
+      facts.supplyMode === 'byok'
+        ? {
+            supplyMode: 'byok',
+            tokenCaps: { daily: head.tokenDaily, lifetime: head.tokenLifetime },
+          }
+        : {
+            supplyMode: 'platform',
+            tokenCaps: { daily: head.tokenDaily, lifetime: head.tokenLifetime },
+            ...(chargeCapsConfigured
+              ? {
+                  customerChargeCaps: {
+                    currency: chargeCurrency as string,
+                    daily: head.chargeDaily,
+                    lifetime: head.chargeLifetime,
+                  },
+                }
+              : {}),
+          },
+      facts.supplyMode === 'byok'
+        ? { supplyMode: 'byok', tokenUsage }
+        : {
+            supplyMode: 'platform',
+            tokenUsage,
+            ...(chargeCapsConfigured
+              ? {
+                  customerChargeUsage: {
+                    currency: chargeCurrency as string,
+                    daily: {
+                      settled: reserved.daily.charge.settled,
+                      outstandingReserved: subtract(
+                        reserved.daily.charge.outstandingReserved,
+                        charge?.amountMinorUnits ?? '0',
+                      ),
+                      newReservation: charge?.amountMinorUnits ?? '0',
+                    },
+                    lifetime: {
+                      settled: reserved.lifetime.charge.settled,
+                      outstandingReserved: subtract(
+                        reserved.lifetime.charge.outstandingReserved,
+                        charge?.amountMinorUnits ?? '0',
+                      ),
+                      newReservation: charge?.amountMinorUnits ?? '0',
+                    },
+                  },
+                }
+              : {}),
+          },
+    );
+    if (!verdict.allowed) {
+      throw new KeyBudgetAdmissionDeniedError(verdict.deniedDimension);
+    }
+
+    // R1 (roadmap 1.3, phase 3): the rolling 5h/7d USD windows. The
+    // trailing ledger sum already includes this request's reservation (the
+    // reserve above inserted it), so the new reservation is re-exposed the
+    // same way the daily/lifetime windows do. Only platform charges apply;
+    // caps are optional and absent means unlimited.
+    const rollingCapsConfigured = head.charge5h !== null || head.charge7d !== null;
+    if (facts.supplyMode === 'platform' && rollingCapsConfigured) {
+      if (charge === null) storageFailure();
+      const rollingChargeCurrency = charge?.currency ?? reserved.chargeCurrency;
+      if (rollingChargeCurrency === null) storageFailure();
+      const rolling = await selectKeyBudgetRollingChargeWindows(executor, {
         tenantId: facts.tenantId,
-        projectId: facts.projectId,
         lineageId: head.lineageId,
-        requestId: facts.requestId,
-        day,
-        tokenUnits,
-        chargeMinorUnits: charge?.amountMinorUnits ?? '0',
-        chargeCurrency: charge?.currency ?? null,
+        chargeCurrency: rollingChargeCurrency as string,
+        now: options.now(),
       });
-
-      const tokenUsage = {
-        daily: {
-          settled: reserved.daily.settled,
-          outstandingReserved: subtract(reserved.daily.outstandingReserved, tokenUnits),
-          newReservation: tokenUnits,
+      const chargeAmount = charge?.amountMinorUnits ?? '0';
+      const rollingVerdict = evaluateProxyKeyBudgetAdmission(
+        {
+          supplyMode: 'platform',
+          tokenCaps: { daily: null, lifetime: null },
+          customerChargeCaps: {
+            currency: rollingChargeCurrency as string,
+            daily: null,
+            lifetime: null,
+            fiveHour: head.charge5h,
+            sevenDay: head.charge7d,
+          },
         },
-        lifetime: {
-          settled: reserved.lifetime.settled,
-          outstandingReserved: subtract(reserved.lifetime.outstandingReserved, tokenUnits),
-          newReservation: tokenUnits,
+        {
+          supplyMode: 'platform',
+          customerChargeUsage: {
+            currency: rollingChargeCurrency as string,
+            fiveHour: {
+              settled: '0',
+              outstandingReserved: subtract(rolling.fiveHour, chargeAmount),
+              newReservation: chargeAmount,
+            },
+            sevenDay: {
+              settled: '0',
+              outstandingReserved: subtract(rolling.sevenDay, chargeAmount),
+              newReservation: chargeAmount,
+            },
+          },
         },
-      };
-      const chargeCapsConfigured = head.chargeDaily !== null || head.chargeLifetime !== null;
-      const chargeCurrency = charge?.currency ?? reserved.chargeCurrency;
-      if (facts.supplyMode === 'platform' && chargeCapsConfigured && chargeCurrency === null) {
-        storageFailure();
-      }
-
-      const verdict = evaluateProxyKeyBudgetAdmission(
-        facts.supplyMode === 'byok'
-          ? {
-              supplyMode: 'byok',
-              tokenCaps: { daily: head.tokenDaily, lifetime: head.tokenLifetime },
-            }
-          : {
-              supplyMode: 'platform',
-              tokenCaps: { daily: head.tokenDaily, lifetime: head.tokenLifetime },
-              ...(chargeCapsConfigured
-                ? {
-                    customerChargeCaps: {
-                      currency: chargeCurrency as string,
-                      daily: head.chargeDaily,
-                      lifetime: head.chargeLifetime,
-                    },
-                  }
-                : {}),
-            },
-        facts.supplyMode === 'byok'
-          ? { supplyMode: 'byok', tokenUsage }
-          : {
-              supplyMode: 'platform',
-              tokenUsage,
-              ...(chargeCapsConfigured
-                ? {
-                    customerChargeUsage: {
-                      currency: chargeCurrency as string,
-                      daily: {
-                        settled: reserved.daily.charge.settled,
-                        outstandingReserved: subtract(
-                          reserved.daily.charge.outstandingReserved,
-                          charge?.amountMinorUnits ?? '0',
-                        ),
-                        newReservation: charge?.amountMinorUnits ?? '0',
-                      },
-                      lifetime: {
-                        settled: reserved.lifetime.charge.settled,
-                        outstandingReserved: subtract(
-                          reserved.lifetime.charge.outstandingReserved,
-                          charge?.amountMinorUnits ?? '0',
-                        ),
-                        newReservation: charge?.amountMinorUnits ?? '0',
-                      },
-                    },
-                  }
-                : {}),
-            },
       );
-      if (!verdict.allowed) {
-        throw new KeyBudgetAdmissionDeniedError(verdict.deniedDimension);
+      if (!rollingVerdict.allowed) {
+        throw new KeyBudgetAdmissionDeniedError(rollingVerdict.deniedDimension);
       }
-
-      // R1 (roadmap 1.3, phase 3): the rolling 5h/7d USD windows. The
-      // trailing ledger sum already includes this request's reservation (the
-      // reserve above inserted it), so the new reservation is re-exposed the
-      // same way the daily/lifetime windows do. Only platform charges apply;
-      // caps are optional and absent means unlimited.
-      const rollingCapsConfigured = head.charge5h !== null || head.charge7d !== null;
-      if (facts.supplyMode === 'platform' && rollingCapsConfigured) {
-        if (charge === null) storageFailure();
-        const rollingChargeCurrency = charge?.currency ?? reserved.chargeCurrency;
-        if (rollingChargeCurrency === null) storageFailure();
-        const rolling = await selectKeyBudgetRollingChargeWindows(executor, {
-          tenantId: facts.tenantId,
-          lineageId: head.lineageId,
-          chargeCurrency: rollingChargeCurrency as string,
-          now: options.now(),
-        });
-        const chargeAmount = charge?.amountMinorUnits ?? '0';
-        const rollingVerdict = evaluateProxyKeyBudgetAdmission(
-          {
-            supplyMode: 'platform',
-            tokenCaps: { daily: null, lifetime: null },
-            customerChargeCaps: {
-              currency: rollingChargeCurrency as string,
-              daily: null,
-              lifetime: null,
-              fiveHour: head.charge5h,
-              sevenDay: head.charge7d,
-            },
-          },
-          {
-            supplyMode: 'platform',
-            customerChargeUsage: {
-              currency: rollingChargeCurrency as string,
-              fiveHour: {
-                settled: '0',
-                outstandingReserved: subtract(rolling.fiveHour, chargeAmount),
-                newReservation: chargeAmount,
-              },
-              sevenDay: {
-                settled: '0',
-                outstandingReserved: subtract(rolling.sevenDay, chargeAmount),
-                newReservation: chargeAmount,
-              },
-            },
-          },
-        );
-        if (!rollingVerdict.allowed) {
-          throw new KeyBudgetAdmissionDeniedError(rollingVerdict.deniedDimension);
-        }
-      }
+    }
+  };
+  const reserve = async (executor: SqlExecutor, facts: KeyBudgetAdmissionFacts) =>
+    apply(executor, facts, await read(executor, facts));
+  return {
+    reserve,
+    prepareReserve: (executor, facts) => {
+      const snapshot = structuredClone(facts);
+      return prepareFencedReservation(
+        executor,
+        snapshot,
+        () => read(executor, snapshot),
+        (plan) => apply(executor, snapshot, plan),
+        () => reserve(executor, snapshot),
+      );
     },
   };
 }

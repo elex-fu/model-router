@@ -348,6 +348,20 @@ export interface ProviderAccountSchedulerDependencies {
   readonly health?: ProviderAccountSchedulerHealthPort;
   /** Capacity observation; the fenced lease remains the final authority. */
   readonly concurrency?: ProviderAccountSchedulerConcurrencyPort;
+  /**
+   * Native-only, collection-scoped live read batching. Eligibility/hint gates
+   * run first; only health-admitted candidates enter the concurrency scope.
+   * Custom ports omit this and keep the original sequential check order.
+   * Every retry/rescue/reconciliation collection opens independent scopes.
+   */
+  readonly candidateReadScope?: <T>(
+    input: {
+      readonly phase: 'health' | 'concurrency';
+      readonly caller: RequestPreparationCaller;
+      readonly candidates: readonly RequestPreparationCandidateAuthority[];
+    },
+    work: () => Promise<T>,
+  ) => Promise<T>;
   /** Required whenever the request carries an affinity reference. */
   readonly affinity?: ProviderAccountSchedulerAffinityPort;
   /**
@@ -2043,6 +2057,112 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
       return { outcome: 'blocked', reason: 'provider account scheduler storage ports are unavailable' };
     }
 
+    const batchScope = this.dependencies.candidateReadScope;
+    type AllowedEligibility = Extract<ProviderAccountSchedulerEligibilityDecision, { decision: 'allow' }>;
+    type AllowedHealth = Exclude<ReturnType<typeof healthValue>, 'block' | 'deny'>;
+    type Blocked = { readonly outcome: 'blocked'; readonly reason: string };
+    const validated: { eligibility: AllowedEligibility; candidateValue: RequestPreparationCandidateAuthority }[] = [];
+    const healthAdmitted: {
+      eligibility: AllowedEligibility;
+      candidateValue: RequestPreparationCandidateAuthority;
+      healthResult: AllowedHealth;
+    }[] = [];
+    const checkConcurrency = async (
+      eligibility: AllowedEligibility,
+      candidateValue: RequestPreparationCandidateAuthority,
+      healthResult: AllowedHealth,
+    ): Promise<Blocked | null> => {
+      const concurrency = await concurrencyPort.get({
+        caller: input.caller,
+        candidate: eligibility.candidate,
+        requestId: input.requestId,
+        now,
+      });
+      if (
+        !isRecord(concurrency) ||
+        (concurrency.decision !== 'allow' && concurrency.decision !== 'deny' && concurrency.decision !== 'block')
+      ) {
+        return { outcome: 'blocked', reason: 'provider account concurrency authority returned an invalid decision' };
+      }
+      if (concurrency.decision === 'block') return { outcome: 'blocked', reason: concurrency.reason };
+      if (concurrency.decision === 'deny') {
+        busySkipped.push(candidateValue);
+        return null;
+      }
+      if (
+        !isRecord(concurrency.value) ||
+        !nonNegativeInteger(concurrency.value.inFlight) ||
+        !positiveInteger(concurrency.value.limit)
+      ) {
+        return { outcome: 'blocked', reason: 'provider account concurrency authority is invalid' };
+      }
+      if (concurrency.value.inFlight >= concurrency.value.limit) {
+        busySkipped.push(candidateValue);
+        return null;
+      }
+
+      eligible.push({
+        candidate: eligibility.candidate,
+        priority: eligibility.priority,
+        weight: eligibility.weight,
+        inFlight: concurrency.value.inFlight,
+        concurrencyLimit: concurrency.value.limit,
+        healthRank: healthResult.rank,
+        accountId: eligibility.candidate.accountId,
+        route: eligibility.route,
+        // R7 scheduling signals: absent columns/ports stay null and every
+        // strategy skips the candidate, preserving pre-R7 behavior.
+        soonestResetAt: date(eligibility.scheduling?.soonestResetAt),
+        soonestResetObservedAt: date(eligibility.scheduling?.soonestResetObservedAt),
+        supplierCost:
+          eligibility.scheduling?.supplierCostRate === undefined || eligibility.scheduling?.supplierCostRate === null
+            ? null
+            : {
+                numeratorMinorUnits: exactNonNegativeInteger(
+                  eligibility.scheduling.supplierCostRate.numeratorMinorUnits,
+                ) as bigint,
+                denominatorUnits: exactNonNegativeInteger(
+                  eligibility.scheduling.supplierCostRate.denominatorUnits,
+                ) as bigint,
+              },
+        lastUsedAt: healthResult.observedAt,
+        latencyMs: healthResult.latencyMs,
+        // F2: the billing-group pool tier; null keeps the ranking exactly
+        // the pre-F2 priority/health chain (golden-fixture red line).
+        groupPriority: groupPoolPrioritySignal(eligibility.scheduling?.groupPoolPriority),
+      });
+      return null;
+    };
+    const checkHealth = async (
+      eligibility: AllowedEligibility,
+      candidateValue: RequestPreparationCandidateAuthority,
+    ): Promise<Blocked | null> => {
+      const health = await healthPort.get({
+        caller: input.caller,
+        candidate: eligibility.candidate,
+        now,
+        clock: this.now,
+      });
+      const healthNow = this.now();
+      if (!(healthNow instanceof Date) || !Number.isFinite(healthNow.getTime())) {
+        return { outcome: 'blocked', reason: 'provider account health clock is unavailable' };
+      }
+      const healthResult = healthValue(health, healthNow, this.maxHealthAgeMs);
+      if (healthResult === 'block') {
+        return { outcome: 'blocked', reason: 'provider account health authority is unavailable' };
+      }
+      if (healthResult === 'deny') {
+        healthDenied += 1;
+        return null;
+      }
+
+      if (batchScope) {
+        healthAdmitted.push({ eligibility, candidateValue, healthResult });
+        return null;
+      }
+      return checkConcurrency(eligibility, candidateValue, healthResult);
+    };
+
     for (const candidate of candidates) {
       const rawCandidate: unknown = candidate;
       if (!isRecord(rawCandidate) || !nonEmpty(rawCandidate.accountId)) {
@@ -2132,84 +2252,47 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
         }
       }
 
-      const health = await healthPort.get({
-        caller: input.caller,
-        candidate: eligibility.candidate,
-        now,
-        clock: this.now,
-      });
-      const healthNow = this.now();
-      if (!(healthNow instanceof Date) || !Number.isFinite(healthNow.getTime())) {
-        return { outcome: 'blocked', reason: 'provider account health clock is unavailable' };
+      if (batchScope) {
+        validated.push({ eligibility, candidateValue });
+      } else {
+        const blocked = await checkHealth(eligibility, candidateValue);
+        if (blocked) return blocked;
       }
-      const healthResult = healthValue(health, healthNow, this.maxHealthAgeMs);
-      if (healthResult === 'block') {
-        return { outcome: 'blocked', reason: 'provider account health authority is unavailable' };
-      }
-      if (healthResult === 'deny') {
-        healthDenied += 1;
-        continue;
-      }
+    }
 
-      const concurrency = await concurrencyPort.get({
-        caller: input.caller,
-        candidate: eligibility.candidate,
-        requestId: input.requestId,
-        now,
-      });
-      if (
-        !isRecord(concurrency) ||
-        (concurrency.decision !== 'allow' && concurrency.decision !== 'deny' && concurrency.decision !== 'block')
-      ) {
-        return { outcome: 'blocked', reason: 'provider account concurrency authority returned an invalid decision' };
+    if (batchScope && validated.length > 0) {
+      const healthBlocked = await batchScope(
+        {
+          phase: 'health',
+          caller: input.caller,
+          candidates: validated.map(({ eligibility }) => eligibility.candidate),
+        },
+        async () => {
+          for (const { eligibility, candidateValue } of validated) {
+            const blocked = await checkHealth(eligibility, candidateValue);
+            if (blocked) return blocked;
+          }
+          return null;
+        },
+      );
+      if (healthBlocked) return healthBlocked;
+      if (healthAdmitted.length > 0) {
+        const concurrencyBlocked = await batchScope(
+          {
+            phase: 'concurrency',
+            caller: input.caller,
+            candidates: healthAdmitted.map(({ eligibility }) => eligibility.candidate),
+          },
+          async () => {
+            for (const { eligibility, candidateValue, healthResult } of healthAdmitted) {
+              const blocked = await checkConcurrency(eligibility, candidateValue, healthResult);
+              if (blocked) return blocked;
+            }
+            return null;
+          },
+        );
+        if (concurrencyBlocked) return concurrencyBlocked;
       }
-      if (concurrency.decision === 'block') return { outcome: 'blocked', reason: concurrency.reason };
-      if (concurrency.decision === 'deny') {
-        busySkipped.push(candidateValue);
-        continue;
-      }
-      if (
-        !isRecord(concurrency.value) ||
-        !nonNegativeInteger(concurrency.value.inFlight) ||
-        !positiveInteger(concurrency.value.limit)
-      ) {
-        return { outcome: 'blocked', reason: 'provider account concurrency authority is invalid' };
-      }
-      if (concurrency.value.inFlight >= concurrency.value.limit) {
-        busySkipped.push(candidateValue);
-        continue;
-      }
-
-      eligible.push({
-        candidate: eligibility.candidate,
-        priority: eligibility.priority,
-        weight: eligibility.weight,
-        inFlight: concurrency.value.inFlight,
-        concurrencyLimit: concurrency.value.limit,
-        healthRank: healthResult.rank,
-        accountId: eligibility.candidate.accountId,
-        route: eligibility.route,
-        // R7 scheduling signals: absent columns/ports stay null and every
-        // strategy skips the candidate, preserving pre-R7 behavior.
-        soonestResetAt: date(eligibility.scheduling?.soonestResetAt),
-        soonestResetObservedAt: date(eligibility.scheduling?.soonestResetObservedAt),
-        supplierCost:
-          eligibility.scheduling?.supplierCostRate === undefined || eligibility.scheduling?.supplierCostRate === null
-            ? null
-            : {
-                numeratorMinorUnits: exactNonNegativeInteger(
-                  eligibility.scheduling.supplierCostRate.numeratorMinorUnits,
-                ) as bigint,
-                denominatorUnits: exactNonNegativeInteger(
-                  eligibility.scheduling.supplierCostRate.denominatorUnits,
-                ) as bigint,
-              },
-        lastUsedAt: healthResult.observedAt,
-        latencyMs: healthResult.latencyMs,
-        // F2: the billing-group pool tier; null keeps the ranking exactly
-        // the pre-F2 priority/health chain (golden-fixture red line).
-        groupPriority: groupPoolPrioritySignal(eligibility.scheduling?.groupPoolPriority),
-      });
     }
 
     return {

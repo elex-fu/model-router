@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { queryReadCommitted } from '../db/atomic-statement.js';
 import type { SaasDatabase, SqlExecutor } from '../db/types.js';
 import { parseHealthScoreColumn } from './health-score.js';
@@ -250,6 +251,38 @@ const READ_SCHEDULING_SQL = `
      AND account_id = $2
      AND owner_kind = $3
      AND owner_tenant_id IS NOT DISTINCT FROM $4`;
+
+/** A read-only, exact-key snapshot for one validated candidate collection. */
+const READ_SCHEDULING_BATCH_SQL = `/* provider-account-runtime-health:scheduling-batch */
+  SELECT requested.request_index, health.state, health.observed_at, health.cooldown_until,
+         health.failure_count, health.health_score, health.half_open_probe_at
+    FROM unnest($1::text[], $2::text[], $3::text[], $4::uuid[])
+         WITH ORDINALITY AS requested(owner_scope_key, account_id, owner_kind, owner_tenant_id, request_index)
+    JOIN ${HEALTH_TABLE} health
+      ON health.owner_scope_key = requested.owner_scope_key
+     AND health.account_id = requested.account_id
+     AND health.owner_kind = requested.owner_kind
+     AND health.owner_tenant_id IS NOT DISTINCT FROM requested.owner_tenant_id`;
+
+interface InitialHealthRead {
+  readonly rows: SchedulingHealthRow[];
+  readonly failed: boolean;
+}
+
+interface HealthReadEpoch {
+  version: number;
+  readers: number;
+}
+
+function mutationKey(scope: HealthScope): string {
+  return JSON.stringify([scope.ownerKind, scope.ownerTenantId, scope.accountId]);
+}
+
+function initialHealthKey(scope: HealthScope): string {
+  // Even shared platform rows cannot leak observations between caller/upstream
+  // contexts. These keys live only for this collection, never across requests.
+  return JSON.stringify([scope.tenantId, scope.ownerKind, scope.ownerTenantId, scope.accountId, scope.upstreamId]);
+}
 
 /*
  * R7/D6: the binary state/failure_count/cooldown expressions are unchanged;
@@ -567,6 +600,15 @@ export class PostgresProviderAccountRuntimeHealthStore
     ProviderAccountHealthSchedulingPort,
     ProviderAccountHalfOpenProbeAdmissionPort
 {
+  #writeFailureEpoch = 0;
+  // Invalidation tokens only, not observations. Entries exist only while a
+  // batch is active; unrelated accounts do not invalidate each other's reads.
+  readonly #readEpochs = new Map<string, HealthReadEpoch>();
+  readonly #initialReads = new AsyncLocalStorage<{
+    active: boolean;
+    epochs: Map<string, { state: HealthReadEpoch; version: number }>;
+    reads: Map<string, InitialHealthRead>;
+  }>();
   private readonly database: SaasDatabase;
   private readonly maxHealthAgeMs: number;
   /** H5b: epoch-ms deadline of the bounded write-failure latch; 0 = not latched. */
@@ -589,8 +631,122 @@ export class PostgresProviderAccountRuntimeHealthStore
     this.database = options.database;
   }
 
+  /**
+   * Native scheduler optimization, not an authority cache. Each row is consumed
+   * once and decoded against the caller's fresh clock. Probe refreshes and all
+   * subsequent reads therefore go directly to PostgreSQL, even after failure.
+   */
+  async withSchedulingReadBatch<T>(
+    input: {
+      readonly caller: RequestPreparationCaller;
+      readonly candidates: readonly ProviderAccountHealthSchedulingCandidate[];
+    },
+    work: () => Promise<T>,
+  ): Promise<T> {
+    const failureEpoch = this.#writeFailureEpoch;
+    const scopes = input.candidates.flatMap((candidate) => {
+      const scope = accountScope(candidate, input.caller);
+      return scope ? [scope] : [];
+    });
+    const reads = new Map<string, InitialHealthRead>();
+    const epochs = new Map<string, { state: HealthReadEpoch; version: number }>();
+    const retained = new Map<string, HealthReadEpoch>();
+    for (const scope of scopes) {
+      const key = mutationKey(scope);
+      let state = retained.get(key);
+      if (!state) {
+        state = this.#readEpochs.get(key) ?? { version: 0, readers: 0 };
+        state.readers += 1;
+        this.#readEpochs.set(key, state);
+        retained.set(key, state);
+      }
+      const readKey = initialHealthKey(scope);
+      epochs.set(readKey, { state, version: state.version });
+    }
+    if (scopes.length > 0 && Date.now() >= this.writeFailedUntil) {
+      // Poison only an attempted batch. If the prior write-failure latch
+      // skipped SQL, get() must still be able to recover with a fresh read
+      // once that latch expires instead of consuming an invented failure.
+      for (const scope of scopes) reads.set(initialHealthKey(scope), { rows: [], failed: true });
+      try {
+        const result = await this.database.query<SchedulingHealthRow & { request_index: unknown }>(
+          READ_SCHEDULING_BATCH_SQL,
+          [
+            scopes.map((scope) => scope.ownerScopeKey),
+            scopes.map((scope) => scope.accountId),
+            scopes.map((scope) => scope.ownerKind),
+            scopes.map((scope) => scope.ownerTenantId),
+          ],
+        );
+        const grouped = scopes.map(() => [] as SchedulingHealthRow[]);
+        for (const row of result.rows) {
+          const index =
+            typeof row.request_index === 'string' && /^[1-9][0-9]*$/.test(row.request_index)
+              ? Number(row.request_index)
+              : row.request_index;
+          if (typeof index !== 'number' || !Number.isSafeInteger(index) || index < 1 || index > scopes.length) {
+            throw new TypeError('invalid health batch row index');
+          }
+          grouped[index - 1].push(row);
+        }
+        for (let i = 0; i < scopes.length; i++) {
+          // Duplicate result rows are malformed, not a cold-start opportunity.
+          if (grouped[i].length > 1) throw new TypeError('duplicate health batch row');
+        }
+        // A SELECT started before a failing mutation cannot clear that newer
+        // failure latch merely because its old snapshot completed afterward.
+        if (failureEpoch === this.#writeFailureEpoch) this.storageRecovered();
+        for (let i = 0; i < scopes.length; i++) {
+          reads.set(initialHealthKey(scopes[i]), { rows: grouped[i], failed: false });
+        }
+      } catch {
+        // Poison every requested observation. Do not turn one failed batch
+        // into N direct reads or treat the failure as a missing health row.
+      }
+    }
+    const context = { active: true, epochs, reads };
+    try {
+      return await this.#initialReads.run(context, work);
+    } finally {
+      context.active = false;
+      reads.clear(); // Async descendants cannot consume after this collection.
+      epochs.clear();
+      for (const [key, state] of retained) {
+        state.readers -= 1;
+        if (state.readers === 0 && this.#readEpochs.get(key) === state) this.#readEpochs.delete(key);
+      }
+    }
+  }
+
+  /** Recovery may have awaited new durable evidence for any later candidate. */
+  discardSchedulingReadBatch(): void {
+    this.#initialReads.getStore()?.reads.clear();
+  }
+
+  #takeInitialRead(scope: HealthScope): InitialHealthRead | undefined {
+    const context = this.#initialReads.getStore();
+    const reads = context?.active ? context.reads : undefined;
+    const key = initialHealthKey(scope);
+    const read = reads?.get(key);
+    const epoch = context?.epochs.get(key);
+    if (read && !read.failed && epoch && epoch.version !== epoch.state.version) {
+      // A health mutation in another concurrent request must invalidate this
+      // snapshot too. Batch failures stay failures, never a direct-read retry.
+      reads?.delete(key);
+      return undefined;
+    }
+    reads?.delete(key);
+    return read;
+  }
+
+  #noteMutation(scope: HealthScope): void {
+    const epoch = this.#readEpochs.get(mutationKey(scope));
+    if (epoch) epoch.version += 1;
+  }
+
   /** H5b: a failed write latches fail-closed for a bounded, doubling window. */
   private storageFailed(): void {
+    this.#writeFailureEpoch += 1;
     this.writeFailureCount += 1;
     const backoffMs = Math.min(
       WRITE_FAILURE_LATCH_MAX_MS,
@@ -623,13 +779,17 @@ export class PostgresProviderAccountRuntimeHealthStore
       return { decision: 'block', reason: 'provider account runtime health input is invalid' };
     }
     try {
-      const result = await this.database.query<RuntimeHealthRow>(READ_HEALTH_SQL, [
-        scope.ownerScopeKey,
-        scope.accountId,
-        scope.ownerKind,
-        scope.ownerTenantId,
-      ]);
-      this.storageRecovered();
+      const initial = this.#takeInitialRead(scope);
+      if (initial?.failed) throw new Error('initial health batch unavailable');
+      const result =
+        initial ??
+        (await this.database.query<RuntimeHealthRow>(READ_HEALTH_SQL, [
+          scope.ownerScopeKey,
+          scope.accountId,
+          scope.ownerKind,
+          scope.ownerTenantId,
+        ]));
+      if (!initial) this.storageRecovered();
       const now = healthReadTime(input);
       if (now === null) return { decision: 'block', reason: 'provider account runtime health input is invalid' };
       if (result.rows.length !== 1) {
@@ -690,13 +850,17 @@ export class PostgresProviderAccountRuntimeHealthStore
       return { decision: 'block', reason: 'provider account runtime health input is invalid', code: 'input' };
     }
     try {
-      const result = await this.database.query<SchedulingHealthRow>(READ_SCHEDULING_SQL, [
-        scope.ownerScopeKey,
-        scope.accountId,
-        scope.ownerKind,
-        scope.ownerTenantId,
-      ]);
-      this.storageRecovered();
+      const initial = this.#takeInitialRead(scope);
+      if (initial?.failed) throw new Error('initial health batch unavailable');
+      const result =
+        initial ??
+        (await this.database.query<SchedulingHealthRow>(READ_SCHEDULING_SQL, [
+          scope.ownerScopeKey,
+          scope.accountId,
+          scope.ownerKind,
+          scope.ownerTenantId,
+        ]));
+      if (!initial) this.storageRecovered();
       const now = healthReadTime(input);
       if (now === null) {
         return { decision: 'block', reason: 'provider account runtime health input is invalid', code: 'input' };
@@ -778,9 +942,11 @@ export class PostgresProviderAccountRuntimeHealthStore
     readonly fencingToken: string;
     readonly evidence: ProviderAccountRuntimeHealthEvidence;
   }): Promise<'applied' | 'stale'> {
+    this.discardSchedulingReadBatch();
     const scope = accountScope(input?.candidate);
     const evidence = normalizedEvidence(input?.evidence);
     if (!scope || !nonEmpty(input?.attemptId) || !validFence(input?.fencingToken) || !evidence) invalidInput();
+    this.#noteMutation(scope);
     try {
       // One fenced UPSERT. The adapter may elide BEGIN/COMMIT only when
       // this checked-out session is READ COMMITTED; other defaults retain
@@ -806,6 +972,9 @@ export class PostgresProviderAccountRuntimeHealthStore
     } catch {
       this.storageFailed();
       throw storageError();
+    } finally {
+      // Also invalidate snapshots begun while this mutation was in flight.
+      this.#noteMutation(scope);
     }
   }
 
@@ -826,12 +995,14 @@ export class PostgresProviderAccountRuntimeHealthStore
     readonly candidate: ProviderAccountRuntimeHealthCandidate;
     readonly staleAfterMs?: number;
   }): Promise<'admitted' | 'closed'> {
+    this.discardSchedulingReadBatch();
     const scope = accountScope(input?.candidate);
     if (!scope) invalidInput();
     const staleAfterMs =
       input.staleAfterMs !== undefined && Number.isSafeInteger(input.staleAfterMs) && input.staleAfterMs > 0
         ? Math.min(input.staleAfterMs, MAX_HEALTH_AGE_MS)
         : this.maxHealthAgeMs;
+    this.#noteMutation(scope);
     try {
       const admitted = await this.database.transaction(async (tx: SqlExecutor) => {
         const update = await tx.query<RevisionRow>(ADMIT_HALF_OPEN_PROBE_SQL, [
@@ -869,6 +1040,9 @@ export class PostgresProviderAccountRuntimeHealthStore
     } catch {
       this.storageFailed();
       throw storageError();
+    } finally {
+      // Also invalidate snapshots begun while this mutation was in flight.
+      this.#noteMutation(scope);
     }
   }
 }

@@ -1657,3 +1657,145 @@ test('admission native authority failure is not replayed anonymously', async () 
   assert.equal(fixture.statements.filter((sql) => sql.includes('authority-batch')).length, 0);
   assert.equal(fixture.snapshot, null);
 });
+
+test('fenced reservation staging requires issued guard facts and is one-shot, invalidation-safe and scope-bound', async () => {
+  const { prepareFencedReservation } = await import('../../../src/saas/gateway/fenced-reservation-plan.js');
+  const { withPreparationTransactionFacts } = await import(
+    '../../../src/saas/gateway/preparation-transaction-facts.js'
+  );
+  const { hasPreparationTransactionAuthority } = await import(
+    '../../../src/saas/gateway/postgres-request-admission-guard.js'
+  );
+  const fixture = makeFixture('byok');
+  fixture.attempt = {
+    ...fixture.attempt,
+    payloadSha256: HASH,
+    requestFingerprint: HASH,
+    requestFingerprintVersion: 'canonical-v1',
+    payloadCompilerVersion: 'compiler-v1',
+    usageEstimatorVersion: 'estimator-v1',
+  };
+  for (const [name, record] of [
+    ['request', fixture.request],
+    ['attempt', fixture.attempt],
+  ] as const) {
+    Object.assign(
+      fixture.rows[name],
+      Object.fromEntries(
+        Object.entries(record).map(([key, value]) => [
+          key.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`),
+          value,
+        ]),
+      ),
+    );
+  }
+  Object.assign(fixture.rows.request, { execution_state: fixture.request.resultState });
+  Object.assign(fixture.rows.attempt, {
+    model_resolution_requested_model: 'model-a',
+    model_resolution_mapped_model: 'model-a',
+    model_resolution_mapping_source: 'none',
+    model_resolution_mapping_version: null,
+    provider_protocol: 'openai',
+    client_operation: 'chat_completions',
+    provider_operation: 'chat_completions',
+  });
+  const mappers = await import('../../../src/saas/metering/service.js');
+  mappers.mapStoredRequestRecord(fixture.rows.request as Row);
+  mappers.mapStoredAttemptRecord(fixture.rows.attempt as Row);
+  const database = new FakeDatabase(fixture);
+  const identity = {
+    tenantId: fixture.request.tenantId,
+    requestId: fixture.request.id,
+    attemptId: fixture.attempt.id,
+    payloadSha256: HASH,
+  };
+  const guard = new PostgresRequestAdmissionGuard(database, { now: () => NOW });
+  let reads = 0,
+    applies = 0,
+    fallbacks = 0;
+  const plan = (tx: SqlExecutor) =>
+    prepareFencedReservation(
+      tx,
+      identity,
+      async () => ++reads,
+      async (read) => {
+        applies++;
+        return read;
+      },
+      async () => {
+        fallbacks++;
+        return -1;
+      },
+    );
+  await withPreparationTransactionFacts(database.executor, identity, async (tx) => {
+    assert.equal(hasPreparationTransactionAuthority(tx, identity), false);
+    const unguarded = await plan(tx);
+    assert.equal(reads, 0, 'a caller-created scope cannot stand in for held authority fences');
+    assert.equal(await unguarded(), -1);
+  });
+  await withPreparationTransactionFacts(database.executor, identity, async (tx) => {
+    await guard.revalidate({ executor: tx, request: fixture.request, candidate: fixture.attempt, holdEvidence: null });
+    assert.equal(hasPreparationTransactionAuthority(tx, identity), true);
+    for (const wrong of [
+      { projectId: 'wrong' },
+      { keyId: 'wrong' },
+      { proxyKeyId: 'wrong' },
+      { attemptId: 'wrong' },
+      { supplyMode: 'platform' },
+    ]) {
+      assert.equal(hasPreparationTransactionAuthority(tx, { ...identity, ...wrong }), false);
+      const wrongPlan = await prepareFencedReservation(
+        tx,
+        { ...identity, ...wrong },
+        async () => {
+          throw new Error('wrong identity must not stage reads');
+        },
+        async () => 0,
+        async () => -2,
+      );
+      assert.equal(await wrongPlan(), -2);
+    }
+    const prepared = await plan(tx);
+    assert.equal(reads, 1);
+    assert.equal(applies, 0, 'read planning must not execute any reservation');
+    assert.equal(await prepared(), 1);
+    await assert.rejects(prepared(), /already been consumed/);
+  });
+  const mutating: SqlExecutor = {
+    query: (sql, values) =>
+      sql === 'UPDATE staged_authority'
+        ? Promise.resolve({ rows: [], rowCount: 0 })
+        : database.executor.query(sql, values),
+  };
+  await withPreparationTransactionFacts(mutating, identity, async (tx) => {
+    await guard.revalidate({ executor: tx, request: fixture.request, candidate: fixture.attempt, holdEvidence: null });
+    const prepared = await plan(tx);
+    await tx.query('UPDATE staged_authority');
+    assert.equal(await prepared(), -1, 'unknown writes force the original fresh reserve in the live scope');
+  });
+  await withPreparationTransactionFacts(mutating, identity, async (tx) => {
+    await guard.revalidate({ executor: tx, request: fixture.request, candidate: fixture.attempt, holdEvidence: null });
+    const duringApply = await prepareFencedReservation(
+      tx,
+      identity,
+      async () => 1,
+      async () => {
+        await tx.query('UPDATE staged_authority');
+        return 1;
+      },
+      async () => {
+        throw new Error('must not retry after a mutation');
+      },
+    );
+    await assert.rejects(duringApply(), /authority changed during apply/);
+  });
+  let escaped: (() => Promise<number>) | undefined;
+  await withPreparationTransactionFacts(database.executor, identity, async (tx) => {
+    await guard.revalidate({ executor: tx, request: fixture.request, candidate: fixture.attempt, holdEvidence: null });
+    escaped = await plan(tx);
+  });
+  assert.ok(escaped);
+  await assert.rejects(escaped(), /scope has ended/);
+  assert.equal(applies, 1);
+  assert.equal(fallbacks, 2, 'an ended scope must not fall back to the pooled executor');
+});

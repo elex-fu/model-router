@@ -6,9 +6,9 @@ import type { ProviderEligibilityResult } from '../catalog/index.js';
 import { SaasCatalogError, SaasCatalogService } from '../catalog/index.js';
 import { saasAdvisoryKey, sortAndDedupeAdvisoryKeys } from '../db/advisory-lock-keys.js';
 import type { SaasDatabase, SqlExecutor } from '../db/index.js';
-import { mapStoredAttemptRecord, mapStoredRequestRecord } from '../metering/service.js';
 import { createPreparedSqlStatement, queryPreparedOrAnonymous } from '../db/prepared-statements.js';
 import type { PreparedSqlStatement } from '../db/types.js';
+import { mapStoredAttemptRecord, mapStoredRequestRecord } from '../metering/service.js';
 import type {
   AttemptRecord,
   AuthorizationBindingInput,
@@ -79,6 +79,41 @@ function rememberPreparationTransactionFacts(
     recordsRevision: context.recordsRevision,
     facts: structuredClone(facts),
   });
+}
+
+export interface PreparationReservationIdentity {
+  readonly tenantId: string;
+  readonly requestId: string;
+  readonly projectId?: string;
+  readonly keyId?: string;
+  readonly proxyKeyId?: string;
+  readonly attemptId?: string;
+  readonly supplyMode?: string;
+}
+
+/** Read-only eligibility predicate; only this module's successful guard can mint the underlying facts. */
+export function hasPreparationTransactionAuthority(
+  executor: SqlExecutor,
+  identity: PreparationReservationIdentity,
+): boolean {
+  const context = preparationTransactionContext(executor);
+  if (
+    !context ||
+    context.identity.tenantId !== identity.tenantId ||
+    context.identity.requestId !== identity.requestId
+  ) {
+    return false;
+  }
+  const stored = preparationFacts.get(context.token);
+  if (!stored || stored.revision !== context.revision) return false;
+  const { request, attempt } = stored.facts;
+  return (
+    (identity.projectId === undefined || identity.projectId === request.projectId) &&
+    (identity.keyId === undefined || identity.keyId === request.proxyKeyId) &&
+    (identity.proxyKeyId === undefined || identity.proxyKeyId === request.proxyKeyId) &&
+    (identity.attemptId === undefined || identity.attemptId === attempt.id) &&
+    (identity.supplyMode === undefined || identity.supplyMode === request.supplyMode)
+  );
 }
 
 export async function readPreparationTransactionRecords(

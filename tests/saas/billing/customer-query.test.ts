@@ -99,7 +99,13 @@ class RecordingDatabase implements CustomerWalletQueryDatabase {
           statement.includes('FROM saas_refund_wallet_freezes')
         ) {
           return result<RowType>([
-            { active_hold_minor_units: '200', active_refund_freeze_minor_units: '0' } as RowType,
+            {
+              active_hold_minor_units: '200',
+              active_refund_freeze_minor_units: '0',
+              freeze_tenant_id: TENANT_ID,
+              freeze_reason_ref: 'internal-freeze-reconciliation-note',
+              freeze_frozen_at: '2026-09-28T00:00:00.000Z',
+            } as RowType,
           ]);
         }
         if (statement.includes('FROM saas_billing_spending_freezes')) {

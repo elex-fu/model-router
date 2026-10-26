@@ -116,7 +116,7 @@ test('funding posts balanced positive double-entry records and is replay-safe', 
   assert.equal(replay.wallet.availableMinorUnits, 125n);
 });
 
-test('spending freezes use the wallet advisory fence before reservation locks without UPDATE row-lock rights', async () => {
+test('spending freezes use the wallet advisory fence before reservation reads without UPDATE row-lock rights', async () => {
   const database = new FakeBillingDatabase();
   const service = createService();
   await fund(database, service, '100');
@@ -141,7 +141,8 @@ test('spending freezes use the wallet advisory fence before reservation locks wi
   assert.ok(freezeRead);
   assert.ok(!freezeRead.includes('for update'));
   assert.ok(freezeRead && statements.indexOf(freezeRead) > walletFence);
-  assert.ok(reservationLock > walletFence);
+  assert.equal(reservationLock, -1, 'a missing reservation needs no separate row lock under its wallet fence');
+  assert.ok(statements[walletRead]?.includes('as reservation_exists'));
 });
 
 test('reserve reads the spending freeze exactly once inside the wallet critical section', async () => {
@@ -636,7 +637,7 @@ test('wallet summary combines both exact sums at the original reserve observatio
     'from saas_refund_wallet_freezes where tenant_id = $1 and currency = $2 ) as active_refund_freeze_minor_units';
   assert.equal(observations.length, 2);
   assert.match(observations[0]!.sql, /billing:reserve-wallet-snapshot/);
-  assert.deepEqual(observations[0]!.values, [tenantId, currency]);
+  assert.deepEqual(observations[0]!.values, [tenantId, currency, 'saas.billing.reservation', 'billing-request-1']);
   assert.equal((observations[0]!.rows[0] as Record<string, unknown>).active_hold_minor_units, '0');
   assert.equal((observations[0]!.rows[0] as Record<string, unknown>).active_refund_freeze_minor_units, '10');
   assert.deepEqual(observations[1], {
@@ -790,12 +791,28 @@ test('combined wallet sums exclude only the fulfilled refund from the post-debit
   assert.deepEqual(observations, [
     {
       values: [tenantId, currency],
-      rows: [{ active_hold_minor_units: '40', active_refund_freeze_minor_units: '60' }],
+      rows: [
+        {
+          active_hold_minor_units: '40',
+          active_refund_freeze_minor_units: '60',
+          freeze_tenant_id: null,
+          freeze_reason_ref: null,
+          freeze_frozen_at: null,
+        },
+      ],
       excluded: false,
     },
     {
       values: [tenantId, currency, 'refund-target'],
-      rows: [{ active_hold_minor_units: '40', active_refund_freeze_minor_units: '20' }],
+      rows: [
+        {
+          active_hold_minor_units: '40',
+          active_refund_freeze_minor_units: '20',
+          freeze_tenant_id: null,
+          freeze_reason_ref: null,
+          freeze_frozen_at: null,
+        },
+      ],
       excluded: true,
     },
   ]);
@@ -872,7 +889,7 @@ test('combined wallet sum failures preserve safe billing errors and roll back ei
   }
 });
 
-test('fresh reserve uses five statements and derives the post-insert zero-refund summary exactly', async () => {
+test('fresh reserve uses four statements and derives the post-insert zero-refund summary exactly', async () => {
   const database = new FakeBillingDatabase();
   const service = createService();
   await fund(database, service, '9223372036854775807');
@@ -880,7 +897,7 @@ test('fresh reserve uses five statements and derives the post-insert zero-refund
   const value = await database.transaction((tx) =>
     service.reserve(observeQueries(tx, statements), reserveInput({ amountMinorUnits: '9007199254740993' })),
   );
-  assert.equal(statements.length, 5);
+  assert.equal(statements.length, 4);
   assert.equal(statements.filter((sql) => sql.includes('as active_hold_minor_units')).length, 1);
   assert.equal(value.activeHoldsMinorUnits, 9007199254740993n);
   assert.equal(value.availableMinorUnits, 9223372036854775807n - 9007199254740993n);
@@ -888,7 +905,7 @@ test('fresh reserve uses five statements and derives the post-insert zero-refund
   assert.ok(statements[2]?.includes('billing:reserve-wallet-snapshot'));
 });
 
-test('nonzero refund snapshot keeps the sixth read and observes an unfenced failed-refund deletion', async () => {
+test('nonzero refund snapshot keeps a fresh fifth read and observes an unfenced failed-refund deletion', async () => {
   const database = new FakeBillingDatabase();
   const service = createService();
   await fund(database, service, '100');
@@ -914,8 +931,119 @@ test('nonzero refund snapshot keeps the sixth read and observes an unfenced fail
       reserveInput(),
     ),
   );
-  assert.equal(statements.length, 6);
+  assert.equal(statements.length, 5);
   assert.equal(value.activeHoldsMinorUnits, 40n);
   assert.equal(value.availableMinorUnits, 60n);
   assert.ok(statements.at(-1)?.includes('AS active_refund_freeze_minor_units'));
+});
+
+test('positive settlement batches six round trips under the wallet fence without caching final funds', async () => {
+  const database = new FakeBillingDatabase();
+  const service = createService();
+  await fund(database, service);
+  await reserve(database, service);
+  const statements: string[] = [];
+  const settled = await database.transaction((tx) => service.settle(observeQueries(tx, statements), settlementInput()));
+  assert.equal(statements.length, 9);
+  const fence = statements.findIndex((sql) => sql.includes('pg_advisory_xact_lock'));
+  assert.equal(fence, 1);
+  assert.equal(statements.length - fence - 1, 7, 'seven operations after the wallet fence, formerly thirteen');
+  assert.equal(statements.filter((sql) => sql.includes('billing:post-ledger-pair')).length, 1);
+  assert.equal(statements.filter((sql) => sql.includes('billing:project-ledger')).length, 1);
+  const summaries = statements.filter((sql) => sql.includes('as active_hold_minor_units'));
+  assert.equal(summaries.length, 2, 'fresh pre-charge and post-settlement observations are retained');
+  assert.ok(summaries.every((sql) => sql.includes('left join saas_billing_spending_freezes')));
+  assert.equal(settled.walletPostedBalanceMinorUnits, 80n);
+  assert.equal(settled.activeHoldsMinorUnits, 0n);
+  assert.equal(database.state.entries.length, 4);
+});
+
+test('staged reserve caches no financial facts and is single-use', async () => {
+  const database = new FakeBillingDatabase();
+  const service = createService();
+  await fund(database, service);
+  const statements: string[] = [];
+  await database.transaction(async (tx) => {
+    const apply = await service.prepareReserve(observeQueries(tx, statements), reserveInput());
+    assert.equal(statements.length, 1);
+    assert.ok(!statements[0]?.includes('pg_advisory'));
+    database.state.freezes.push({
+      tenant_id: tenantId,
+      reason_ref: 'after-staging',
+      frozen_at: '2026-09-28T00:00:00.000Z',
+    });
+    await assert.rejects(
+      apply,
+      (error: unknown) => error instanceof SaasBillingError && error.code === 'SPENDING_FROZEN',
+    );
+    const failedCount = statements.length;
+    await assert.rejects(
+      apply,
+      (error: unknown) => error instanceof SaasBillingError && error.code === 'BILLING_STORAGE_ERROR',
+    );
+    assert.equal(statements.length, failedCount, 'a repeated closure performs no further SQL');
+    assert.equal(database.state.reservations.length, 0);
+  });
+});
+
+test('staged reserve rechecks later holds and rejects delayed expiry before taking locks', async () => {
+  const database = new FakeBillingDatabase();
+  let now = new Date('2026-09-28T00:00:00.000Z');
+  const service = new PlatformWalletLedgerService({ now: () => now });
+  await fund(database, service);
+  await database.transaction(async (tx) => {
+    const apply = await service.prepareReserve(tx, reserveInput({ amountMinorUnits: '80' }));
+    await service.reserve(
+      tx,
+      reserveInput({ businessKey: 'competing', requestId: 'request-competing', amountMinorUnits: '30' }),
+    );
+    await assert.rejects(
+      apply,
+      (error: unknown) => error instanceof SaasBillingError && error.code === 'INSUFFICIENT_FUNDS',
+    );
+    const queries: string[] = [];
+    const delayed = await service.prepareReserve(observeQueries(tx, queries), reserveInput());
+    now = new Date('2026-09-28T01:00:01.000Z');
+    await assert.rejects(
+      delayed,
+      (error: unknown) => error instanceof SaasBillingError && error.code === 'INVALID_INPUT',
+    );
+    assert.equal(queries.length, 1, 'expired staged input fails before acquiring locks');
+  });
+});
+
+test('staged reserve captures immutable input and only a copied existing wallet identity hint', async () => {
+  const database = new FakeBillingDatabase();
+  const service = createService();
+  await fund(database, service);
+  const reserved = await reserve(database, service);
+  await database.transaction(async (tx) => {
+    const input = { ...reserveInput() };
+    let observedRow: Record<string, unknown> | undefined;
+    const apply = await service.prepareReserve(
+      {
+        async query<Row>(sql: string, values?: readonly unknown[]): Promise<SqlResult<Row>> {
+          const result = await tx.query<Row>(sql, values);
+          if (sql.includes('FROM saas_billing_reservations') && !sql.includes('FOR UPDATE')) {
+            observedRow = result.rows[0] as Record<string, unknown>;
+          }
+          return result;
+        },
+      },
+      input,
+    );
+    input.currency = 'EUR';
+    input.amountMinorUnits = '99';
+    input.businessKey = 'mutated-business-key';
+    assert.ok(observedRow);
+    observedRow.tenant_id = 'mutated-tenant';
+    observedRow.currency = 'EUR';
+    observedRow.state = 'settled';
+    const replay = await apply();
+    assert.equal(replay.id, reserved.id);
+    assert.equal(replay.state, 'reserved');
+    assert.equal(replay.currency, 'USD');
+    assert.equal(replay.amountMinorUnits, 40n);
+    assert.equal(replay.availableMinorUnits, 60n);
+  });
 });

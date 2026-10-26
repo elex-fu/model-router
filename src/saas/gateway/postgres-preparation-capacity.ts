@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import type { SqlExecutor } from '../db/types.js';
-import type { RedisPreparationCapacity } from './redis-preparation-capacity.js';
+import { prepareFencedReservation } from './fenced-reservation-plan.js';
 import type {
   PostgresPreparationCapacityPort,
   PostgresPreparationCapacityReservation,
 } from './postgres-preparation-ports.js';
+import type { RedisPreparationCapacity } from './redis-preparation-capacity.js';
 import {
   allowRequestPreparation,
   blockRequestPreparation,
@@ -310,10 +311,10 @@ async function queryRows<T extends Row>(
  * locks) and refunds take the refund order row then the wallet fence, both
  * strictly inside-out; admission takes the wallet fence after its authority
  * fences and before this capacity fence, so the global order is consistent.
- * Within a tenant, the exclusive fence linearizes every post-fence writer,
- * which additionally guarantees that per-key rows touched after the fence
- * (key budgets, this reservation INSERT) are never held by two admissions
- * at once.
+ * Within a tenant, the exclusive fence linearizes the capacity read/check/write
+ * and this reservation INSERT. Key-budget and group-spend mutations precede
+ * this fence and retain their own counter-row serialization; they are not
+ * protected by a capacity lock acquired later.
  */
 async function takeScopeLock(executor: SqlExecutor, tenantId: string): Promise<void> {
   await executor.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, [
@@ -370,6 +371,20 @@ function sameIdentity(row: ReservationRow, input: Parameters<PostgresPreparation
   );
 }
 
+type CapacityInput = Parameters<PostgresPreparationCapacityPort['reserve']>[1];
+type CapacityDecision = RequestPreparationDecision<PostgresPreparationCapacityReservation>;
+type CapacityPlan =
+  | { readonly kind: 'replayed'; readonly reservation: PostgresPreparationCapacityReservation }
+  | {
+      readonly kind: 'new';
+      readonly tokenUnits: bigint;
+      readonly limits: NonNullable<ReturnType<typeof authorityLimits>>;
+      readonly keyAuthzVersion: bigint;
+      readonly policyVersion: bigint;
+      readonly groupRateTerms: FrozenBillingGroupRateTerms | null;
+      readonly keyExpiresAt: unknown;
+    };
+
 /**
  * PostgreSQL request capacity implementation. It never touches wallet
  * tables. R1 (roadmap 1.3, phase 2) documented exception: it reads the
@@ -383,10 +398,28 @@ export class PostgresPreparationCapacityAdapter implements PostgresPreparationCa
   constructor(private readonly redis?: RedisPreparationCapacity) {
     this.cachedReservation = redis ? (requestId) => redis.find(requestId) : undefined;
   }
-  async reserve(
+  async reserve(executor: SqlExecutor, input: CapacityInput): Promise<CapacityDecision> {
+    return this.applyPlan(executor, input, await this.readPlan(executor, input));
+  }
+
+  async prepareReserve(executor: SqlExecutor, input: CapacityInput): Promise<() => Promise<CapacityDecision>> {
+    // A replay row can be released by another transaction; stage only our own
+    // newly inserted request, whose visibility and lifetime this transaction owns.
+    const snapshot = structuredClone(input);
+    if (snapshot.newRequest !== true) return () => this.reserve(executor, snapshot);
+    return prepareFencedReservation(
+      executor,
+      snapshot,
+      () => this.readPlan(executor, snapshot),
+      (plan) => this.applyPlan(executor, snapshot, plan),
+      () => this.reserve(executor, snapshot),
+    );
+  }
+
+  private async readPlan(
     executor: SqlExecutor,
-    input: Parameters<PostgresPreparationCapacityPort['reserve']>[1],
-  ): Promise<RequestPreparationDecision<PostgresPreparationCapacityReservation>> {
+    input: CapacityInput,
+  ): Promise<RequestPreparationDecision<CapacityPlan>> {
     if (
       !executor ||
       !input ||
@@ -441,7 +474,7 @@ export class PostgresPreparationCapacityAdapter implements PostgresPreparationCa
             replay.rateReservation.reference,
           );
         return replay
-          ? allowRequestPreparation(replay)
+          ? allowRequestPreparation({ kind: 'replayed', reservation: replay })
           : blockRequestPreparation('capability_unavailable', SAFE_CAPACITY_FAILURE);
       }
 
@@ -492,28 +525,6 @@ export class PostgresPreparationCapacityAdapter implements PostgresPreparationCa
       ) {
         return blockRequestPreparation('capability_unavailable', SAFE_CAPACITY_FAILURE);
       }
-      if (authority.key_expires_at !== null && authority.key_expires_at !== undefined) {
-        const expiresAt =
-          authority.key_expires_at instanceof Date
-            ? authority.key_expires_at.getTime()
-            : typeof authority.key_expires_at === 'string'
-              ? Date.parse(authority.key_expires_at)
-              : Number.NaN;
-        const clockRows = await queryRows<{ database_now: unknown }>(
-          executor,
-          'SELECT clock_timestamp() AS database_now',
-        );
-        const databaseNow = clockRows[0]?.database_now;
-        const nowMs =
-          databaseNow instanceof Date
-            ? databaseNow.getTime()
-            : typeof databaseNow === 'string'
-              ? Date.parse(databaseNow)
-              : Number.NaN;
-        if (!Number.isFinite(expiresAt) || !Number.isFinite(nowMs) || expiresAt <= nowMs) {
-          return blockRequestPreparation('capability_unavailable', SAFE_CAPACITY_FAILURE);
-        }
-      }
 
       const limits = authorityLimits(authority);
       if (!limits) return blockRequestPreparation('capability_unavailable', SAFE_CAPACITY_FAILURE);
@@ -545,6 +556,54 @@ export class PostgresPreparationCapacityAdapter implements PostgresPreparationCa
           return blockRequestPreparation('capability_unavailable', SAFE_CAPACITY_FAILURE);
         }
         groupRateTerms = terms;
+      }
+
+      return allowRequestPreparation({
+        kind: 'new',
+        tokenUnits,
+        limits,
+        keyAuthzVersion,
+        policyVersion,
+        groupRateTerms,
+        keyExpiresAt: authority.key_expires_at,
+      });
+    } catch {
+      return blockRequestPreparation('storage_failure', SAFE_CAPACITY_FAILURE);
+    }
+  }
+
+  private async applyPlan(
+    executor: SqlExecutor,
+    input: CapacityInput,
+    decision: RequestPreparationDecision<CapacityPlan>,
+  ): Promise<CapacityDecision> {
+    if (decision.decision !== 'allow') return decision;
+    const plan = decision.value;
+    if (plan.kind === 'replayed') return allowRequestPreparation(plan.reservation);
+    const { limits, policyVersion, keyAuthzVersion, groupRateTerms, tokenUnits } = plan;
+    try {
+      // A hot wallet/key/group wait may cross expiry. Never cache this clock in the read plan.
+      if (plan.keyExpiresAt !== null && plan.keyExpiresAt !== undefined) {
+        const expiresAt =
+          plan.keyExpiresAt instanceof Date
+            ? plan.keyExpiresAt.getTime()
+            : typeof plan.keyExpiresAt === 'string'
+              ? Date.parse(plan.keyExpiresAt)
+              : Number.NaN;
+        const clockRows = await queryRows<{ database_now: unknown }>(
+          executor,
+          'SELECT clock_timestamp() AS database_now',
+        );
+        const databaseNow = clockRows[0]?.database_now;
+        const nowMs =
+          databaseNow instanceof Date
+            ? databaseNow.getTime()
+            : typeof databaseNow === 'string'
+              ? Date.parse(databaseNow)
+              : Number.NaN;
+        if (!Number.isFinite(expiresAt) || !Number.isFinite(nowMs) || expiresAt <= nowMs) {
+          return blockRequestPreparation('capability_unavailable', SAFE_CAPACITY_FAILURE);
+        }
       }
 
       if (this.redis)
