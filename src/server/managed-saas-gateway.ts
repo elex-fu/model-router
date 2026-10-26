@@ -997,12 +997,14 @@ export interface ManagedSaasFastGatewayOptions {
   readonly namespace: string;
   /** Stable instance identity; each journal boot fences its prior allocation epoch. */
   readonly allocationOwner: string;
-  readonly allocationTrancheMinorUnits: string;
+  /** Explicit value is a hard cap; absent selects wallet-backed automatic liquidity sizing. */
+  readonly allocationTrancheMinorUnits?: string;
+  readonly allocationStripes?: number;
   /** Only a proven fresh/drained deployment may bypass conservative Redis restart quarantine. */
   readonly redisDrained?: boolean;
   /** Optional AES-256 deployment key enables encrypted shared L2; no plaintext credential values. */
   readonly snapshotEncryptionKey?: Uint8Array;
-  /** Opt-in isolated A/B until pooled pinned transport acceptance passes. */
+  /** Pinned direct-HTTPS reuse defaults on inside opt-in fast mode; false is the rollback control. */
   readonly reuseConnections?: boolean;
 }
 
@@ -2056,30 +2058,55 @@ export function createPostgresDispatchLeaseProvider(
  * adapters. Missing caller/admission/route/KMS/config capabilities throw
  * before startup can bind the gateway listener.
  */
-function fastGatewayConfiguration(
-  options: ManagedSaasGatewayProductionOptions,
+export function resolveManagedSaasFastGatewayConfiguration(
+  options: Pick<ManagedSaasGatewayProductionOptions, 'fastGateway'>,
+  environment: Readonly<Record<string, string | undefined>> = process.env,
 ): ManagedSaasFastGatewayOptions | undefined {
-  if (options.fastGateway) return options.fastGateway;
-  const mode = process.env.MODEL_ROUTER_FAST_GATEWAY;
-  if (mode === undefined || mode === '' || mode === 'off') return undefined;
-  if (mode !== 'reserved-max') throw new ManagedSaasGatewayCompositionError('INVALID_CONFIGURATION');
-  const redisUrl = process.env.MODEL_ROUTER_FAST_REDIS_URL ?? process.env.MODEL_ROUTER_SAAS_GATEWAY_REDIS_URL;
-  const namespace = process.env.MODEL_ROUTER_FAST_NAMESPACE;
-  const allocationOwner = process.env.MODEL_ROUTER_FAST_OWNER;
-  if (!redisUrl || !namespace || !allocationOwner)
+  const invalid = () => {
     throw new ManagedSaasGatewayCompositionError('INVALID_CONFIGURATION');
-  return {
+  };
+  const validate = (value: ManagedSaasFastGatewayOptions): ManagedSaasFastGatewayOptions => {
+    if (
+      value.mode !== 'reserved-max' ||
+      !value.redisUrl ||
+      !value.namespace ||
+      !value.allocationOwner ||
+      (value.reuseConnections !== undefined && typeof value.reuseConnections !== 'boolean') ||
+      (value.allocationTrancheMinorUnits !== undefined &&
+        (typeof value.allocationTrancheMinorUnits !== 'string' || !/^[1-9][0-9]*$/.test(value.allocationTrancheMinorUnits))) ||
+      (value.allocationStripes !== undefined &&
+        (!Number.isSafeInteger(value.allocationStripes) || value.allocationStripes < 1 || value.allocationStripes > 8))
+    )
+      invalid();
+    return { ...value, reuseConnections: value.reuseConnections ?? true };
+  };
+  if (options.fastGateway) return validate(options.fastGateway);
+  const mode = environment.MODEL_ROUTER_FAST_GATEWAY;
+  if (mode === undefined || mode === '' || mode === 'off') return undefined;
+  if (mode !== 'reserved-max') return invalid();
+  const redisUrl = environment.MODEL_ROUTER_FAST_REDIS_URL ?? environment.MODEL_ROUTER_SAAS_GATEWAY_REDIS_URL;
+  const namespace = environment.MODEL_ROUTER_FAST_NAMESPACE;
+  const allocationOwner = environment.MODEL_ROUTER_FAST_OWNER;
+  const reuse = environment.MODEL_ROUTER_FAST_CONNECTION_REUSE;
+  if (!redisUrl || !namespace || !allocationOwner || (reuse !== undefined && reuse !== '0' && reuse !== '1'))
+    return invalid();
+  return validate({
     mode,
     redisUrl,
     namespace,
     allocationOwner,
-    allocationTrancheMinorUnits: process.env.MODEL_ROUTER_FAST_CREDIT_TRANCHE_MINOR_UNITS ?? '1000000',
-    redisDrained: process.env.MODEL_ROUTER_FAST_REDIS_DRAINED === '1',
-    reuseConnections: process.env.MODEL_ROUTER_FAST_CONNECTION_REUSE === '1',
-    ...(process.env.MODEL_ROUTER_FAST_SNAPSHOT_KEY_BASE64
-      ? { snapshotEncryptionKey: Buffer.from(process.env.MODEL_ROUTER_FAST_SNAPSHOT_KEY_BASE64, 'base64') }
+    ...(environment.MODEL_ROUTER_FAST_CREDIT_TRANCHE_MINOR_UNITS === undefined
+      ? {}
+      : { allocationTrancheMinorUnits: environment.MODEL_ROUTER_FAST_CREDIT_TRANCHE_MINOR_UNITS }),
+    ...(environment.MODEL_ROUTER_FAST_CREDIT_STRIPES === undefined
+      ? {}
+      : { allocationStripes: Number(environment.MODEL_ROUTER_FAST_CREDIT_STRIPES) }),
+    redisDrained: environment.MODEL_ROUTER_FAST_REDIS_DRAINED === '1',
+    reuseConnections: reuse !== '0',
+    ...(environment.MODEL_ROUTER_FAST_SNAPSHOT_KEY_BASE64
+      ? { snapshotEncryptionKey: Buffer.from(environment.MODEL_ROUTER_FAST_SNAPSHOT_KEY_BASE64, 'base64') }
       : {}),
-  };
+  });
 }
 
 export function createManagedSaasGatewayProductionComposition(
@@ -2637,7 +2664,7 @@ export function createManagedSaasGatewayProductionComposition(
         })
       : undefined;
   const payload = createProviderPayloadCompiler(options);
-  const fastConfig = fastGatewayConfiguration(options);
+  const fastConfig = resolveManagedSaasFastGatewayConfiguration(options);
   let fastClose: (() => Promise<void>) | undefined;
   let closeFastResources: (() => Promise<void>) | undefined;
   let fastGateway: FastGatewayExecutorPort | undefined;
@@ -2686,7 +2713,10 @@ export function createManagedSaasGatewayProductionComposition(
       );
       const journal = createFastGatewayJournal(database, {
         allocationOwner: fastConfig.allocationOwner,
-        allocationTrancheMinorUnits: fastConfig.allocationTrancheMinorUnits,
+        ...(fastConfig.allocationTrancheMinorUnits === undefined
+          ? {}
+          : { allocationTrancheMinorUnits: fastConfig.allocationTrancheMinorUnits }),
+        ...(fastConfig.allocationStripes === undefined ? {} : { allocationStripes: fastConfig.allocationStripes }),
       });
       const connectorPool = fastConfig.reuseConnections ? new FastPinnedConnectorPool({
         createConnector: options.providerHttpTestAddressCapability ? createPinnedProviderHttpTestConnectorFactory(options.providerHttpTestAddressCapability) : createPinnedProviderHttpConnector,
@@ -2711,9 +2741,11 @@ export function createManagedSaasGatewayProductionComposition(
             },
           }),
         allocationOwner: fastConfig.allocationOwner,
+        ...(options.maxHttpInFlight === undefined ? {} : { maxLocalConcurrency: options.maxHttpInFlight }),
         timeoutMs: options.timeoutMs,
         transport: {
           ...(connectorPool ? { createConnector: connectorPool.createConnector } : {}),
+          ...(options.dispatchObserver ? { observe: options.dispatchObserver } : {}),
           fetch: options.fetch,
           timeoutMs: options.timeoutMs,
           resolveDispatchProfile: createProviderDispatchProfileResolver(options),

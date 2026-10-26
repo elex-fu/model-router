@@ -757,6 +757,70 @@ test('fast money journal real PostgreSQL: atomic reserve, durable completion, ex
     },
   );
   await t.test(
+    'cold-await mutation cannot alter validated immutable intent identity, maximum or price bytes',
+    async () => {
+      let started!: () => void, release!: () => void;
+      const began = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let pause = true;
+      const delayed: SaasDatabase = {
+        ...gateway,
+        transaction: async (work) => {
+          if (pause) {
+            pause = false;
+            started();
+            await gate;
+          }
+          return gateway.transaction(work);
+        },
+      };
+      const scope = await setup('1000', '1000', randomUUID(), delayed, 8, false);
+      const input = {
+        ...intentFixture(scope.tenantId, scope.owner),
+        priceSnapshot: priceFixture(),
+        authoritySnapshot: { revision: 1 },
+      };
+      const originalRequest = input.requestId,
+        originalAttempt = input.attemptId;
+      const pending = scope.journal.reserveIntent(input);
+      await began;
+      input.requestId = randomUUID();
+      input.attemptId = randomUUID();
+      input.tenantId = randomUUID();
+      input.maxCostMinorUnits = '800';
+      input.priceSnapshot.maxInputTokens = '800';
+      input.authoritySnapshot.revision = 2;
+      release();
+      const result = await pending;
+      assert.equal(result.kind, 'created');
+      if (result.kind !== 'created') throw new Error('immutable intent denied');
+      assert.equal(result.intent.requestId, originalRequest);
+      assert.equal(result.intent.attemptId, originalAttempt);
+      assert.equal(result.intent.tenantId, scope.tenantId);
+      assert.equal(result.intent.maxCostMinorUnits, '80');
+      const stored = await gateway.query<{
+        request_id: string;
+        max_cost_minor_units: string;
+        price_snapshot: { maxInputTokens: string };
+        authority_snapshot: { revision: number };
+      }>(
+        'SELECT request_id,max_cost_minor_units,price_snapshot,authority_snapshot FROM saas_fast_gateway_intents WHERE id=$1',
+        [result.intent.id],
+      );
+      assert.equal(stored.rows[0]?.request_id, originalRequest);
+      assert.equal(stored.rows[0]?.max_cost_minor_units, '80');
+      assert.equal(stored.rows[0]?.price_snapshot.maxInputTokens, '80');
+      assert.equal(stored.rows[0]?.authority_snapshot.revision, 1);
+      await scope.journal.appendReceipt(receiptFixture(result.intent));
+      await scope.journal.close();
+      assert.equal((await facts(scope.tenantId)).balance, '980');
+    },
+  );
+  await t.test(
     'unset cap auto-funds two trusted concurrency waves at builtin M without overriding explicit caps or legacy backing',
     async () => {
       const maximum = '524480';

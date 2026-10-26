@@ -1,3 +1,4 @@
+import { priceFixture } from './journal-fixture.js';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import test from 'node:test';
@@ -10,6 +11,10 @@ import {
 } from '../../../../src/saas/gateway/fast/executor.js';
 import { CachedFastGatewaySnapshots } from '../../../../src/saas/gateway/fast/snapshots.js';
 import type { PreparedEvidenceClientStream } from '../../../../src/saas/gateway/prepared-evidence-dispatch-service.js';
+import {
+  RequestDiagnosticTrace,
+  withRequestDiagnosticTrace,
+} from '../../../../src/saas/gateway/request-diagnostic-trace.js';
 import { fastExecutorFixture } from './executor-fixture.js';
 
 function deferred<T>() {
@@ -426,9 +431,127 @@ test('unknown costly client and compiler-injected extensions fall back before Re
   assert.equal(s.calls.includes('admit'), false);
 });
 
+test('opt-in fast diagnostics expose bounded stages without changing billing or send count', async () => {
+  const s = setup({}, false, true);
+  const trace = new RequestDiagnosticTrace();
+  await withRequestDiagnosticTrace(trace, () => s.executor.execute(s.input));
+  const result = trace.snapshot();
+  for (const phase of [
+    'fast-snapshot',
+    'fast-compile',
+    'fast-redis',
+    'fast-intent',
+    'fast-lease-check',
+    'fast-transport',
+    'fast-receipt',
+  ]) {
+    assert.ok((result.phases.find((p) => p.phase === phase)?.startedCount ?? 0) > 0, phase);
+  }
+  assert.equal(result.pendingSpans, 0);
+  assert.equal(s.intents.length, 1);
+  assert.equal(s.receipts[0].chargeMinorUnits, '15');
+  assert.equal(s.calls.filter((x) => x === 'fetch').length, 1);
+  assert.ok(!JSON.stringify(result).includes('tenant-a'));
+  assert.ok(!JSON.stringify(result).includes('credential-a'));
+});
+
 test('a compiled output ceiling cannot exceed the estimator maximum reservation', async () => {
   const s = setup();
   assert.equal(await s.executor.execute({ ...s.input, body: { ...s.input.body, max_tokens: 10000 } }), false);
+  assert.equal(s.intents.length, 0);
+  assert.equal(s.calls.includes('admit'), false);
+});
+
+test('zero-priced platform requests fall back before Redis or an empty allocation', async () => {
+  const s = setup({}, false, true);
+  const zero = priceFixture('80', '64', '0').customerPrice.rates;
+  const snapshot = {
+    ...s.snapshot,
+    candidates: s.snapshot.candidates.map((candidate) => ({
+      ...candidate,
+      customerPrice: candidate.customerPrice ? { ...candidate.customerPrice, rates: zero } : null,
+    })),
+  };
+  const executor = new FastGatewayExecutor({ ...s.options, snapshots: { resolve: async () => snapshot } });
+  assert.equal(await executor.execute(s.input), false);
+  assert.equal(s.intents.length, 0);
+  assert.equal(s.calls.includes('admit'), false);
+});
+
+test('missing client output bound is eligible only when the compiler enforces one', async () => {
+  const s = setup({}, false, true);
+  const { max_tokens: _ignored, ...body } = s.input.body;
+  const executor = new FastGatewayExecutor({
+    ...s.options,
+    payload: (candidate) => ({
+      compile: (input) =>
+        s.options.payload(candidate).compile({
+          ...input,
+          clientRequest: { ...(input.clientRequest as Record<string, unknown>), max_tokens: 64 },
+        }),
+    }),
+  });
+  assert.equal(await executor.execute({ ...s.input, body }), true);
+  assert.equal(s.intents.length, 1);
+  assert.equal(s.compiledBodies[0].max_tokens, 64);
+  const unsafe = setup({}, false, true);
+  assert.equal(await unsafe.executor.execute({ ...unsafe.input, body }), false);
+  assert.equal(unsafe.intents.length, 0);
+  assert.equal(unsafe.calls.includes('admit'), false);
+});
+
+test('automatic liquidity uses the minimum trusted concurrency, never a client field', async () => {
+  const s = setup({ maxLocalConcurrency: 3 }, false, true);
+  assert.equal(await s.executor.execute(s.input), true);
+  const expected = Math.min(
+    3,
+    s.snapshot.limits.tenant.concurrency,
+    s.snapshot.limits.project.concurrency,
+    s.snapshot.limits.key.concurrency,
+    s.snapshot.candidates[0].limits.concurrency,
+  );
+  assert.equal(s.intents[0].allocationTargetConcurrency, expected);
+});
+
+test('credit readiness and contention failures stay distinguishable and never send', async () => {
+  for (const [reason, status, code] of [
+    ['credit_not_ready', 429, 'FAST_CREDIT_NOT_READY'],
+    ['credit_busy', 503, 'FAST_CREDIT_BUSY'],
+    ['send_deadline', 503, 'FAST_AUTHORITY_EXPIRED'],
+    ['closed', 503, 'FAST_JOURNAL_UNAVAILABLE'],
+  ] as const) {
+    const s = setup({
+      journal: { reserveIntent: async () => ({ kind: 'denied', reason }), appendReceipt: async () => {} },
+    });
+    await assert.rejects(() => s.executor.execute(s.input), { status, code });
+    assert.equal(s.calls.includes('fetch'), false);
+  }
+});
+
+test('a transform cannot strip final streaming usage collection before a fast send', async () => {
+  const s = setup({}, true, true);
+  const executor = new FastGatewayExecutor({
+    ...s.options,
+    payload: (candidate) => ({
+      compile: async (input) => {
+        const result = await s.options.payload(candidate).compile(input);
+        if (result.decision !== 'allow') return result;
+        return {
+          ...result,
+          value: {
+            ...result.value,
+            payloadBytes: Buffer.from(
+              JSON.stringify({
+                ...(input.clientRequest as Record<string, unknown>),
+                stream_options: { include_usage: false },
+              }),
+            ),
+          },
+        };
+      },
+    }),
+  });
+  assert.equal(await executor.execute(s.input), false);
   assert.equal(s.intents.length, 0);
   assert.equal(s.calls.includes('admit'), false);
 });

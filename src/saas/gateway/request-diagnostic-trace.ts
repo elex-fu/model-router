@@ -3,7 +3,19 @@ import { performance } from 'node:perf_hooks';
 
 /** Priority for exclusive wall time attribution. Never sum inclusive spans. */
 export const REQUEST_DIAGNOSTIC_PHASES = [
-  'pool-checkout', 'query', 'transaction', 'settle', 'upstream-send', 'upstream-body',
+  'pool-checkout',
+  'query',
+  'transaction',
+  'settle',
+  'upstream-send',
+  'upstream-body',
+  'fast-snapshot',
+  'fast-compile',
+  'fast-redis',
+  'fast-intent',
+  'fast-lease-check',
+  'fast-transport',
+  'fast-receipt',
 ] as const;
 export type RequestDiagnosticPhase = (typeof REQUEST_DIAGNOSTIC_PHASES)[number];
 export type RequestDiagnosticMarker = 'upstream-send' | 'first-byte' | 'eof' | 'settled';
@@ -30,21 +42,29 @@ export class RequestDiagnosticTrace {
   private accepted = 0;
   private dropped = 0;
 
-  constructor(private readonly now: () => number = () => performance.now(), private readonly limit = 512) {
+  constructor(
+    private readonly now: () => number = () => performance.now(),
+    private readonly limit = 512,
+  ) {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 4096) {
       throw new TypeError('Diagnostic span limit must be an integer between 1 and 4096');
     }
     this.started = now();
   }
 
-  private elapsed(): number { return Math.max(0, this.now() - this.started); }
+  private elapsed(): number {
+    return Math.max(0, this.now() - this.started);
+  }
 
   begin(phase: RequestDiagnosticPhase): () => void {
     const count = this.counts.get(phase) ?? { started: 0, beforeUpstreamSend: 0 };
     count.started++;
     if (this.markers['upstream-send'] === undefined) count.beforeUpstreamSend++;
     this.counts.set(phase, count);
-    if (this.accepted >= this.limit) { this.dropped++; return () => {}; }
+    if (this.accepted >= this.limit) {
+      this.dropped++;
+      return () => {};
+    }
     this.accepted++;
     const start = this.elapsed();
     let finished = false;
@@ -68,11 +88,15 @@ export class RequestDiagnosticTrace {
       const exclusiveMs = Math.max(0, duration(combined) - duration(covered));
       covered = combined;
       const count = this.counts.get(phase);
-      return { phase, inclusiveMs, exclusiveMs,
+      return {
+        phase,
+        inclusiveMs,
+        exclusiveMs,
         // Attempted client operations, including pending/dropped timing spans;
         // never PostgreSQL nested statements or a count of distinct SQL text.
         startedCount: count?.started ?? 0,
-        beforeUpstreamSendCount: count?.beforeUpstreamSend ?? 0 };
+        beforeUpstreamSendCount: count?.beforeUpstreamSend ?? 0,
+      };
     });
     return {
       elapsedMs: this.elapsed(),
@@ -91,4 +115,17 @@ export function withRequestDiagnosticTrace<T>(trace: RequestDiagnosticTrace, wor
 
 export function currentRequestDiagnosticTrace(): RequestDiagnosticTrace | undefined {
   return context.getStore();
+}
+
+/** Zero clocks or logs when diagnostics are disabled; fixed phase names only. */
+export function observeRequestDiagnosticPhase<T>(phase: RequestDiagnosticPhase, work: () => Promise<T>): Promise<T> {
+  const trace = currentRequestDiagnosticTrace();
+  if (!trace) return work();
+  const finish = trace.begin(phase);
+  try {
+    return work().finally(finish);
+  } catch (error) {
+    finish();
+    throw error;
+  }
 }

@@ -16,6 +16,7 @@ import {
   ProviderHttpTransport,
   type ProviderHttpTransportOptions,
 } from '../provider-http-transport.js';
+import { observeRequestDiagnosticPhase } from '../request-diagnostic-trace.js';
 import type { RequestPreparationPayloadCompiler } from '../request-preparation-service.js';
 import { calculateFastReceiptCharge } from './journal.js';
 import type { FastGatewayAdmission } from './redis-admission.js';
@@ -41,6 +42,7 @@ export interface FastIntentInput {
   readonly priceSnapshot: unknown;
   readonly authoritySnapshot: unknown;
   readonly allocationOwner: string;
+  readonly allocationTargetConcurrency?: number;
   readonly sendDeadlineMs: number;
 }
 export interface FastReceiptInput {
@@ -97,6 +99,7 @@ export interface FastGatewayExecutorOptions {
   readonly transport: Omit<ProviderHttpTransportOptions, 'resolveCredential' | 'consumeFastTicket'>;
   readonly unsealer: Pick<GatewayProviderCredentialUnsealer, 'withCredential'>;
   readonly allocationOwner: string;
+  readonly maxLocalConcurrency?: number;
   readonly timeoutMs: number;
 }
 const usageKeys = [
@@ -118,7 +121,9 @@ function canonical(value: unknown): string {
 function fallbackReason(input: FastGatewayExecuteInput): string | null {
   if (input.idempotencyKey !== undefined) return 'client_idempotency';
   if (input.path !== '/v1/chat/completions' || input.protocol !== 'openai') return 'operation';
-  return fastTextRequestUnsupported(input.body);
+  // The compiler may inject the server-enforced ceiling; the final body must
+  // still contain a positive bound before Redis admission or a durable intent.
+  return fastTextRequestUnsupported(input.body, { allowMissingOutputBound: true });
 }
 function pricingSupported(price: CustomerPriceVersionRecord): boolean {
   return price.tokenMultipliers === null && price.rates.per_unit === null && price.rates.per_unit_tiers === null;
@@ -222,7 +227,9 @@ export class FastGatewayExecutor implements FastGatewayExecutorPort {
       clientAddress: input.clientAddress,
       inputByteLength: Buffer.byteLength(canonical(input.body)),
     };
-    const snapshot = await this.#options.snapshots.resolve(snapshotInput);
+    const snapshot = await observeRequestDiagnosticPhase('fast-snapshot', () =>
+      this.#options.snapshots.resolve(snapshotInput),
+    );
     if (!snapshot) {
       input.selected?.('strict', 'snapshot_policy');
       return false;
@@ -252,30 +259,32 @@ export class FastGatewayExecutor implements FastGatewayExecutorPort {
         candidate.authority.resolvedModel,
         authority.modelMappingRules,
       );
-    const compiled = await this.#options.payload(candidate).compile({
-      caller: snapshot.caller,
-      entitlement: snapshot.entitlement,
-      authority,
-      clientRequest:
-        input.body.stream === true
-          ? {
-              ...input.body,
-              stream_options: {
-                ...(input.body.stream_options &&
-                typeof input.body.stream_options === 'object' &&
-                !Array.isArray(input.body.stream_options)
-                  ? (input.body.stream_options as Record<string, unknown>)
-                  : {}),
-                include_usage: true,
-              },
-            }
-          : input.body,
-      clientProtocol: 'openai',
-      providerProtocol: 'openai',
-      clientOperation: 'chat.completions',
-      providerOperation: 'chat.completions',
-      modelResolution,
-    });
+    const compiled = await observeRequestDiagnosticPhase('fast-compile', () =>
+      this.#options.payload(candidate).compile({
+        caller: snapshot.caller,
+        entitlement: snapshot.entitlement,
+        authority,
+        clientRequest:
+          input.body.stream === true
+            ? {
+                ...input.body,
+                stream_options: {
+                  ...(input.body.stream_options &&
+                  typeof input.body.stream_options === 'object' &&
+                  !Array.isArray(input.body.stream_options)
+                    ? (input.body.stream_options as Record<string, unknown>)
+                    : {}),
+                  include_usage: true,
+                },
+              }
+            : input.body,
+        clientProtocol: 'openai',
+        providerProtocol: 'openai',
+        clientOperation: 'chat.completions',
+        providerOperation: 'chat.completions',
+        modelResolution,
+      }),
+    );
     if (compiled.decision !== 'allow') throw new FastGatewayExecutionError(400, 'FAST_PAYLOAD_REJECTED');
     const payload = compiled.value;
     let compiledBody: unknown;
@@ -292,6 +301,14 @@ export class FastGatewayExecutor implements FastGatewayExecutorPort {
       fastTextRequestUnsupported(compiledBody as Record<string, unknown>)
     ) {
       input.selected?.('strict', 'compiled_fields');
+      return false;
+    }
+    const compiledTextBody = compiledBody as Record<string, unknown>;
+    if (
+      compiledTextBody.stream === true &&
+      (compiledTextBody.stream_options as Record<string, unknown> | undefined)?.include_usage !== true
+    ) {
+      input.selected?.('strict', 'compiled_stream_usage');
       return false;
     }
     if (
@@ -323,6 +340,12 @@ export class FastGatewayExecutor implements FastGatewayExecutorPort {
         outputUpperBound: maxOutput,
         feasibleInputBuckets: INPUT_BILLING_BUCKETS,
       }).calculation.amountMinorUnits;
+    // The initial priced journal requires a backed allocation. Free/rounded-zero
+    // platform pricing stays strict instead of entering an unfundable auto target.
+    if (price && maxCost === 0n) {
+      input.selected?.('strict', 'zero_price');
+      return false;
+    }
     const priceSnapshot = price
       ? {
           schemaVersion: 1,
@@ -340,29 +363,31 @@ export class FastGatewayExecutor implements FastGatewayExecutorPort {
       throw new FastGatewayExecutionError(503, 'FAST_AUTHORITY_EXPIRED');
     }
     assertFresh();
-    const admitted = await this.#options.admission.acquire({
-      requestId: input.requestId,
-      tenantId: snapshot.caller.tenantId,
-      projectId: snapshot.caller.projectId,
-      proxyKeyId: snapshot.caller.proxyKeyId,
-      accountId: candidate.authority.accountId,
-      accountOwnerScope: candidate.authority.accountOwnerKind === 'platform' ? 'platform' : snapshot.caller.tenantId,
-      model: payload.resolvedModel,
-      tokenUnits: Number(maxInput + maxOutput),
-      ttlMs: this.#options.timeoutMs,
-      ...(snapshot.limits.group ? { groupId: snapshot.limits.group.id } : {}),
-      limits: {
-        tenant: snapshot.limits.tenant,
-        project: snapshot.limits.project,
-        key: snapshot.limits.key,
-        account: {
-          ...candidate.limits,
-          rpm: candidate.limits.rpm ?? undefined,
-          tpm: candidate.limits.tpm ?? undefined,
+    const admitted = await observeRequestDiagnosticPhase('fast-redis', () =>
+      this.#options.admission.acquire({
+        requestId: input.requestId,
+        tenantId: snapshot.caller.tenantId,
+        projectId: snapshot.caller.projectId,
+        proxyKeyId: snapshot.caller.proxyKeyId,
+        accountId: candidate.authority.accountId,
+        accountOwnerScope: candidate.authority.accountOwnerKind === 'platform' ? 'platform' : snapshot.caller.tenantId,
+        model: payload.resolvedModel,
+        tokenUnits: Number(maxInput + maxOutput),
+        ttlMs: this.#options.timeoutMs,
+        ...(snapshot.limits.group ? { groupId: snapshot.limits.group.id } : {}),
+        limits: {
+          tenant: snapshot.limits.tenant,
+          project: snapshot.limits.project,
+          key: snapshot.limits.key,
+          account: {
+            ...candidate.limits,
+            rpm: candidate.limits.rpm ?? undefined,
+            tpm: candidate.limits.tpm ?? undefined,
+          },
+          ...(snapshot.limits.group?.rpm != null ? { group: { rpm: snapshot.limits.group.rpm } } : {}),
         },
-        ...(snapshot.limits.group?.rpm != null ? { group: { rpm: snapshot.limits.group.rpm } } : {}),
-      },
-    });
+      }),
+    );
     if (!admitted.allowed)
       throw new FastGatewayExecutionError(
         admitted.reason === 'unavailable' ? 503 : 429,
@@ -384,49 +409,65 @@ export class FastGatewayExecutor implements FastGatewayExecutorPort {
       assertFresh();
       if (remainingValidity() < 250) throw new FastGatewayExecutionError(503, 'FAST_AUTHORITY_EXPIRED');
       const payloadSha256 = hash(payload.payloadBytes);
-      const reserved = await this.#options.journal.reserveIntent({
-        requestId: input.requestId,
-        attemptId,
-        tenantId: snapshot.caller.tenantId,
-        projectId: snapshot.caller.projectId,
-        proxyKeyId: snapshot.caller.proxyKeyId,
-        requestFingerprint: hash(payload.requestFingerprint),
-        payloadSha256,
-        accountId: candidate.authority.accountId,
-        currency: price?.currency ?? null,
-        maxCostMinorUnits: maxCost.toString(),
-        priceSnapshot: JSON.parse(canonical(priceSnapshot)),
-        authoritySnapshot: JSON.parse(
-          canonical({
-            revision: snapshot.revision,
-            principal: { kind: snapshot.caller.principalKind, id: snapshot.caller.principalId },
-            authorizationVersions: {
-              key: snapshot.caller.authzVersion,
-              modelScope: snapshot.caller.modelScopeVersion,
-              entitlement: snapshot.caller.entitlementVersion,
-              supplyProfile: snapshot.caller.supplyProfileVersion,
-              projectPolicy: snapshot.entitlement.projectPolicyVersion,
-            },
-            commercial: authority.commercial,
-            modelResolution,
-            candidate: candidate.authority,
-            route: authority.route,
-            compilerVersion: payload.compilerVersion,
-            estimatorVersion: payload.estimatorVersion,
-          }),
-        ),
-        allocationOwner: this.#options.allocationOwner,
-        sendDeadlineMs: snapshot.validUntilMs,
-      });
-      if (reserved.kind !== 'created')
+      const reserved = await observeRequestDiagnosticPhase('fast-intent', () =>
+        this.#options.journal.reserveIntent({
+          requestId: input.requestId,
+          attemptId,
+          tenantId: snapshot.caller.tenantId,
+          projectId: snapshot.caller.projectId,
+          proxyKeyId: snapshot.caller.proxyKeyId,
+          requestFingerprint: hash(payload.requestFingerprint),
+          payloadSha256,
+          accountId: candidate.authority.accountId,
+          currency: price?.currency ?? null,
+          maxCostMinorUnits: maxCost.toString(),
+          priceSnapshot: JSON.parse(canonical(priceSnapshot)),
+          authoritySnapshot: JSON.parse(
+            canonical({
+              revision: snapshot.revision,
+              principal: { kind: snapshot.caller.principalKind, id: snapshot.caller.principalId },
+              authorizationVersions: {
+                key: snapshot.caller.authzVersion,
+                modelScope: snapshot.caller.modelScopeVersion,
+                entitlement: snapshot.caller.entitlementVersion,
+                supplyProfile: snapshot.caller.supplyProfileVersion,
+                projectPolicy: snapshot.entitlement.projectPolicyVersion,
+              },
+              commercial: authority.commercial,
+              modelResolution,
+              candidate: candidate.authority,
+              route: authority.route,
+              compilerVersion: payload.compilerVersion,
+              estimatorVersion: payload.estimatorVersion,
+            }),
+          ),
+          allocationOwner: this.#options.allocationOwner,
+          allocationTargetConcurrency: Math.min(
+            1024,
+            this.#options.maxLocalConcurrency ?? 1024,
+            snapshot.limits.tenant.concurrency,
+            snapshot.limits.project.concurrency,
+            snapshot.limits.key.concurrency,
+            candidate.limits.concurrency,
+          ),
+          sendDeadlineMs: snapshot.validUntilMs,
+        }),
+      );
+      if (reserved.kind !== 'created') {
+        if (reserved.kind === 'existing') throw new FastGatewayExecutionError(409, 'FAST_REQUEST_EXISTS');
+        if (reserved.reason === 'send_deadline') throw new FastGatewayExecutionError(503, 'FAST_AUTHORITY_EXPIRED');
+        if (reserved.reason === 'credit_busy') throw new FastGatewayExecutionError(503, 'FAST_CREDIT_BUSY');
+        if (reserved.reason === 'closed') throw new FastGatewayExecutionError(503, 'FAST_JOURNAL_UNAVAILABLE');
         throw new FastGatewayExecutionError(
-          reserved.kind === 'existing' ? 409 : 429,
-          reserved.kind === 'existing' ? 'FAST_REQUEST_EXISTS' : 'FAST_CREDIT_UNAVAILABLE',
+          429,
+          reserved.reason === 'credit_not_ready' ? 'FAST_CREDIT_NOT_READY' : 'FAST_CREDIT_UNAVAILABLE',
         );
+      }
       intentId = reserved.intent.id;
       input.selected?.('fast', 'reserved_max');
       assertFresh();
-      if (!(await lease.assertValid())) throw new FastGatewayExecutionError(503, 'FAST_LEASE_UNAVAILABLE');
+      if (!(await observeRequestDiagnosticPhase('fast-lease-check', () => lease.assertValid())))
+        throw new FastGatewayExecutionError(503, 'FAST_LEASE_UNAVAILABLE');
       assertFresh();
       const bound: ProviderHttpBoundRequest = {
         tenantId: snapshot.caller.tenantId,
@@ -483,11 +524,12 @@ export class FastGatewayExecutor implements FastGatewayExecutorPort {
           candidate,
           validate: async () => {
             assertFresh();
-            if (!(await lease.assertValid())) throw new Error('Fast lease expired');
+            if (!(await observeRequestDiagnosticPhase('fast-lease-check', () => lease.assertValid())))
+              throw new Error('Fast lease expired');
             assertFresh();
           },
         },
-        () => this.#transport.sendFast(ticket),
+        () => observeRequestDiagnosticPhase('fast-transport', () => this.#transport.sendFast(ticket)),
       );
       const status = response.resultHttpStatus ?? 502;
       responseStatus = status;
@@ -521,16 +563,18 @@ export class FastGatewayExecutor implements FastGatewayExecutorPort {
         charge = calculated;
       }
       const receiptIntentId = intentId;
-      await this.#options.journal.appendReceipt({
-        intentId: receiptIntentId,
-        requestId: input.requestId,
-        tenantId: snapshot.caller.tenantId,
-        outcome: succeeded ? 'succeeded' : 'failed',
-        chargeMinorUnits: charge.toString(),
-        usage,
-        usageDigest: hash(canonical({ status, usage, charge: charge.toString() })),
-        httpStatus: status,
-      });
+      await observeRequestDiagnosticPhase('fast-receipt', () =>
+        this.#options.journal.appendReceipt({
+          intentId: receiptIntentId,
+          requestId: input.requestId,
+          tenantId: snapshot.caller.tenantId,
+          outcome: succeeded ? 'succeeded' : 'failed',
+          chargeMinorUnits: charge.toString(),
+          usage,
+          usageDigest: hash(canonical({ status, usage, charge: charge.toString() })),
+          httpStatus: status,
+        }),
+      );
       terminalReceipt = true;
       await gate.finish();
       return true;

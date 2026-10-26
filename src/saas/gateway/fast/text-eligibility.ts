@@ -30,7 +30,10 @@ const ROLES = new Set(['system', 'developer', 'user', 'assistant']);
 function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
-export function fastTextRequestUnsupported(body: Record<string, unknown>): string | null {
+export function fastTextRequestUnsupported(
+  body: Record<string, unknown>,
+  options: { readonly allowMissingOutputBound?: boolean } = {},
+): string | null {
   if (Object.keys(body).some((key) => !TEXT_KEYS.has(key))) return 'unbounded_request_field';
   if (typeof body.model !== 'string' || !Array.isArray(body.messages)) return 'request_shape';
   if (body.stream !== undefined && typeof body.stream !== 'boolean') return 'request_shape';
@@ -38,7 +41,7 @@ export function fastTextRequestUnsupported(body: Record<string, unknown>): strin
   if (body.service_tier !== undefined && body.service_tier !== 'default') return 'service_tier';
   const outputBounds = [body.max_tokens, body.max_completion_tokens].filter((value) => value !== undefined);
   if (
-    !outputBounds.length ||
+    (!outputBounds.length && !options.allowMissingOutputBound) ||
     outputBounds.some((value) => typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0)
   )
     return 'output_bound';

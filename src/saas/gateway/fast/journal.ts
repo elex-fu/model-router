@@ -270,6 +270,15 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
     // Mixed fast/strict business identity is not implemented. Never route a client
     // idempotency key into this namespace, even on a cache miss or empty allocation.
     if (input.idempotencyKey !== undefined) return { kind: 'denied', reason: 'strict_idempotency_required' };
+    // Own the exact money/authority bytes before any cold await. Caller mutation
+    // must not change what was validated, hashed, persisted or returned.
+    const priceSnapshotJson = input.priceSnapshot === null ? null : fastJournalCanonicalJson(input.priceSnapshot);
+    const authoritySnapshotJson = fastJournalCanonicalJson(input.authoritySnapshot);
+    input = {
+      ...input,
+      priceSnapshot: priceSnapshotJson === null ? null : JSON.parse(priceSnapshotJson),
+      authoritySnapshot: JSON.parse(authoritySnapshotJson),
+    };
     if (input.allocationOwner !== this.options.allocationOwner) throw new Error('FAST_JOURNAL_OWNER_MISMATCH');
     const max = parseMinorUnits(input.maxCostMinorUnits, { allowZero: true });
     let requestedTarget = this.tranche ?? 0n;
@@ -309,6 +318,22 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
       }
       this.observeMaximum(input.tenantId, input.currency, max, requestedTarget);
     }
+    // Do not include the send deadline or process epoch: a replay cannot acquire
+    // sending authority even if those differ. Every execution/money identity does.
+    const identity = fastJournalDigest({
+      requestId: input.requestId,
+      attemptId: input.attemptId,
+      tenantId: input.tenantId,
+      projectId: input.projectId,
+      proxyKeyId: input.proxyKeyId,
+      requestFingerprint: input.requestFingerprint,
+      payloadSha256: input.payloadSha256,
+      accountId: input.accountId,
+      currency: input.currency,
+      maxCostMinorUnits: input.maxCostMinorUnits,
+      priceSnapshot: input.priceSnapshot,
+      authoritySnapshot: input.authoritySnapshot,
+    });
     await this.ready;
     if (input.currency !== null) {
       // One retry is only for joining an older cold refill whose target predates
@@ -344,22 +369,6 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
     if (this.closed) return { kind: 'denied', reason: 'closed' };
     if (input.sendDeadlineMs <= Date.now()) return { kind: 'denied', reason: 'send_deadline' };
     const id = randomUUID();
-    // Do not include the send deadline or process epoch: a replay cannot acquire
-    // sending authority even if those differ. Every execution/money identity does.
-    const identity = fastJournalDigest({
-      requestId: input.requestId,
-      attemptId: input.attemptId,
-      tenantId: input.tenantId,
-      projectId: input.projectId,
-      proxyKeyId: input.proxyKeyId,
-      requestFingerprint: input.requestFingerprint,
-      payloadSha256: input.payloadSha256,
-      accountId: input.accountId,
-      currency: input.currency,
-      maxCostMinorUnits: input.maxCostMinorUnits,
-      priceSnapshot: input.priceSnapshot,
-      authoritySnapshot: input.authoritySnapshot,
-    });
     let unavailable: 'credit_busy' | 'credit_not_ready' = 'credit_not_ready';
     try {
       const result = await this.database.query<{ id: string | null; credit_busy: boolean }>(RESERVE_SQL, [
@@ -373,8 +382,8 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
         input.payloadSha256,
         input.currency,
         input.maxCostMinorUnits,
-        input.priceSnapshot === null ? null : fastJournalCanonicalJson(input.priceSnapshot),
-        fastJournalCanonicalJson(input.authoritySnapshot),
+        priceSnapshotJson,
+        authoritySnapshotJson,
         input.allocationOwner,
         this.epoch,
         new Date(input.sendDeadlineMs).toISOString(),
