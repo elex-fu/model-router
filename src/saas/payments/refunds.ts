@@ -9,10 +9,10 @@ import {
 } from '../db/advisory-lock-keys.js';
 import type { SqlExecutor, SqlResult } from '../db/types.js';
 import { ByokServicePlanService } from '../plans/service.js';
-import { isPaymentBindingResolver, type PaymentBindingResolver } from './merchant-binding.js';
 import type { CustomerWebhookEventProducer } from '../webhooks/producers.js';
 import type { PaymentProviderRefundAdapter } from './adapter.js';
 import { PaymentError } from './errors.js';
+import { isPaymentBindingResolver, type PaymentBindingResolver } from './merchant-binding.js';
 import type {
   PaymentDatabase,
   PaymentProviderRefundInput,
@@ -359,10 +359,14 @@ export class PaymentRefundService {
   ) {
     this.bindingResolver = isPaymentBindingResolver(provider) ? provider : null;
     this.provider = isPaymentBindingResolver(provider) ? null : provider;
-    if (this.bindingResolver && (options.providerKey !== undefined || options.merchantId !== undefined)) throw new TypeError('Binding resolver and legacy merchant configuration cannot be mixed');
+    if (this.bindingResolver && (options.providerKey !== undefined || options.merchantId !== undefined))
+      throw new TypeError('Binding resolver and legacy merchant configuration cannot be mixed');
     this.providerKey = this.bindingResolver ? 'alipay' : normalizeText(options.providerKey);
     this.merchantId = this.bindingResolver ? '' : normalizeText(options.merchantId);
-    if (this.provider && (this.provider.providerKey !== this.providerKey || this.provider.merchantId !== this.merchantId)) {
+    if (
+      this.provider &&
+      (this.provider.providerKey !== this.providerKey || this.provider.merchantId !== this.merchantId)
+    ) {
       throw new TypeError('Refund provider identity must match the configured provider and merchant');
     }
     this.now = options.now ?? (() => new Date());
@@ -705,7 +709,8 @@ export class PaymentRefundService {
     if (
       source.tenant_id !== tenantId ||
       (!this.bindingResolver && (source.provider_key !== this.providerKey || source.merchant_id !== this.merchantId)) ||
-      source.provider_key === null || source.merchant_id === null ||
+      source.provider_key === null ||
+      source.merchant_id === null ||
       !source.provider_order_id
     ) {
       throw new PaymentError('ORDER_STATE_CONFLICT');
@@ -713,14 +718,26 @@ export class PaymentRefundService {
     this.adapterFor(source);
   }
 
-  private adapterFor(row: { readonly binding_id?: string | null; readonly provider_key: string | null; readonly merchant_id: string | null; readonly currency?: string; readonly snapshot_currency?: string }): PaymentProviderRefundAdapter {
+  private adapterFor(row: {
+    readonly binding_id?: string | null;
+    readonly provider_key: string | null;
+    readonly merchant_id: string | null;
+    readonly currency?: string;
+    readonly snapshot_currency?: string;
+  }): PaymentProviderRefundAdapter {
     if (this.bindingResolver) {
       if (!row.binding_id) throw new PaymentError('PAYMENT_BINDING_UNAVAILABLE');
       const loaded = this.bindingResolver.require(row.binding_id);
-      if (loaded.binding.providerKey !== row.provider_key || loaded.binding.merchantId !== row.merchant_id || loaded.binding.currency !== (row.currency ?? row.snapshot_currency)) throw new PaymentError('REFUND_STATE_CONFLICT');
+      if (
+        loaded.binding.providerKey !== row.provider_key ||
+        loaded.binding.merchantId !== row.merchant_id ||
+        loaded.binding.currency !== (row.currency ?? row.snapshot_currency)
+      )
+        throw new PaymentError('REFUND_STATE_CONFLICT');
       return loaded.refundAdapter;
     }
-    if (!this.provider || row.provider_key !== this.providerKey || row.merchant_id !== this.merchantId) throw new PaymentError('REFUND_STATE_CONFLICT');
+    if (!this.provider || row.provider_key !== this.providerKey || row.merchant_id !== this.merchantId)
+      throw new PaymentError('REFUND_STATE_CONFLICT');
     return this.provider;
   }
 
@@ -848,9 +865,11 @@ export class PaymentRefundService {
   private async assertRefundableWalletAmount(executor: SqlExecutor, wallet: WalletRow, amount: bigint): Promise<void> {
     const [holds, freezes] = await Promise.all([
       executor.query<{ readonly total: StoredMinorUnits }>(
-        `SELECT COALESCE(SUM(amount_minor_units), 0)::text AS total
+        `SELECT ((SELECT COALESCE(SUM(amount_minor_units), 0)
          FROM saas_billing_reservations
-         WHERE tenant_id = $1 AND currency = $2 AND state IN ('reserved', 'reconciliation_pending')`,
+         WHERE tenant_id = $1 AND currency = $2 AND state IN ('reserved', 'reconciliation_pending'))
+         + (SELECT COALESCE(SUM(backing_minor_units), 0) FROM saas_fast_credit_allocations
+             WHERE tenant_id = $1 AND currency = $2))::text AS total`,
         [wallet.tenant_id, wallet.currency],
       ),
       executor.query<{ readonly total: StoredMinorUnits }>(

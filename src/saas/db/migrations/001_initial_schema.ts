@@ -1,3 +1,4 @@
+import { FAST_GATEWAY_JOURNAL_SAAS_MIGRATION } from './143_fast_gateway_journal.js';
 import { PAYMENT_CREATE_REQUEST_FINGERPRINT_SAAS_MIGRATION } from './142_payment_create_request_fingerprint.js';
 import { RESPONSES_CONTINUATION_CONTEXTS_SAAS_MIGRATION } from './141_responses_continuation_contexts.js';
 import { PAYMENT_MERCHANT_BINDINGS_SAAS_MIGRATION } from './140_payment_merchant_bindings.js';
@@ -799,4 +800,5 @@ export const SAAS_MIGRATIONS: readonly SaasMigration[] = [
   PAYMENT_MERCHANT_BINDINGS_SAAS_MIGRATION,
   RESPONSES_CONTINUATION_CONTEXTS_SAAS_MIGRATION,
   PAYMENT_CREATE_REQUEST_FINGERPRINT_SAAS_MIGRATION,
+  FAST_GATEWAY_JOURNAL_SAAS_MIGRATION,
 ];

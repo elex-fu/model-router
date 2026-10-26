@@ -215,7 +215,7 @@ export class FakeBillingDatabase {
       return result<Row>();
     }
 
-    if (statement.startsWith('select (select coalesce(sum(amount_minor_units), 0)::text')) {
+    if (statement.startsWith('select ((select coalesce(sum(amount_minor_units), 0)')) {
       const activeHolds = this.state.reservations
         .filter(
           (row) =>

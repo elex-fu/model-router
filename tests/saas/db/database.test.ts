@@ -444,3 +444,18 @@ test('atomic statement failures never replay the write and release an uncertain 
     assert.deepEqual(pool.client.releases, [isolation === 'read committed']);
   }
 });
+
+test('a native ROLLBACK command tag is never reported as a successful COMMIT', async () => {
+  const pool = new FakePool();
+  const original = pool.client.query.bind(pool.client);
+  pool.client.query = async <Row>(sql: string): Promise<SqlResult<Row>> => {
+    const result = await original<Row>(sql);
+    return sql === 'COMMIT' ? { ...result, command: 'ROLLBACK' } : result;
+  };
+  const database = createSaasDatabase(options(pool));
+  await assert.rejects(
+    database.transaction(async () => 'must-not-return'),
+    /did not commit/,
+  );
+  assert.deepEqual(pool.client.statements, ['BEGIN ISOLATION LEVEL READ COMMITTED', 'COMMIT', 'ROLLBACK']);
+});

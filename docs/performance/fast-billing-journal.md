@@ -1,0 +1,22 @@
+# Fast gateway durable money journal (migration 143)
+
+This is an opt-in bounded-text vertical slice, not a replacement for every strict billing policy. The gateway must reject unsupported scopes **before** creating an intent. Client-supplied idempotency keys, finite key/group monetary budgets without a compatible durable allocation policy, media, non-neutral price overrides and unbounded upstream output stay strict. Never fall back or retry upstream after an intent write has an uncertain result.
+
+## Money and execution authority
+
+* One autocommit SQL statement takes a shared process-epoch fence, atomically subtracts a verified hard maximum `M` from a gateway credit allocation and inserts an immutable intent. A duplicate insert rolls the entire statement back. A lookup after a duplicate can return only `existing`, never permission to send again.
+* Off-path refill acquires the existing wallet advisory fence. It subtracts legacy reservations, refund freezes and **all** fast allocation backing before allocating. The explicit tranche setting caps each owner's active backing; it is not an overdraft allowance. Legacy wallet summaries, reserves, refunds and new negative corrections include fast backing.
+* A generation takeover fences old owners. Retirement returns only unused available credit. Unresolved intent maxima never expire or become reusable because of a Redis restart, process exit or TTL.
+* Before terminal HTTP success/EOF, one SQL statement appends an immutable usage receipt and its durable work row. An ambiguous append may be retried with the exact same receipt; a conflicting digest is rejected. Failed/unknown receipts retain money for reconciliation.
+* The worker claims durable jobs with `FOR UPDATE SKIP LOCKED`, recomputes exact bigint charges `C` from the frozen price, verifies usage bounds and `C <= M`, posts balanced immutable ledger entries, adjusts the wallet and credit allocation, and completes the job in one transaction. A crash rolls everything back. Active allocations regain `M-C`; retired allocations release their entire `M` backing while charging `C` once.
+* Native PostgreSQL command tags are checked: a resolved `ROLLBACK` response to `COMMIT` is not reported as a committed transaction. Lost ACKs are still uncertain, never permission to replay upstream.
+
+## Runtime contract
+
+`createFastGatewayJournal(database, {allocationOwner, allocationTrancheMinorUnits, workerPollMs?, workerBatchSize?, onBackgroundError?})` starts the durable worker. Use the existing gateway role. `replenish(tenantId, currency)` prewarms credit; an empty-credit denial schedules the same work automatically off the request path. `drain()` settles available successful receipts; `close()` stops admissions/polling, drains and retires unused credit. Neither removes unknown liabilities. `calculateFastReceiptCharge` is shared with the gateway's pre-EOF validator.
+
+An allocation is currently one row per gateway owner/tenant/currency, not yet striped. The first worker implementation settles each receipt in a separate transaction; batching must be measured separately from foreground SQL counts. Receipt and intent tables are durable money records; existing audit/usage UI tables are not yet projected by this module. Unknown-outcome operator resolution remains a subsequent extension and intentionally cannot auto-release funds.
+
+## Verification
+
+Run `node scripts/run-commercial-postgres-gate.mjs --pg-bin /path/to/pg/bin --test-file tests/saas/gateway/fast/journal.postgres.integration.test.ts` on the runner's new disposable database. The test uses non-owning runtime roles, synthetic funds, concurrent gateways/workers, exact values above 2^53, duplicate rollback, commit-ACK loss, worker transaction fault boundaries, retirement and legacy reserve/correction coexistence. Also run the commercial strict suite after migration 143 and the focused migration, billing, privilege-manifest and database tests. These are correctness checks, not an actual HTTP throughput claim.

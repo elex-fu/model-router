@@ -15,13 +15,13 @@ test('109 registers directly after the applied 108 head as the R6a forward', () 
   assert.equal(migration.name, 'probe_monitors');
   assert.deepEqual(Object.keys(migration).sort(), ['name', 'sql', 'version']);
   const registered = SAAS_MIGRATIONS.map(({ version }) => version);
-  assert.deepEqual(registered.slice(-5), [138, 139, 140, 141, 142]);
+  assert.deepEqual(registered.slice(-5), [139, 140, 141, 142, 143]);
   const index = registered.indexOf(109);
   assert.ok(index > 0, '109 is registered');
   assert.equal(registered[index - 1], 108, '109 lands directly after the 108 head');
   // K2: 129 (provider_account_durable_fault_classification, renumbered from
   // main's 112 in this merge) is the new head.
-  assert.equal(registered.at(-1), 142, 'the append-only registry ends at payment create-request fingerprint 142');
+  assert.equal(registered.at(-1), 143, 'the append-only registry ends at fast gateway durable journal 143');
   assert.equal(registered.indexOf(109), registered.lastIndexOf(109));
   assert.equal(SAAS_MIGRATIONS[index], migration);
 });

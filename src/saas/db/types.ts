@@ -1,6 +1,8 @@
 export interface SqlResult<Row> {
   rows: Row[];
   rowCount: number | null;
+  /** Native PostgreSQL command tag; optional for legacy/custom executors. */
+  command?: string;
 }
 
 /** One immutable SQL statement selected by a trusted module at module load. */

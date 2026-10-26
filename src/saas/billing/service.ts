@@ -832,6 +832,12 @@ export class PlatformWalletLedgerService {
         counterpartyAccountType: 'billing_revenue',
         counterpartyAccountRef: correctionEventId,
       });
+      if (posting.created && delta < 0n) {
+        // Corrections cannot consume credit already escrowed for fast intents,
+        // legacy reservations, or refunds. A replay keeps its original result.
+        const before = await this.walletSummary(executor, wallet);
+        if (before.availableMinorUnits < -delta) throw new SaasBillingError('INSUFFICIENT_FUNDS');
+      }
       const projected = posting.created
         ? await this.adjustWalletProjection(executor, wallet, posting.transaction.id, delta)
         : wallet;
@@ -1161,9 +1167,11 @@ export class PlatformWalletLedgerService {
               wallet.created_at, wallet.updated_at,
               frozen.tenant_id AS freeze_tenant_id, frozen.reason_ref AS freeze_reason_ref,
               frozen.frozen_at AS freeze_frozen_at,
-              (SELECT COALESCE(SUM(amount_minor_units), 0)::text
+              ((SELECT COALESCE(SUM(amount_minor_units), 0)
                  FROM saas_billing_reservations
                 WHERE tenant_id = $1 AND currency = $2 AND state IN ('reserved', 'reconciliation_pending'))
+               + (SELECT COALESCE(SUM(backing_minor_units), 0) FROM saas_fast_credit_allocations
+                   WHERE tenant_id = $1 AND currency = $2))::text
                 AS active_hold_minor_units,
               (SELECT COALESCE(SUM(amount_minor_units), 0)::text
                  FROM saas_refund_wallet_freezes WHERE tenant_id = $1 AND currency = $2)
@@ -1241,9 +1249,11 @@ export class PlatformWalletLedgerService {
       freeze_frozen_at: StoredTimestamp | null;
     }>(
       `SELECT
-         (SELECT COALESCE(SUM(amount_minor_units), 0)::text
+         ((SELECT COALESCE(SUM(amount_minor_units), 0)
           FROM saas_billing_reservations
           WHERE tenant_id = $1 AND currency = $2 AND state IN ('reserved', 'reconciliation_pending'))
+          + (SELECT COALESCE(SUM(backing_minor_units), 0) FROM saas_fast_credit_allocations
+              WHERE tenant_id = $1 AND currency = $2))::text
            AS active_hold_minor_units,
          (SELECT COALESCE(SUM(amount_minor_units), 0)::text
           FROM saas_refund_wallet_freezes

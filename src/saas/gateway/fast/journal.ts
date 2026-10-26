@@ -1,0 +1,610 @@
+import { createHash, randomUUID } from 'node:crypto';
+import { normalizeCurrency, parseMinorUnits } from '../../billing/money.js';
+import { saasAdvisoryKey, WALLET_FENCE_SQL } from '../../db/advisory-lock-keys.js';
+import type { SaasDatabase, SqlExecutor } from '../../db/types.js';
+import { calculatePriceVersion } from '../../pricing/calculator.js';
+import type { CustomerPriceVersionRecord, TokenUsageInput } from '../../pricing/types.js';
+import { calculateConservativePriceHold, INPUT_BILLING_BUCKETS } from '../hold-calculator.js';
+
+export interface FastReserveIntentInput {
+  readonly requestId: string;
+  readonly attemptId: string;
+  readonly tenantId: string;
+  readonly projectId: string;
+  readonly proxyKeyId: string;
+  readonly idempotencyKey?: string;
+  readonly requestFingerprint: string;
+  readonly payloadSha256: string;
+  readonly accountId: string;
+  readonly currency: string | null;
+  readonly maxCostMinorUnits: string;
+  readonly priceSnapshot: unknown;
+  readonly authoritySnapshot: unknown;
+  readonly allocationOwner: string;
+  readonly sendDeadlineMs: number;
+}
+export interface FastIntent {
+  readonly id: string;
+  readonly requestId: string;
+  readonly attemptId: string;
+  readonly tenantId: string;
+  readonly maxCostMinorUnits: string;
+}
+export type FastReserveResult =
+  | { readonly kind: 'created'; readonly intent: FastIntent }
+  | { readonly kind: 'existing'; readonly requestId: string; readonly status: string }
+  | { readonly kind: 'denied'; readonly reason: string };
+export interface FastReceiptInput {
+  readonly intentId: string;
+  readonly requestId: string;
+  readonly tenantId: string;
+  readonly outcome: 'succeeded' | 'failed' | 'unknown';
+  readonly chargeMinorUnits: string | null;
+  readonly usage: Readonly<Record<string, string | null>>;
+  readonly usageDigest: string;
+  readonly httpStatus: number | null;
+}
+export interface FastGatewayJournal {
+  reserveIntent(input: FastReserveIntentInput): Promise<FastReserveResult>;
+  appendReceipt(input: FastReceiptInput): Promise<void>;
+}
+export interface FastJournalOptions {
+  readonly allocationOwner: string;
+  /** An explicit maximum escrow tranche, not an overdraft or a request estimate. */
+  readonly allocationTrancheMinorUnits: string;
+  readonly workerPollMs?: number;
+  readonly workerBatchSize?: number;
+  readonly onBackgroundError?: (code: string) => void;
+}
+
+/** Canonical JSON preserves bigint exactly and rejects non-JSON authority facts. */
+export function fastJournalCanonicalJson(value: unknown): string {
+  function canonical(item: unknown): unknown {
+    if (typeof item === 'bigint') return item.toString();
+    if (item === null || typeof item === 'string' || typeof item === 'boolean') return item;
+    if (typeof item === 'number' && Number.isSafeInteger(item)) return item;
+    if (Array.isArray(item)) return item.map(canonical);
+    if (typeof item === 'object' && item !== null && Object.getPrototypeOf(item) === Object.prototype) {
+      return Object.fromEntries(
+        Object.entries(item)
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([k, v]) => [k, canonical(v)]),
+      );
+    }
+    throw new Error('FAST_JOURNAL_INVALID_JSON');
+  }
+  return JSON.stringify(canonical(value));
+}
+export function fastJournalDigest(value: unknown): string {
+  return createHash('sha256').update(fastJournalCanonicalJson(value)).digest('hex');
+}
+function digest(value: string): void {
+  if (!/^[a-f0-9]{64}$/.test(value)) throw new Error('FAST_JOURNAL_INVALID_DIGEST');
+}
+function isUniqueViolation(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === '23505';
+}
+function one(rowCount: number | null): void {
+  if (rowCount !== 1) throw new Error('FAST_JOURNAL_STATE_CONFLICT');
+}
+
+/** No ON CONFLICT: a duplicate MUST roll back the dependent credit decrement. */
+const RESERVE_SQL = `/* fast-journal:reserve-intent */
+WITH current_owner AS MATERIALIZED (
+  SELECT owner, epoch FROM saas_fast_gateway_owners WHERE owner = $13 AND epoch = $14 FOR SHARE
+), credit AS (
+  UPDATE saas_fast_credit_allocations a
+     SET available_minor_units = available_minor_units - $10::bigint
+    FROM current_owner o
+   WHERE a.tenant_id = $4 AND a.currency = $9 AND a.owner = $13 AND a.epoch = $14
+     AND a.state = 'active' AND a.available_minor_units >= $10::bigint
+     AND o.owner = a.owner AND o.epoch = a.epoch
+  RETURNING a.id, a.epoch
+), inserted AS (
+  INSERT INTO saas_fast_gateway_intents
+    (id, request_id, attempt_id, tenant_id, project_id, proxy_key_id, request_fingerprint,
+     payload_sha256, account_id, currency, max_cost_minor_units, price_snapshot, authority_snapshot,
+     allocation_id, allocation_epoch, send_deadline, intent_digest)
+  SELECT $1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6::uuid, $7::text, $8::text, $16::text, $9::text, $10::bigint, $11::jsonb, $12::jsonb,
+         credit.id, credit.epoch, $15::timestamptz, $17::text FROM credit
+  UNION ALL
+  SELECT $1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6::uuid, $7::text, $8::text, $16::text, NULL::text, $10::bigint, NULL::jsonb, $12::jsonb,
+         NULL::uuid, NULL::uuid, $15::timestamptz, $17::text WHERE $9::text IS NULL
+  RETURNING id
+)
+SELECT id FROM inserted`;
+
+interface AllocationRow {
+  id: string;
+  tenant_id: string;
+  currency: string;
+  wallet_id: string;
+  state: 'active' | 'retired';
+  backing_minor_units: string;
+  available_minor_units: string;
+}
+
+export class PostgresFastGatewayJournal implements FastGatewayJournal {
+  private readonly epoch = randomUUID();
+  private readonly tranche: bigint;
+  private readonly ready: Promise<void>;
+  private readonly pendingReplenishments = new Map<string, Promise<void>>();
+  private timer?: NodeJS.Timeout;
+  private running?: Promise<number>;
+  private closed = false;
+
+  constructor(
+    private readonly database: SaasDatabase,
+    private readonly options: FastJournalOptions,
+  ) {
+    if (!options.allocationOwner.trim()) throw new Error('FAST_JOURNAL_INVALID_OWNER');
+    this.tranche = parseMinorUnits(options.allocationTrancheMinorUnits);
+    this.ready = database
+      .query(
+        `INSERT INTO saas_fast_gateway_owners(owner, epoch) VALUES ($1, $2)
+       ON CONFLICT (owner) DO UPDATE SET epoch = EXCLUDED.epoch`,
+        [options.allocationOwner, this.epoch],
+      )
+      .then(() => undefined);
+    // A failed startup cannot become an unhandled rejection before the first call.
+    void this.ready.catch(() => options.onBackgroundError?.('FAST_JOURNAL_STARTUP_FAILED'));
+  }
+
+  /** Factory starts this durable poller; the constructor stays deterministic for tests. */
+  start(): void {
+    if (this.closed || this.timer) return;
+    const interval = this.options.workerPollMs ?? 100;
+    if (!Number.isSafeInteger(interval) || interval < 10) throw new Error('FAST_JOURNAL_INVALID_POLL_INTERVAL');
+    this.timer = setInterval(() => {
+      if (this.running) return;
+      this.running = this.runOnce(this.options.workerBatchSize ?? 32);
+      void this.running
+        .catch(() => this.options.onBackgroundError?.('FAST_JOURNAL_WORKER_FAILED'))
+        .finally(() => {
+          this.running = undefined;
+        });
+    }, interval);
+    this.timer.unref();
+  }
+
+  async reserveIntent(input: FastReserveIntentInput): Promise<FastReserveResult> {
+    if (this.closed) return { kind: 'denied', reason: 'closed' };
+    // Mixed fast/strict business identity is not implemented. Never route a client
+    // idempotency key into this namespace, even on a cache miss or empty allocation.
+    if (input.idempotencyKey !== undefined) return { kind: 'denied', reason: 'strict_idempotency_required' };
+    if (input.allocationOwner !== this.options.allocationOwner) throw new Error('FAST_JOURNAL_OWNER_MISMATCH');
+    const max = parseMinorUnits(input.maxCostMinorUnits, { allowZero: true });
+    digest(input.requestFingerprint);
+    digest(input.payloadSha256);
+    if (!Number.isSafeInteger(input.sendDeadlineMs) || input.sendDeadlineMs <= Date.now())
+      return { kind: 'denied', reason: 'send_deadline' };
+    if (input.currency === null) {
+      if (max !== 0n || input.priceSnapshot !== null) throw new Error('FAST_JOURNAL_INVALID_BYOK');
+    } else {
+      normalizeCurrency(input.currency);
+      if (input.priceSnapshot === null) throw new Error('FAST_JOURNAL_MISSING_PRICE');
+      const price = validatePriceSnapshot(input.priceSnapshot);
+      if (
+        price.customerPrice.currency !== input.currency ||
+        max !==
+          calculateConservativePriceHold(price.customerPrice, {
+            inputUpperBound: price.maxInputTokens,
+            outputUpperBound: price.maxOutputTokens,
+            feasibleInputBuckets: INPUT_BILLING_BUCKETS,
+          }).calculation.amountMinorUnits
+      )
+        throw new Error('FAST_JOURNAL_INVALID_MAXIMUM');
+      if (max > this.tranche) return { kind: 'denied', reason: 'tranche_too_small' };
+    }
+    await this.ready;
+    const id = randomUUID();
+    // Do not include the send deadline or process epoch: a replay cannot acquire
+    // sending authority even if those differ. Every execution/money identity does.
+    const identity = fastJournalDigest({
+      requestId: input.requestId,
+      attemptId: input.attemptId,
+      tenantId: input.tenantId,
+      projectId: input.projectId,
+      proxyKeyId: input.proxyKeyId,
+      requestFingerprint: input.requestFingerprint,
+      payloadSha256: input.payloadSha256,
+      accountId: input.accountId,
+      currency: input.currency,
+      maxCostMinorUnits: input.maxCostMinorUnits,
+      priceSnapshot: input.priceSnapshot,
+      authoritySnapshot: input.authoritySnapshot,
+    });
+    try {
+      const result = await this.database.query<{ id: string }>(RESERVE_SQL, [
+        id,
+        input.requestId,
+        input.attemptId,
+        input.tenantId,
+        input.projectId,
+        input.proxyKeyId,
+        input.requestFingerprint,
+        input.payloadSha256,
+        input.currency,
+        input.maxCostMinorUnits,
+        input.priceSnapshot === null ? null : fastJournalCanonicalJson(input.priceSnapshot),
+        fastJournalCanonicalJson(input.authoritySnapshot),
+        input.allocationOwner,
+        this.epoch,
+        new Date(input.sendDeadlineMs).toISOString(),
+        input.accountId,
+        identity,
+      ]);
+      if (result.rows.length === 1 && result.rows[0]?.id === id) {
+        return {
+          kind: 'created',
+          intent: {
+            id,
+            requestId: input.requestId,
+            attemptId: input.attemptId,
+            tenantId: input.tenantId,
+            maxCostMinorUnits: input.maxCostMinorUnits,
+          },
+        };
+      }
+      if (result.rows.length !== 0) throw new Error('FAST_JOURNAL_UNCERTAIN_RESERVE');
+    } catch (error) {
+      // All non-unique errors, including lost commit ACK, remain uncertain. Never
+      // retry a write or return a sending authority from a subsequent lookup.
+      if (!isUniqueViolation(error)) throw error;
+      const existing = await this.findExisting(input, identity);
+      return existing ?? { kind: 'denied', reason: 'identity_conflict' };
+    }
+    const existing = await this.findExisting(input, identity);
+    if (existing) return existing;
+    if (input.currency !== null) this.scheduleReplenishment(input.tenantId, input.currency);
+    return { kind: 'denied', reason: 'credit_not_ready' };
+  }
+
+  private async findExisting(input: FastReserveIntentInput, identity: string): Promise<FastReserveResult | null> {
+    const result = await this.database.query<{ request_id: string; intent_digest: string; status: string }>(
+      `SELECT i.request_id, i.intent_digest, COALESCE(j.state, r.outcome, 'unresolved') AS status
+         FROM saas_fast_gateway_intents i LEFT JOIN saas_fast_gateway_receipts r ON r.intent_id = i.id
+         LEFT JOIN saas_fast_billing_jobs j ON j.intent_id = i.id
+        WHERE i.request_id = $1 AND i.tenant_id = $2`,
+      [input.requestId, input.tenantId],
+    );
+    const row = result.rows[0];
+    if (!row) return null;
+    return row.intent_digest === identity
+      ? { kind: 'existing', requestId: row.request_id, status: row.status }
+      : { kind: 'denied', reason: 'identity_conflict' };
+  }
+
+  async appendReceipt(input: FastReceiptInput): Promise<void> {
+    digest(input.usageDigest);
+    if (input.chargeMinorUnits !== null) parseMinorUnits(input.chargeMinorUnits, { allowZero: true });
+    if (input.outcome === 'unknown' && input.chargeMinorUnits !== null) throw new Error('FAST_JOURNAL_UNKNOWN_CHARGE');
+    for (const value of Object.values(input.usage)) if (value !== null) parseMinorUnits(value, { allowZero: true });
+    const receiptDigest = fastJournalDigest(input);
+    try {
+      const result = await this.database.query(
+        `/* fast-journal:append-receipt */
+         WITH receipt AS (
+           INSERT INTO saas_fast_gateway_receipts
+             (intent_id, tenant_id, request_id, outcome, charge_minor_units, usage, usage_digest, receipt_digest, http_status)
+           VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9) RETURNING intent_id
+         ) INSERT INTO saas_fast_billing_jobs(intent_id, state)
+           SELECT intent_id, CASE WHEN $4 = 'succeeded' THEN 'pending' ELSE 'blocked' END FROM receipt`,
+        [
+          input.intentId,
+          input.tenantId,
+          input.requestId,
+          input.outcome,
+          input.chargeMinorUnits,
+          fastJournalCanonicalJson(input.usage),
+          input.usageDigest,
+          receiptDigest,
+          input.httpStatus,
+        ],
+      );
+      one(result.rowCount);
+    } catch (error) {
+      if (!isUniqueViolation(error)) throw error;
+      const result = await this.database.query<{ receipt_digest: string }>(
+        'SELECT receipt_digest FROM saas_fast_gateway_receipts WHERE intent_id = $1 AND tenant_id = $2 AND request_id = $3',
+        [input.intentId, input.tenantId, input.requestId],
+      );
+      if (result.rows[0]?.receipt_digest !== receiptDigest) throw new Error('FAST_JOURNAL_RECEIPT_CONFLICT');
+    }
+  }
+
+  private scheduleReplenishment(tenantId: string, currency: string): void {
+    const key = `${tenantId}:${currency}`;
+    if (this.closed || this.pendingReplenishments.has(key)) return;
+    const work = this.replenish(tenantId, currency);
+    this.pendingReplenishments.set(key, work);
+    void work
+      .catch(() => this.options.onBackgroundError?.('FAST_JOURNAL_REPLENISH_FAILED'))
+      .finally(() => this.pendingReplenishments.delete(key));
+  }
+
+  /** Slow control path. The same fence used by strict billing and refunds is mandatory. */
+  async replenish(tenantId: string, currency: string): Promise<void> {
+    await this.ready;
+    normalizeCurrency(currency);
+    await this.database.transaction(async (tx) => {
+      const owner = await tx.query<{ epoch: string }>(
+        'SELECT epoch FROM saas_fast_gateway_owners WHERE owner = $1 FOR SHARE',
+        [this.options.allocationOwner],
+      );
+      if (owner.rows[0]?.epoch !== this.epoch) throw new Error('FAST_JOURNAL_FENCED_OWNER');
+      await tx.query(WALLET_FENCE_SQL, [saasAdvisoryKey.walletFence(tenantId, currency)]);
+      // Explicit generation takeover, NOT time expiry. Unresolved money stays
+      // backed; stale-generation CAS fails once these rows are retired.
+      await tx.query(
+        `UPDATE saas_fast_credit_allocations
+          SET backing_minor_units = backing_minor_units - available_minor_units,
+              available_minor_units = 0, state = 'retired'
+          WHERE tenant_id = $1 AND currency = $2 AND owner = $3 AND epoch <> $4 AND state = 'active'`,
+        [tenantId, currency, this.options.allocationOwner, this.epoch],
+      );
+      const facts = await tx.query<{ id: string; available: string; own_backing: string; frozen: boolean }>(
+        `SELECT w.id, (w.posted_balance_minor_units
+          - (SELECT COALESCE(SUM(amount_minor_units),0) FROM saas_billing_reservations WHERE tenant_id=$1 AND currency=$2 AND state IN ('reserved','reconciliation_pending'))
+          - (SELECT COALESCE(SUM(amount_minor_units),0) FROM saas_refund_wallet_freezes WHERE tenant_id=$1 AND currency=$2)
+          - (SELECT COALESCE(SUM(backing_minor_units),0) FROM saas_fast_credit_allocations WHERE tenant_id=$1 AND currency=$2))::text AS available,
+          (SELECT COALESCE(SUM(backing_minor_units),0)::text FROM saas_fast_credit_allocations
+            WHERE tenant_id=$1 AND currency=$2 AND owner=$3 AND epoch=$4 AND state='active') AS own_backing,
+          EXISTS (SELECT 1 FROM saas_billing_spending_freezes WHERE tenant_id=$1) AS frozen
+         FROM saas_wallets w WHERE tenant_id=$1 AND currency=$2`,
+        [tenantId, currency, this.options.allocationOwner, this.epoch],
+      );
+      const wallet = facts.rows[0];
+      if (!wallet || wallet.frozen || BigInt(wallet.available) <= 0n) return;
+      const needed = this.tranche - BigInt(wallet.own_backing);
+      if (needed <= 0n) return;
+      const amount = BigInt(wallet.available) < needed ? BigInt(wallet.available) : needed;
+      await tx.query(
+        `INSERT INTO saas_fast_credit_allocations
+        (id,tenant_id,wallet_id,currency,owner,epoch,state,backing_minor_units,available_minor_units)
+        VALUES ($1,$2,$3,$4,$5,$6,'active',$7,$7)
+        ON CONFLICT (tenant_id,currency,owner,epoch) WHERE state='active'
+        DO UPDATE SET backing_minor_units=saas_fast_credit_allocations.backing_minor_units+$7,
+                      available_minor_units=saas_fast_credit_allocations.available_minor_units+$7`,
+        [randomUUID(), tenantId, wallet.id, currency, this.options.allocationOwner, this.epoch, amount.toString()],
+      );
+    });
+  }
+
+  /** Release only demonstrably unused credit; unresolved intents survive retirement. */
+  async retireAllocations(): Promise<void> {
+    await this.ready;
+    const rows = await this.database.query<{ tenant_id: string; currency: string }>(
+      "SELECT DISTINCT tenant_id, currency FROM saas_fast_credit_allocations WHERE owner=$1 AND epoch=$2 AND state='active' ORDER BY tenant_id,currency",
+      [this.options.allocationOwner, this.epoch],
+    );
+    for (const row of rows.rows)
+      await this.database.transaction(async (tx) => {
+        await tx.query(WALLET_FENCE_SQL, [saasAdvisoryKey.walletFence(row.tenant_id, row.currency)]);
+        await tx.query(
+          `UPDATE saas_fast_credit_allocations SET backing_minor_units=backing_minor_units-available_minor_units,
+        available_minor_units=0,state='retired' WHERE tenant_id=$1 AND currency=$2 AND owner=$3 AND epoch=$4 AND state='active'`,
+          [row.tenant_id, row.currency, this.options.allocationOwner, this.epoch],
+        );
+      });
+  }
+
+  /** Durable row-lock claims; a killed worker rolls back its claim and all posting effects. */
+  async runOnce(limit = 32): Promise<number> {
+    await this.ready;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) throw new Error('FAST_JOURNAL_INVALID_BATCH');
+    let count = 0;
+    while (count < limit) {
+      const processed = await this.database.transaction(async (tx) => {
+        const job = await tx.query<{ intent_id: string }>(
+          "SELECT intent_id FROM saas_fast_billing_jobs WHERE state='pending' ORDER BY created_at,intent_id LIMIT 1 FOR UPDATE SKIP LOCKED",
+        );
+        if (!job.rows[0]) return false;
+        await this.settle(tx, job.rows[0].intent_id);
+        return true;
+      });
+      if (!processed) break;
+      count++;
+    }
+    return count;
+  }
+
+  private async settle(tx: SqlExecutor, intentId: string): Promise<void> {
+    const result = await tx.query<SettlementRow>(
+      `SELECT i.*, r.charge_minor_units, r.usage, r.usage_digest, r.outcome
+      FROM saas_fast_gateway_intents i JOIN saas_fast_gateway_receipts r ON r.intent_id=i.id WHERE i.id=$1`,
+      [intentId],
+    );
+    const row = result.rows[0];
+    if (!row) throw new Error('FAST_JOURNAL_MISSING_INTENT');
+    let charge: bigint;
+    try {
+      charge = calculateFastReceiptCharge(row.price_snapshot, row.usage);
+      if (
+        row.outcome !== 'succeeded' ||
+        row.charge_minor_units === null ||
+        charge !== BigInt(row.charge_minor_units) ||
+        charge > BigInt(row.max_cost_minor_units)
+      )
+        throw new Error('invalid charge');
+    } catch {
+      await tx.query(
+        "UPDATE saas_fast_billing_jobs SET state='blocked', attempts=attempts+1,last_error='receipt_price_mismatch' WHERE intent_id=$1",
+        [intentId],
+      );
+      return;
+    }
+    let ledgerId: string | null = null;
+    if (row.currency !== null) {
+      await tx.query(WALLET_FENCE_SQL, [saasAdvisoryKey.walletFence(row.tenant_id, row.currency)]);
+      const allocation = (
+        await tx.query<AllocationRow>('SELECT * FROM saas_fast_credit_allocations WHERE id=$1 FOR UPDATE', [
+          row.allocation_id,
+        ])
+      ).rows[0];
+      if (!allocation || allocation.tenant_id !== row.tenant_id || allocation.currency !== row.currency)
+        throw new Error('FAST_JOURNAL_ALLOCATION_MISMATCH');
+      if (charge > 0n) {
+        ledgerId = randomUUID();
+        await postLedger(tx, row, allocation.wallet_id, ledgerId, charge);
+      }
+      const maximum = BigInt(row.max_cost_minor_units);
+      const releasedBacking = allocation.state === 'active' ? charge : maximum;
+      const restoredAvailable = allocation.state === 'active' ? maximum - charge : 0n;
+      const updated = await tx.query(
+        `UPDATE saas_fast_credit_allocations
+        SET backing_minor_units=backing_minor_units-$2::bigint, available_minor_units=available_minor_units+$3::bigint
+        WHERE id=$1 AND backing_minor_units >= $2::bigint`,
+        [allocation.id, releasedBacking.toString(), restoredAvailable.toString()],
+      );
+      one(updated.rowCount);
+    }
+    const completed = await tx.query(
+      `UPDATE saas_fast_billing_jobs SET state='completed', attempts=attempts+1,
+      ledger_transaction_id=$2,completed_at=now(),last_error=NULL WHERE intent_id=$1 AND state='pending'`,
+      [intentId, ledgerId],
+    );
+    one(completed.rowCount);
+  }
+
+  /** Waits for all known pending successes; blocked unknowns remain durable and backed. */
+  async drain(): Promise<void> {
+    await Promise.all([...this.pendingReplenishments.values()]);
+    if (this.running) await this.running;
+    while (await this.runOnce(this.options.workerBatchSize ?? 32)) {
+      /* durable drain */
+    }
+  }
+  async close(): Promise<void> {
+    this.closed = true;
+    if (this.timer) clearInterval(this.timer);
+    this.timer = undefined;
+    await this.drain();
+    await this.retireAllocations();
+  }
+}
+
+interface SettlementRow {
+  id: string;
+  request_id: string;
+  tenant_id: string;
+  currency: string | null;
+  allocation_id: string | null;
+  max_cost_minor_units: string;
+  price_snapshot: unknown;
+  charge_minor_units: string | null;
+  usage: Readonly<Record<string, string | null>>;
+  usage_digest: string;
+  outcome: string;
+}
+
+/** Frozen customer price; no current-price lookup can change a receipt's bill. */
+export function calculateFastReceiptCharge(snapshot: unknown, usage: Readonly<Record<string, string | null>>): bigint {
+  if (snapshot === null) return 0n;
+  const price = validatePriceSnapshot(snapshot);
+  const input = usage.inputTotal;
+  const output = usage.outputTotal;
+  if (input === null || input === undefined || output === null || output === undefined)
+    throw new Error('FAST_JOURNAL_INCOMPLETE_USAGE');
+  parseMinorUnits(input, { allowZero: true });
+  parseMinorUnits(output, { allowZero: true });
+  if (usage.perUnitUnits !== undefined && usage.perUnitUnits !== null && usage.perUnitUnits !== '0') {
+    throw new Error('FAST_JOURNAL_UNSUPPORTED_USAGE');
+  }
+  const normalized: TokenUsageInput = {
+    inputTotal: input,
+    inputUncached: usage.inputUncached ?? null,
+    outputTotal: output,
+    cacheRead: usage.cacheRead ?? null,
+    cacheWrite: usage.cacheWrite ?? null,
+    cacheWrite5m: usage.cacheWrite5m ?? null,
+    cacheWrite1h: usage.cacheWrite1h ?? null,
+    reasoningOutput: usage.reasoningOutput ?? null,
+  };
+  const buckets = ['inputUncached', 'cacheRead', 'cacheWrite', 'cacheWrite5m', 'cacheWrite1h'] as const;
+  if (buckets.some((key) => usage[key] !== null && usage[key] !== undefined)) {
+    const total = buckets.reduce(
+      (sum, key) => sum + (usage[key] == null ? 0n : parseMinorUnits(usage[key], { allowZero: true })),
+      0n,
+    );
+    if (total !== BigInt(input)) throw new Error('FAST_JOURNAL_INCONSISTENT_USAGE');
+  }
+  if (BigInt(input) > BigInt(price.maxInputTokens) || BigInt(output) > BigInt(price.maxOutputTokens))
+    throw new Error('FAST_JOURNAL_USAGE_EXCEEDS_BOUND');
+  const calculation = calculatePriceVersion(price.customerPrice, normalized, { requireComplete: false });
+  if (!calculation.complete) throw new Error('FAST_JOURNAL_INCOMPLETE_USAGE');
+  return calculation.amountMinorUnits;
+}
+
+interface FastPriceSnapshot {
+  readonly schemaVersion: 1;
+  readonly customerPrice: CustomerPriceVersionRecord;
+  readonly maxInputTokens: string;
+  readonly maxOutputTokens: string;
+}
+function validatePriceSnapshot(snapshot: unknown): FastPriceSnapshot {
+  if (!snapshot || typeof snapshot !== 'object') throw new Error('FAST_JOURNAL_INVALID_PRICE');
+  const price = snapshot as FastPriceSnapshot;
+  if (
+    price.schemaVersion !== 1 ||
+    !price.customerPrice ||
+    price.customerPrice.kind !== 'customer' ||
+    price.customerPrice.tokenMultipliers !== null
+  )
+    throw new Error('FAST_JOURNAL_INVALID_PRICE');
+  parseMinorUnits(price.maxInputTokens, { allowZero: true });
+  parseMinorUnits(price.maxOutputTokens, { allowZero: true });
+  return price;
+}
+
+async function postLedger(
+  tx: SqlExecutor,
+  row: SettlementRow,
+  walletId: string,
+  ledgerId: string,
+  charge: bigint,
+): Promise<void> {
+  // The immutable journal id is the ledger's business key. Do not swallow a
+  // unique violation: the entire job transaction must roll back before replay.
+  await tx.query(
+    `WITH posting AS (
+    INSERT INTO saas_ledger_transactions(id,tenant_id,currency,idempotency_namespace,business_key,source_type,
+      amount_minor_units,metadata_ref,price_snapshot_ref,usage_evidence_ref)
+    VALUES ($1,$2,$3,'fast-journal-v1',$4,'billing_settlement',$5,$6,$7,$8) RETURNING id
+  ) INSERT INTO saas_ledger_entries(id,transaction_id,tenant_id,currency,direction,amount_minor_units,account_type,account_ref,wallet_id)
+    SELECT e.id,posting.id,$2,$3,e.direction,$5,e.account_type,e.account_ref,e.wallet_id FROM posting CROSS JOIN (VALUES
+      ($9::uuid,'debit','wallet',$11::text,$11::uuid),($10::uuid,'credit','billing_revenue','fast-journal-v1',NULL::uuid)
+    ) e(id,direction,account_type,account_ref,wallet_id)`,
+    [
+      ledgerId,
+      row.tenant_id,
+      row.currency,
+      row.id,
+      charge.toString(),
+      `fast-intent:${row.id}`,
+      `fast-price:${row.id}`,
+      `fast-receipt:${row.id}:${row.usage_digest}`,
+      randomUUID(),
+      randomUUID(),
+      walletId,
+    ],
+  );
+  const projected = await tx.query(
+    `WITH context AS MATERIALIZED (
+    SELECT set_config('saas.billing_ledger_projection_write','on',true),
+           set_config('saas.billing_ledger_transaction_id',$4,true)
+  ) UPDATE saas_wallets SET posted_balance_minor_units=posted_balance_minor_units-$3::bigint,updated_at=now()
+    FROM context WHERE id=$1 AND tenant_id=$2 AND posted_balance_minor_units >= $3::bigint RETURNING id`,
+    [walletId, row.tenant_id, charge.toString(), ledgerId],
+  );
+  one(projected.rowCount);
+}
+
+export function createFastGatewayJournal(
+  database: SaasDatabase,
+  options: FastJournalOptions,
+): PostgresFastGatewayJournal {
+  const journal = new PostgresFastGatewayJournal(database, options);
+  journal.start();
+  return journal;
+}

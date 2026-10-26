@@ -631,9 +631,10 @@ test('wallet summary combines both exact sums at the original reserve observatio
   );
 
   const expectedSql =
-    'select (select coalesce(sum(amount_minor_units), 0)::text from saas_billing_reservations ' +
+    'select ((select coalesce(sum(amount_minor_units), 0) from saas_billing_reservations ' +
     "where tenant_id = $1 and currency = $2 and state in ('reserved', 'reconciliation_pending')) " +
-    'as active_hold_minor_units, (select coalesce(sum(amount_minor_units), 0)::text ' +
+    '+ (select coalesce(sum(backing_minor_units), 0) from saas_fast_credit_allocations ' +
+    'where tenant_id = $1 and currency = $2))::text as active_hold_minor_units, (select coalesce(sum(amount_minor_units), 0)::text ' +
     'from saas_refund_wallet_freezes where tenant_id = $1 and currency = $2 ) as active_refund_freeze_minor_units';
   assert.equal(observations.length, 2);
   assert.match(observations[0]!.sql, /billing:reserve-wallet-snapshot/);

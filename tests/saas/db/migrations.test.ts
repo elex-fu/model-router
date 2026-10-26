@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { test } from 'node:test';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import { test } from 'node:test';
 import { Pool as PgPool, type PoolClient } from 'pg';
 import { runSaasMigrations } from '../../../src/saas/db/migrate.js';
 import { SAAS_MIGRATIONS, type SaasMigration } from '../../../src/saas/db/migrations/001_initial_schema.js';
@@ -201,11 +201,19 @@ const realPostgresUrl = process.env.SAAS_TEST_DATABASE_URL;
  */
 async function withIsolatedPostgresDatabase<T>(work: (pool: ScopedPostgresPool) => Promise<T>): Promise<T> {
   if (!realPostgresUrl) throw new Error('SAAS_TEST_DATABASE_URL is required');
-  if (!process.env.SAAS_TEST_DATABASE_ADMIN_URL) throw new Error('SAAS_TEST_DATABASE_ADMIN_URL is required for isolated migration fixture provisioning');
+  if (!process.env.SAAS_TEST_DATABASE_ADMIN_URL)
+    throw new Error('SAAS_TEST_DATABASE_ADMIN_URL is required for isolated migration fixture provisioning');
   const administratorUrl = new URL(process.env.SAAS_TEST_DATABASE_ADMIN_URL);
   const migratorUrl = new URL(realPostgresUrl);
-  if (decodeURIComponent(migratorUrl.username) !== 'model_router_saas_migrator') throw new Error('SAAS_TEST_DATABASE_URL must authenticate as the non-superuser model_router_saas_migrator test login');
-  if (administratorUrl.hostname !== migratorUrl.hostname || (administratorUrl.port || '5432') !== (migratorUrl.port || '5432')) throw new Error('Migration fixture administrator and migrator URLs must target the same test PostgreSQL instance');
+  if (decodeURIComponent(migratorUrl.username) !== 'model_router_saas_migrator')
+    throw new Error(
+      'SAAS_TEST_DATABASE_URL must authenticate as the non-superuser model_router_saas_migrator test login',
+    );
+  if (
+    administratorUrl.hostname !== migratorUrl.hostname ||
+    (administratorUrl.port || '5432') !== (migratorUrl.port || '5432')
+  )
+    throw new Error('Migration fixture administrator and migrator URLs must target the same test PostgreSQL instance');
   const maintenanceUrl = new URL(administratorUrl);
   maintenanceUrl.pathname = '/postgres';
   const databaseName = `model_router_test_migrations_${randomUUID().replaceAll('-', '')}`;
@@ -219,7 +227,9 @@ async function withIsolatedPostgresDatabase<T>(work: (pool: ScopedPostgresPool) 
       await administrator.query(`CREATE DATABASE "${databaseName}"`);
       created = true;
     } catch {
-      throw new Error('Migration fixture setup requires a PostgreSQL test administrator with CREATEDB; configure SAAS_TEST_DATABASE_ADMIN_URL (or SAAS_TEST_DATABASE_URL) accordingly');
+      throw new Error(
+        'Migration fixture setup requires a PostgreSQL test administrator with CREATEDB; configure SAAS_TEST_DATABASE_ADMIN_URL (or SAAS_TEST_DATABASE_URL) accordingly',
+      );
     }
     const setupUrl = new URL(administratorUrl);
     setupUrl.pathname = `/${databaseName}`;
@@ -673,6 +683,7 @@ test('the default migration runner applies the unique current 001-060 + 063 + 08
     140,
     141,
     142,
+    143,
   ];
   assert.deepEqual(
     SAAS_MIGRATIONS.map(({ version }) => version),
@@ -682,7 +693,7 @@ test('the default migration runner applies the unique current 001-060 + 063 + 08
     pool.applied.map(({ version }) => version),
     versions,
   );
-  assert.equal(new Set(pool.applied.map(({ version }) => version)).size, 123);
+  assert.equal(new Set(pool.applied.map(({ version }) => version)).size, 124);
   assert.deepEqual(
     pool.applied.slice(49, 52).map(({ version }) => version),
     [50, 51, 52],
@@ -764,9 +775,10 @@ test('the default migration runner applies the unique current 001-060 + 063 + 08
       'payment_merchant_bindings',
       'responses_continuation_contexts',
       'payment_create_request_fingerprint',
+      'fast_gateway_durable_credit_journal',
     ],
   );
-  assert.equal(pool.applied.length, 123);
+  assert.equal(pool.applied.length, 124);
   assert.deepEqual(
     pool.applied,
     SAAS_MIGRATIONS.map(({ version, name, sql }) => ({
@@ -952,6 +964,7 @@ test('initial schema preserves platform, membership, audit, and policy identity 
       140,
       141,
       142,
+      143,
     ],
     'frozen contiguous 001-060 prefix plus the documented 061/062 and retired 064-079 gaps, 063 usage_corrections, 080 api_key_ip_policies, 081 api_key_budgets, 082 provider_account_scheduling and 083 platform_credential_validation_jobs',
   );
@@ -1382,7 +1395,10 @@ test('migration 018 enforces account ownership and lets 017 join the exact platf
 
   await withIsolatedPostgresDatabase(async (pool) => {
     // Exercise 017/018 at the final pre-commercial-authority schema boundary.
-    await runSaasMigrations(pool, SAAS_MIGRATIONS.filter(({ version }) => version <= 22));
+    await runSaasMigrations(
+      pool,
+      SAAS_MIGRATIONS.filter(({ version }) => version <= 22),
+    );
     await seedAttemptBindingFixture(pool, true);
 
     const insertAttempt = async (input: {
@@ -1713,32 +1729,54 @@ test('migration 018 enforces account ownership and lets 017 join the exact platf
       supplier: (await pool.query(supplierStateSql)).rows,
     };
     await runSaasMigrations(pool, SAAS_MIGRATIONS);
-    assert.deepEqual({
-      requests: (await pool.query(requestStateSql, [ids.tenantOne])).rows,
-      attempts: (await pool.query(attemptStateSql, [ids.tenantOne])).rows,
-      supplier: (await pool.query(supplierStateSql)).rows,
-    }, beforeUpgrade);
+    assert.deepEqual(
+      {
+        requests: (await pool.query(requestStateSql, [ids.tenantOne])).rows,
+        attempts: (await pool.query(attemptStateSql, [ids.tenantOne])).rows,
+        supplier: (await pool.query(supplierStateSql)).rows,
+      },
+      beforeUpgrade,
+    );
     for (const table of ['saas_requests', 'saas_attempts']) {
-      const authorities = await pool.query<any>(`SELECT customer_metering_policy_id,
+      const authorities = await pool.query<any>(
+        `SELECT customer_metering_policy_id,
         customer_metering_policy_version, provider_metering_policy_id,
-        provider_metering_policy_version, contract_attestation_id FROM ${table} WHERE tenant_id = $1`, [ids.tenantOne]);
+        provider_metering_policy_version, contract_attestation_id FROM ${table} WHERE tenant_id = $1`,
+        [ids.tenantOne],
+      );
       assert.ok(authorities.rows.length > 0);
-      assert.ok(authorities.rows.every(row => Object.values(row).every(value => value === null)));
+      assert.ok(authorities.rows.every((row) => Object.values(row).every((value) => value === null)));
     }
     const prepared = await pool.query<{ prepared_evidence_id: string | null }>(
-      'SELECT prepared_evidence_id FROM saas_attempts WHERE tenant_id = $1', [ids.tenantOne]);
-    assert.ok(prepared.rows.every(row => row.prepared_evidence_id === null));
+      'SELECT prepared_evidence_id FROM saas_attempts WHERE tenant_id = $1',
+      [ids.tenantOne],
+    );
+    assert.ok(prepared.rows.every((row) => row.prepared_evidence_id === null));
     const migrationHistory = await pool.query<{ version: number; name: string; checksum: string }>(
-      'SELECT version, name, checksum FROM saas_schema_migrations ORDER BY version');
-    assert.deepEqual(migrationHistory.rows, SAAS_MIGRATIONS.map(({ version, name, sql }) => ({
-      version, name, checksum: createHash('sha256').update(name).update('\0').update(sql).digest('hex'),
-    })));
-    await assert.rejects(pool.query(`UPDATE saas_attempts SET dispatch_state = 'dispatching',
+      'SELECT version, name, checksum FROM saas_schema_migrations ORDER BY version',
+    );
+    assert.deepEqual(
+      migrationHistory.rows,
+      SAAS_MIGRATIONS.map(({ version, name, sql }) => ({
+        version,
+        name,
+        checksum: createHash('sha256').update(name).update('\0').update(sql).digest('hex'),
+      })),
+    );
+    await assert.rejects(
+      pool.query(
+        `UPDATE saas_attempts SET dispatch_state = 'dispatching',
       state_version = state_version + 1, updated_at = now() WHERE tenant_id = $1 AND id = $2`,
-      [ids.tenantOne, ids.attemptByok]), (error: unknown) => {
+        [ids.tenantOne, ids.attemptByok],
+      ),
+      (error: unknown) => {
         const pgError = error as { code?: string; message?: string };
-        return pgError.code === '55000' && pgError.message === 'SaaS attempt has no current dispatchable commercial authority';
-      });
+        return (
+          pgError.code === '55000' &&
+          pgError.message === 'SaaS attempt has no current dispatchable commercial authority'
+        );
+      },
+    );
     assert.deepEqual((await pool.query(attemptStateSql, [ids.tenantOne])).rows, beforeUpgrade.attempts);
   });
 });
@@ -1829,7 +1867,10 @@ test('migrations 018-019 leave historical and authority-less attempts non-dispat
       ),
       (error: unknown) => {
         const pgError = error as { code?: string; message?: string };
-        return pgError.code === '55000' && pgError.message === 'SaaS attempt has no current dispatchable commercial authority';
+        return (
+          pgError.code === '55000' &&
+          pgError.message === 'SaaS attempt has no current dispatchable commercial authority'
+        );
       },
     );
     await assert.rejects(
@@ -1841,12 +1882,14 @@ test('migrations 018-019 leave historical and authority-less attempts non-dispat
       ),
       (error: unknown) => {
         const pgError = error as { code?: string; message?: string };
-        return pgError.code === '55000' && pgError.message === 'SaaS attempt has no current dispatchable commercial authority';
+        return (
+          pgError.code === '55000' &&
+          pgError.message === 'SaaS attempt has no current dispatchable commercial authority'
+        );
       },
     );
     const afterRejectedDispatch = await pool.query(unchangedSql, unchangedValues);
     assert.deepEqual(afterRejectedDispatch.rows, beforeRejectedDispatch.rows);
-
   });
 });
 

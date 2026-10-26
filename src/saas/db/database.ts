@@ -174,6 +174,7 @@ function asSqlResult<Row>(result: QueryResult): SqlResult<Row> {
   return {
     rows: result.rows as Row[],
     rowCount: result.rowCount,
+    command: result.command,
   };
 }
 
@@ -347,7 +348,10 @@ export function createSaasDatabase(options: SaasDatabaseOptions): SaasDatabase {
         await client.query('BEGIN ISOLATION LEVEL READ COMMITTED');
         transactionStarted = true;
         const result = await client.query<Row>(sql, values);
-        await client.query('COMMIT');
+        const commit = await client.query('COMMIT');
+        if (commit.command !== undefined && commit.command !== 'COMMIT') {
+          throw new Error('PostgreSQL transaction did not commit');
+        }
         transactionStarted = false;
         return result;
       } catch (error) {
@@ -383,7 +387,10 @@ export function createSaasDatabase(options: SaasDatabaseOptions): SaasDatabase {
         await client.query('BEGIN ISOLATION LEVEL READ COMMITTED');
         transactionStarted = true;
         const value = await work(scopedExecutor(client, preparedStatements));
-        await client.query('COMMIT');
+        const commit = await client.query('COMMIT');
+        if (commit.command !== undefined && commit.command !== 'COMMIT') {
+          throw new Error('PostgreSQL transaction did not commit');
+        }
         return value;
       } catch (error) {
         if (transactionStarted) {
