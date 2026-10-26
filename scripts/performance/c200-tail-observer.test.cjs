@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { observeReturn, tap, callbackTap, driverTap } = require('./c200-tail-observer.cjs');
+const { observeReturn, tap, callbackTap, driverTap, passiveEmitTap } = require('./c200-tail-observer.cjs');
 test('passive settlement returns exact fulfilled and rejected promises', async () => {
   const value = {}; const p = Promise.resolve(value); const seen = [];
   assert.equal(observeReturn(p, (error, result) => seen.push([error, result])), p);
@@ -62,4 +62,42 @@ test('queued pool callback restores only diagnostic ALS, not application ALS', (
     assert.equal(http.getStore(), 'http-B'); assert.equal(span.getStore(), 'span-B');
   })));
   assert.deepEqual(seen, [['http-A', 'span-A', 'application-releaser-B']]);
+});
+
+test('passive emit forwards original receiver, argument identities, return and throw', () => {
+  const result = {}, argument = {}, failure = Error('original');
+  const proto = { emit(event, value) { assert.equal(this.marker, true); assert.equal(value, argument); if (event === 'fail') throw failure; return result; } };
+  const seen = [];
+  passiveEmitTap(proto, (receiver, event, args) => { seen.push([receiver, event, args[0]]); throw Error('observer'); });
+  const receiver = Object.assign(Object.create(proto), { marker: true });
+  assert.equal(receiver.emit('data', argument), result);
+  assert.deepEqual(seen, [[receiver, 'data', argument]]);
+  assert.throws(() => receiver.emit('fail', argument), error => error === failure);
+});
+
+test('passive stream emit tap adds no listeners and does not enable flowing mode', () => {
+  const { PassThrough } = require('node:stream');
+  class DiagnosticStream extends PassThrough {}
+  const stream = new DiagnosticStream();
+  const before = { flowing: stream.readableFlowing, data: stream.listenerCount('data'), readable: stream.listenerCount('readable') };
+  let emittedData = 0;
+  passiveEmitTap(DiagnosticStream.prototype, (_receiver, event) => { if (event === 'data') emittedData++; });
+  stream.write(Buffer.from('synthetic fixture'));
+  assert.deepEqual({ flowing: stream.readableFlowing, data: stream.listenerCount('data'), readable: stream.listenerCount('readable') }, before);
+  assert.equal(emittedData, 0); // No observation is not evidence of no buffered bytes.
+  assert.equal(stream.readableLength, 17);
+  stream.destroy();
+});
+
+test('passive emit never reads a data payload and preserves unhandled error semantics', () => {
+  const { EventEmitter } = require('node:events');
+  class DiagnosticEmitter extends EventEmitter {}
+  let seen = 0;
+  passiveEmitTap(DiagnosticEmitter.prototype, (_receiver, event) => { if (event === 'data') seen++; });
+  const emitter = new DiagnosticEmitter();
+  const payload = new Proxy({}, { get() { throw Error('must not inspect payload'); } });
+  assert.equal(emitter.emit('data', payload), false);
+  assert.equal(seen, 1);
+  const error = Error('original');
+  assert.throws(() => emitter.emit('error', error), value => value === error);
 });

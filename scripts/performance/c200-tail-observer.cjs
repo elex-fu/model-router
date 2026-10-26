@@ -21,6 +21,13 @@ function tap(fn, before, after) {
 function callbackTap(fn, observe) {
   return function(...args) { safe(observe, ...args); return fn.apply(this, args); };
 }
+function passiveEmitTap(proto, observe) {
+  const original = proto.emit;
+  proto.emit = function(event, ...args) {
+    safe(observe, this, event, args);
+    return original.call(this, event, ...args);
+  };
+}
 function driverTap(proto, name, describe, finish, bindCallback) {
   const original = proto[name];
   proto[name] = function(...args) {
@@ -41,7 +48,7 @@ function driverTap(proto, name, describe, finish, bindCallback) {
     return observeReturn(value, done);
   };
 }
-module.exports = { observeReturn, tap, callbackTap, driverTap };
+module.exports = { observeReturn, tap, callbackTap, driverTap, passiveEmitTap };
 
 if (process.env.R9_TEST_DIST && process.env.PAIR_REQUEST_OBSERVER) install();
 function install() {
@@ -53,11 +60,15 @@ function install() {
   const fs = require('node:fs');
   const path = require('node:path');
   const http = require('node:http');
+  const net = require('node:net');
   const requireSource = createRequire(path.join(process.env.R9_TEST_DIST, '../package.json'));
   const { Client, Pool } = requireSource('pg');
   const httpContext = new AsyncLocalStorage(), spanContext = new AsyncLocalStorage();
   const epoch = performance.now(), epochWall = Date.now();
   const events = [], requests = [], markers = [], caches = new Set();
+  const inboundSockets = new WeakMap(), inboundConnections = [];
+  const inboundConnectionLimit = 4096;
+  let inboundConnectionSerial = 0, inboundConnectionDrops = 0;
   const limit = 250000, requestLimit = 12000;
   let drops = 0, requestDrops = 0, serial = 0, phase = 'warm', signalCount = 0;
   const clientIds = new WeakMap(), poolIds = new WeakMap(), workIds = new WeakMap();
@@ -66,6 +77,16 @@ function install() {
   const output = path.join(path.dirname(process.env.PAIR_REQUEST_OBSERVER), 'passive-tail-observer.json');
   const ready = path.join(path.dirname(output), 'passive-tail-phase.json');
   const now = () => performance.now() - epoch;
+  function clockCalibration() {
+    const monotonicBeforeMs = now(), wallMs = Date.now(), monotonicAfterMs = now();
+    return { wallMs, monotonicBeforeMs, monotonicAfterMs, wallQuantizationMs: 1 };
+  }
+  function clockAnchor() {
+    const monotonicBeforeNs = process.hrtime.bigint().toString();
+    const wallUnixNs = (BigInt(Date.now()) * 1000000n).toString();
+    const monotonicAfterNs = process.hrtime.bigint().toString();
+    return { monotonicBeforeNs, wallUnixNs, monotonicAfterNs, wallResolutionNs: '1000000', monotonicSource: 'process.hrtime.bigint' };
+  }
   const number = x => typeof x === 'number' && Number.isFinite(x) ? x : null;
   function id(map, object, next) { if (!map.has(object)) map.set(object, next()); return map.get(object); }
   function begin(kind, extra = {}) {
@@ -82,17 +103,42 @@ function install() {
   }
   function cacheState(cache) { return { entries: cache.entries?.size ?? null, pending: cache.pending?.size ?? null, minimumValidity: number(cache.minimumValidity), refreshAhead: number(cache.refreshAhead), ttl: number(cache.ttl), headrooms: cache.entries ? Array.from(cache.entries.values(), headroom) : [] }; }
   function mark(name) {
-    markers.push({ name, atMs: now(), epochMs: Date.now(), openInferenceSockets: Array.from(liveSockets).filter(x => x.inference).length, openObservedSockets: liveSockets.size, caches: Array.from(caches, cacheState) });
+    markers.push({ name, atMs: now(), epochMs: Date.now(), clockCalibration: clockCalibration(), clockAnchor: clockAnchor(), openInferenceSockets: Array.from(liveSockets).filter(x => x.inference).length, openObservedSockets: liveSockets.size, inboundConnections: inboundConnectionSerial, caches: Array.from(caches, cacheState) });
     fs.writeFileSync(ready, JSON.stringify({ phase: name, atMs: now() }) + '\n', { mode: 0o600 });
   }
+  // Observe only events the application already emits. In particular, NEVER
+  // add a data/readable listener or call read/resume/pause: that changes flow.
+  // Node's native HTTP parser may bypass Socket.emit('data'); absence is UNKNOWN.
+  passiveEmitTap(net.Socket.prototype, (socket, event) => {
+    const row = inboundSockets.get(socket);
+    if (!row) return;
+    if (event === 'data') {
+      const atMs = now();
+      row.firstObservableDataMs ??= atMs;
+      row.firstObservableDataMonotonicNs ??= process.hrtime.bigint().toString();
+      row.lastObservableDataMs = atMs;
+      row.observableDataEvents++;
+      row.dataObservation = 'observed_socket_emit_data';
+    } else if (event === 'close') { row.closedAtMs = now(); row.closedMonotonicNs = process.hrtime.bigint().toString(); }
+  });
+  passiveEmitTap(http.Server.prototype, (_server, event, args) => {
+    if (event !== 'connection' || !args[0] || typeof args[0] !== 'object') return;
+    const socket = args[0];
+    if (inboundSockets.has(socket)) return;
+    const row = { id: ++inboundConnectionSerial, phase, connectionEventMs: now(), connectionEventMonotonicNs: process.hrtime.bigint().toString(), dataObservation: 'unknown_no_socket_emit_data_observed', observableDataEvents: 0, httpRequests: 0 };
+    inboundSockets.set(socket, row);
+    if (inboundConnections.length < inboundConnectionLimit) inboundConnections.push(row);
+    else inboundConnectionDrops++;
+  });
   const emit = http.Server.prototype.emit;
   http.Server.prototype.emit = function(event, ...args) {
     if (event !== 'request' || args[0]?.url !== '/v1/chat/completions') return emit.call(this, event, ...args);
-    const [, res] = args;
-    const row = { id: requests.length + requestDrops + 1, phase, startMs: now() };
+    const [req, res] = args, inbound = inboundSockets.get(req.socket);
+    if (inbound) { inbound.httpRequests++; inbound.firstHttpRequestMs ??= now(); }
+    const row = { id: requests.length + requestDrops + 1, phase, startMs: now(), startMonotonicNs: process.hrtime.bigint().toString(), inboundSocket: inbound?.id ?? null, inboundSocketRequestSequence: inbound?.httpRequests ?? null, inboundConnectionEventMs: inbound?.connectionEventMs ?? null, inboundFirstObservableDataMs: inbound?.firstObservableDataMs ?? null, inboundDataObservation: inbound?.dataObservation ?? 'unknown_socket_not_observed' };
     if (requests.length < requestLimit) requests.push(row); else requestDrops++;
     let finished = false;
-    const finish = terminal => safe(() => { if (finished) return; finished = true; row.endMs = now(); row.durationMs = row.endMs - row.startMs; row.status = res.statusCode; row.terminal = terminal; row.requestHash = hashRequest(res.getHeader('x-request-id')); });
+    const finish = terminal => safe(() => { if (finished) return; finished = true; row.endMs = now(); row.endMonotonicNs = process.hrtime.bigint().toString(); row.durationMs = row.endMs - row.startMs; row.status = res.statusCode; row.terminal = terminal; row.requestHash = hashRequest(res.getHeader('x-request-id')); });
     res.once('finish', () => finish('finish')); res.once('close', () => finish('close'));
     return httpContext.run(row, () => emit.call(this, event, ...args));
   };
@@ -183,7 +229,7 @@ function install() {
     else if (signalCount === 2) { phase = 'diagnostic'; mark('diagnostic_start'); }
     else {
       phase = 'complete'; mark('diagnostic_complete');
-      const temporary = output + '.tmp'; fs.writeFileSync(temporary, JSON.stringify({ schemaVersion: 1, diagnosticOnly: true, originalPromisesReturned: true, policyHelpersNotCalled: true, epochWall, drops, requestDrops, limit, events, requests, markers, limits: ['checkout includes connection acquisition; driver span is not pure PostgreSQL execution', 'headroom uses independent clocks; approximate, never authority', 'connection span includes connector/TLS acquisition, not pure TLS handshake', 'all observations add overhead; no performance acceptance claim', 'no journal/runOnce wrappers or diagnostic trace activation'] }) + '\n', { mode: 0o600 }); fs.renameSync(temporary, output);
+      const temporary = output + '.tmp'; fs.writeFileSync(temporary, JSON.stringify({ schemaVersion: 2, diagnosticOnly: true, originalPromisesReturned: true, policyHelpersNotCalled: true, epochWall, drops, requestDrops, limit, inboundConnectionLimit, inboundConnectionDrops, inboundConnections, events, requests, markers, limits: ['checkout includes connection acquisition; driver span is not pure PostgreSQL execution', 'headroom uses independent clocks; approximate, never authority', 'connection span includes connector/TLS acquisition, not pure TLS handshake', 'inbound connection means Node connection event, not kernel accept timestamp', 'Socket.emit data is passive and may be bypassed by native parsing; absence is unknown, not absent bytes', 'wall anchors are bracketed by independent monotonic readings with 1ms wall quantization', 'all observations add overhead; no performance acceptance claim', 'no journal/runOnce wrappers or diagnostic trace activation'] }) + '\n', { mode: 0o600 }); fs.renameSync(temporary, output);
     }
   }));
   mark('installed');
