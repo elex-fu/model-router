@@ -41,6 +41,9 @@ export async function evidenceAuthorityFixture(
   const built = harness.plan.command(requestId, attemptId, label);
   const candidate = built.request.initialAttempt;
   assert.ok(candidate && typeof candidate === 'object');
+  assert.ok('payloadSha256' in candidate && typeof candidate.payloadSha256 === 'string');
+  const payloadSha256 = candidate.payloadSha256;
+  assert.match(payloadSha256, /^[a-f0-9]{64}$/, 'fixture attempt must carry an exact SHA-256 payload digest');
   const keys = generateKeyPairSync('ed25519');
   const keyId = 'evidence-authority-pg-only';
   const serviceOptions: PreparedRequestEvidenceServiceOptions = {
@@ -112,7 +115,7 @@ export async function evidenceAuthorityFixture(
     options.reusePreparationFacts
       ? withPreparationTransactionFacts(
           tx,
-          { tenantId: original.tenantId, requestId, attemptId, payloadSha256: String(candidate.payloadSha256) },
+          { tenantId: original.tenantId, requestId, attemptId, payloadSha256 },
           prepare,
         )
       : prepare(tx),
