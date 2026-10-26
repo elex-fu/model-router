@@ -385,6 +385,7 @@ test('maps the three hosted routes to their fixed protocols and dispatches exact
     assert.equal(setup.preparationInputs[0]?.publicModel, 'public-model');
     assert.strictEqual(setup.dispatchInputs[0]?.payloadBytes, payload);
     assert.equal(setup.dispatchInputs[0]?.evidenceId, 'evidence-1');
+    assert.equal(setup.dispatchInputs[0]?.preparedEvidence?.evidenceId, 'evidence-1');
     assert.equal(setup.response.writeHeadCalls[0]?.status, 200);
     assert.equal(setup.response.endCount, 1);
   }

@@ -363,6 +363,7 @@ export function createResponsesWsRoundExecutor(options: ResponsesWsExecutorOptio
           const dispatched = await options.dispatch.dispatch({
             codexNativeWsSession: nativeSession,
             evidenceId: prepared.evidence.evidenceId,
+            preparedEvidence: prepared.evidence,
             payloadBytes: prepared.payloadBytes,
             normalSuccessSnapshot: prepared.normalSuccessSnapshot,
             audit: { ...audit, actorUserId: caller.authorization.principalId, requestId: input.requestId },

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
+import { saasAdvisoryKey } from '../../../src/saas/db/advisory-lock-keys.js';
 import { createSaasDatabase } from '../../../src/saas/db/index.js';
 import type { SaasDatabase, SqlExecutor, SqlResult } from '../../../src/saas/db/types.js';
 import { SaasPreparedEvidenceDispatchService } from '../../../src/saas/gateway/prepared-evidence-dispatch-service.js';
@@ -147,6 +148,116 @@ test('restricted PG atomic evidence dispatch preserves fences, commit-before-sen
   );
 
   for (const mode of ['byok', 'platform'] as const) {
+    await t.test(
+      `${mode}: fresh preparation skips only read-only preflight; claim remains the sole final authority`,
+      async () => {
+        const probe: Probe = { transactions: [] };
+        const fixture = await evidenceAuthorityFixture(migrator, observed(gateway, probe), mode);
+        probe.transactions.length = 0;
+        const before = await state(gateway, fixture);
+        const dispatch = dispatcher(fixture, fixture.evidenceService, async () => {
+          const durable = await state(gateway, fixture);
+          assert.equal(durable.dispatch_state, 'dispatching');
+          assert.equal(durable.claim_audits, '1');
+        });
+        assert.equal(
+          fixture.registered.clientProtocol,
+          fixture.input.protocol,
+          'registration retains its validated explicit client protocol alias',
+        );
+        const input = { ...dispatch.input, preparedEvidence: fixture.registered };
+        assert.equal((await dispatch.service.dispatch(input)).kind, 'sent');
+        assert.equal(probe.transactions.length, 1, 'only the final claim transaction remains before upstream');
+        assert.equal(probe.transactions[0]?.length, 10);
+        assert.ok(fused(probe.transactions[0] ?? []));
+        assert.deepEqual(dispatch.facts, { sends: 1, reads: 0, dispatchTransitions: 0, releases: 1 });
+        await assert.rejects(dispatch.service.dispatch(input));
+        assert.equal(dispatch.facts.sends, 1);
+        assert.equal((await state(gateway, fixture)).financial, before.financial);
+      },
+    );
+
+    for (const kind of ['clone', 'foreign-issuer'] as const) {
+      await t.test(`${mode}: ${kind} preparation context falls back to full public evidence validation`, async () => {
+        const probe: Probe = { transactions: [] };
+        const fixture = await evidenceAuthorityFixture(migrator, observed(gateway, probe), mode);
+        probe.transactions.length = 0;
+        const evidence =
+          kind === 'foreign-issuer'
+            ? new SaasPreparedRequestEvidenceService(observed(gateway, probe), fixture.options)
+            : fixture.evidenceService;
+        const dispatch = dispatcher(fixture, evidence, async () => {});
+        assert.equal(
+          (
+            await dispatch.service.dispatch({
+              ...dispatch.input,
+              preparedEvidence: kind === 'clone' ? { ...fixture.registered } : fixture.registered,
+            })
+          ).kind,
+          'sent',
+        );
+        assert.equal(probe.transactions.length, 2);
+        assert.equal(probe.transactions[0]?.length, 7, 'untrusted preparation context retains all preflight reads');
+        assert.equal(dispatch.facts.sends, 1);
+      });
+    }
+
+    for (const invalidation of ['revoked', 'expired', 'rolled-back'] as const) {
+      await t.test(`${mode}: ${invalidation} fresh handle cannot authorize a send`, async () => {
+        const probe: Probe = { transactions: [] };
+        const fixture = await evidenceAuthorityFixture(
+          migrator,
+          observed(gateway, probe),
+          mode,
+          invalidation === 'expired'
+            ? { evidenceTtlMs: 500 }
+            : { rollbackRegistration: invalidation === 'rolled-back' },
+        );
+        if (invalidation === 'revoked')
+          await migrator.query(
+            `UPDATE saas_api_keys SET status = 'revoked', revoked_at = clock_timestamp(), authz_version = authz_version + 1 WHERE tenant_id = $1 AND id = $2`,
+            [fixture.input.tenantId, fixture.input.proxyKeyId],
+          );
+        if (invalidation === 'expired') await delay(600);
+        probe.transactions.length = 0;
+        const dispatch = dispatcher(fixture, fixture.evidenceService, async () => {});
+        await assert.rejects(dispatch.service.dispatch({ ...dispatch.input, preparedEvidence: fixture.registered }));
+        assert.equal(dispatch.facts.sends, 0);
+        assert.equal(dispatch.facts.releases, 1);
+        assert.equal(
+          probe.transactions.length,
+          1,
+          'the final locked claim, not a preflight, refuses stale/absent authority',
+        );
+        assert.equal(probe.transactions.flat().filter((sql) => sql.startsWith('UPDATE saas_attempts ')).length, 0);
+        if (invalidation === 'rolled-back') {
+          assert.equal(
+            (
+              await gateway.query<{ count: string }>(
+                'SELECT count(*)::text AS count FROM saas_attempts WHERE tenant_id = $1 AND id = $2',
+                [fixture.input.tenantId, fixture.input.attemptId],
+              )
+            ).rows[0]?.count,
+            '0',
+          );
+          assert.equal(
+            (
+              await gateway.query<{ count: string }>(
+                'SELECT count(*)::text AS count FROM saas_prepared_request_evidence WHERE id = $1',
+                [fixture.evidenceId],
+              )
+            ).rows[0]?.count,
+            '0',
+          );
+        } else {
+          const durable = await state(gateway, fixture);
+          assert.equal(durable.dispatch_state, 'not_sent');
+          assert.equal(durable.evidence_status, 'registered');
+          assert.equal(durable.claim_audits, '0');
+        }
+      });
+    }
+
     await t.test(
       `${mode}: commit precedes send, one claim CAS, no detached reads or dispatch CAS, retry sends nothing`,
       async () => {
@@ -299,6 +410,73 @@ test('restricted PG atomic evidence dispatch preserves fences, commit-before-sen
         } else assert.deepEqual(after, before, 'evidence, dispatch and audit all roll back');
       });
     }
+
+    await t.test(`${mode}: final claim expires while actually blocked on the authority fence`, async () => {
+      const fixture = await evidenceAuthorityFixture(migrator, gateway, mode, { evidenceTtlMs: 1200 });
+      const before = await state(gateway, fixture);
+      let releaseWriter!: () => void;
+      const release = new Promise<void>((resolve) => {
+        releaseWriter = resolve;
+      });
+      let writerReady!: (pid: number) => void;
+      const ready = new Promise<number>((resolve) => {
+        writerReady = resolve;
+      });
+      const writer = migrator.transaction(async (tx) => {
+        await tx.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
+          saasAdvisoryKey.apiKey(fixture.input.tenantId, fixture.input.projectId, fixture.input.proxyKeyId),
+        ]);
+        const identity = await tx.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
+        assert.ok(identity.rows[0]);
+        writerReady(identity.rows[0].pid);
+        await release;
+      });
+      const writerPid = await ready;
+      let readerReady!: (pid: number) => void;
+      const readerIdentity = new Promise<number>((resolve) => {
+        readerReady = resolve;
+      });
+      const evidence = new SaasPreparedRequestEvidenceService(
+        observed(gateway, {
+          transactions: [],
+          async before(sql, _values, tx) {
+            if (sql.includes('prepared-evidence:fence-batch')) {
+              const identity = await tx.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
+              assert.ok(identity.rows[0]);
+              readerReady(identity.rows[0].pid);
+            }
+          },
+        }),
+        fixture.options,
+      );
+      const claim = evidence.claimAndBeginDispatch(fixture.evidenceId, fixture.input.audit, {
+        payloadSha256: fixture.input.payloadSha256,
+      });
+      // Attach the rejection assertion immediately while the reader is blocked.
+      const refused = assert.rejects(claim);
+      try {
+        const readerPid = await readerIdentity;
+        let blocked = false;
+        const deadline = Date.now() + 3000;
+        while (!blocked && Date.now() < deadline) {
+          blocked =
+            (
+              await migrator.query<{ blocked: boolean }>('SELECT $1::integer = ANY(pg_blocking_pids($2)) AS blocked', [
+                writerPid,
+                readerPid,
+              ])
+            ).rows[0]?.blocked === true;
+          if (!blocked) await delay(10);
+        }
+        assert.ok(blocked, 'observe the real PostgreSQL fence wait, not only a test timer');
+        await delay(Math.max(0, new Date(fixture.input.expiresAt).getTime() - Date.now()) + 25);
+      } finally {
+        releaseWriter();
+        await writer;
+      }
+      await refused;
+      assert.deepEqual(await state(gateway, fixture), before);
+    });
 
     await t.test(`${mode}: revocation between preflight and claim refuses the fused write`, async () => {
       const fixture = await evidenceAuthorityFixture(migrator, gateway, mode);

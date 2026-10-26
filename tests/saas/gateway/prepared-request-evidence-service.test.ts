@@ -7,6 +7,7 @@ import { saasAdvisoryKey } from '../../../src/saas/db/advisory-lock-keys.js';
 import type { SaasDatabase, SqlExecutor, SqlResult } from '../../../src/saas/db/index.js';
 import {
   canonicalPreparedRequestEvidencePayload,
+  consumeFreshPreparedEvidence,
   consumePreparedDispatchGrant,
   getAuthoritativePreparedAttempt,
   type PreparedDispatchGrant,
@@ -1898,4 +1899,32 @@ test('atomic dispatch grant requires an exact outbound payload and rolls evidenc
   assert.equal(fake.evidence.status, 'registered');
   assert.equal(fake.auditActorIds.length, auditCount);
   assert.equal((fake.rows.attempt as Record<string, unknown>).dispatch_state, 'not_sent');
+});
+
+test('fresh registration hints are frozen single-use issuer/evidence/payload capabilities, never public context', async () => {
+  for (const mismatch of ['none', 'issuer', 'evidence', 'payload'] as const) {
+    const input = signedInput();
+    const fake = new FakeExecutor(input);
+    const evidenceService = service(fake);
+    const registered = await evidenceService.register(input);
+    assert.ok(Object.isFrozen(registered));
+    assert.ok(Object.isFrozen(registered.modelResolution));
+    assert.equal(
+      consumeFreshPreparedEvidence({ ...registered }, evidenceService, registered.evidenceId, registered.payloadSha256),
+      undefined,
+    );
+    const result = consumeFreshPreparedEvidence(
+      registered,
+      mismatch === 'issuer' ? service(fake) : evidenceService,
+      mismatch === 'evidence' ? 'other-evidence' : registered.evidenceId,
+      mismatch === 'payload' ? 'b'.repeat(64) : registered.payloadSha256,
+    );
+    assert.equal(result?.evidenceId, mismatch === 'none' ? registered.evidenceId : undefined);
+    assert.equal(result?.clientProtocol, undefined);
+    if (result) assert.ok(Object.isFrozen(result));
+    assert.equal(
+      consumeFreshPreparedEvidence(registered, evidenceService, registered.evidenceId, registered.payloadSha256),
+      undefined,
+    );
+  }
 });

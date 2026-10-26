@@ -2594,6 +2594,7 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
         try {
           dispatched = await dispatch.dispatch({
             evidenceId: preparedRequest.evidence.evidenceId,
+            preparedEvidence: preparedRequest.evidence,
             payloadBytes: preparedRequest.payloadBytes,
             normalSuccessSnapshot: preparedRequest.normalSuccessSnapshot,
             audit: dispatchAuditAsync,
@@ -2725,6 +2726,7 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
     try {
       dispatched = await dispatch.dispatch({
         evidenceId: prepared.evidence.evidenceId,
+        preparedEvidence: prepared.evidence,
         payloadBytes: prepared.payloadBytes,
         normalSuccessSnapshot: prepared.normalSuccessSnapshot,
         audit: dispatchAudit,

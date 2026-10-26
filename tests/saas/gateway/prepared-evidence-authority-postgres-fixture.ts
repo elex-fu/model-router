@@ -5,6 +5,7 @@ import { PostgresPreparationCapacityAdapter } from '../../../src/saas/gateway/po
 import {
   canonicalPreparedRequestEvidencePayload,
   type PreparedRequestEvidenceInput,
+  type PreparedRequestEvidenceRecord,
   type PreparedRequestEvidenceServiceOptions,
   SaasPreparedRequestEvidenceService,
 } from '../../../src/saas/gateway/prepared-request-evidence-service.js';
@@ -17,7 +18,7 @@ export async function evidenceAuthorityFixture(
   migrator: SaasDatabase,
   gateway: SaasDatabase,
   mode: 'byok' | 'platform',
-  options: { readonly evidenceTtlMs?: number } = {},
+  options: { readonly evidenceTtlMs?: number; readonly rollbackRegistration?: boolean } = {},
 ) {
   const evidenceTtlMs = options.evidenceTtlMs === undefined ? 5 * 60_000 : options.evidenceTtlMs;
   assert.ok(Number.isSafeInteger(evidenceTtlMs) && evidenceTtlMs > 0, 'evidence TTL must be a positive safe integer');
@@ -48,7 +49,9 @@ export async function evidenceAuthorityFixture(
     reasoningOutputUpperBound: '0',
     feasibleInputBuckets: ['input'],
   };
-  const input = await gateway.transaction(async (tx) => {
+  let registered: PreparedRequestEvidenceRecord | undefined;
+  const registrationDatabase = options.rollbackRegistration ? rollbackEvidenceDatabase(gateway) : gateway;
+  const input = await registrationDatabase.transaction(async (tx) => {
     const admitted = await harness.admit(tx, requestId, attemptId, label);
     assert.equal(admitted.kind, 'created');
     if (admitted.kind !== 'created') throw new Error('fresh evidence authority fixture admission required');
@@ -91,11 +94,12 @@ export async function evidenceAuthorityFixture(
         keys.privateKey,
       ).toString('base64'),
     };
-    await evidenceService.register(signed, { executor: tx });
+    registered = await evidenceService.register(signed, { executor: tx });
     return signed;
   });
   assert.ok(input.evidenceId);
-  return { original, input, options: serviceOptions, evidenceService, evidenceId: input.evidenceId };
+  assert.ok(registered);
+  return { original, input, registered, options: serviceOptions, evidenceService, evidenceId: input.evidenceId };
 }
 
 /** Roll back real claim writes after observing their result, for repeatable measurements. */

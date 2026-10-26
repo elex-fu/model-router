@@ -252,6 +252,30 @@ function withAuthoritativeAttempt(
   return result;
 }
 
+// In-process registration handoff only. IDs, copied records and public fields
+// cannot mint this capability. It is a one-use hint, never final dispatch authority.
+const freshRegistrations = new WeakMap<
+  PreparedRequestEvidenceRecord,
+  {
+    readonly issuer: PreparedRequestEvidenceDispatchPort;
+    readonly evidence: PreparedRequestEvidenceRecord;
+  }
+>();
+
+export function consumeFreshPreparedEvidence(
+  record: PreparedRequestEvidenceRecord | undefined,
+  issuer: PreparedRequestEvidenceDispatchPort,
+  evidenceId: string,
+  payloadSha256: string,
+): PreparedRequestEvidenceRecord | undefined {
+  if (!record) return undefined;
+  const context = freshRegistrations.get(record);
+  if (context) freshRegistrations.delete(record);
+  return context?.issuer === issuer && record.evidenceId === evidenceId && record.payloadSha256 === payloadSha256
+    ? context.evidence
+    : undefined;
+}
+
 const dispatchGrants = new WeakMap<
   PreparedDispatchGrant,
   {
@@ -1925,7 +1949,18 @@ export class SaasPreparedRequestEvidenceService {
       return this.recordFromRow(row, normalized, statementSha256);
     };
     try {
-      return await (options.executor ? work(options.executor) : this.database.transaction(work));
+      const record = await (options.executor ? work(options.executor) : this.database.transaction(work));
+      if (record.modelResolution) Object.freeze(record.modelResolution);
+      Object.freeze(record);
+      // With a caller-owned transaction this can precede its COMMIT. That is
+      // safe only as a read-only-preflight hint: final claim always performs
+      // the original locked database reads and rejects absent/rolled-back rows.
+      // The stored evidence represents client protocol in `protocol`, not the
+      // redundant optional alias. Use that same canonical view for the claim
+      // identity comparison; preparation retains its original validated record.
+      const { clientProtocol: _clientProtocol, ...dispatchRecord } = record;
+      freshRegistrations.set(record, { issuer: this, evidence: Object.freeze(dispatchRecord) });
+      return record;
     } catch (error) {
       throw this.wrapStorage(error, 'Prepared request evidence could not be registered');
     }

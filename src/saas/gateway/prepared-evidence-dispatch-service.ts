@@ -24,6 +24,7 @@ import {
   type PreparedEvidenceDispatchStage,
 } from './prepared-evidence-dispatch-observer.js';
 import {
+  consumeFreshPreparedEvidence,
   consumePreparedDispatchGrant,
   getAuthoritativePreparedAttempt,
   type PreparedRequestEvidenceAudit,
@@ -124,6 +125,8 @@ export interface PreparedEvidenceDispatchInput {
   /** Opaque handle created by the downstream WS executor. */
   readonly codexNativeWsSession?: CodexNativeWsSessionHandle;
   readonly evidenceId: string;
+  /** Native freshly registered object only; arbitrary/copied objects fall back to full preflight. */
+  readonly preparedEvidence?: PreparedRequestEvidenceRecord;
   readonly payloadBytes: Uint8Array;
   readonly audit: PreparedRequestEvidenceAudit;
   /** Server-selected pricing and hold facts produced during request preparation. */
@@ -817,22 +820,31 @@ export class SaasPreparedEvidenceDispatchService {
     const payloadBytes = new Uint8Array(input.payloadBytes);
     const digest = payloadDigest(payloadBytes);
     const claimOptions: PreparedRequestEvidenceClaimOptions = { payloadSha256: digest };
-    const preflightEvidence = await this.observe('preflight', () =>
-      this.evidence.preflightForDispatch(input.evidenceId, input.audit, claimOptions),
-    );
-    const attempt =
-      getAuthoritativePreparedAttempt(preflightEvidence, this.evidence) ??
-      (await this.observe('attempt-read', () =>
-        this.metering.getAttempt(preflightEvidence.tenantId, preflightEvidence.requestId, preflightEvidence.attemptId),
+    const freshEvidence = consumeFreshPreparedEvidence(input.preparedEvidence, this.evidence, input.evidenceId, digest);
+    const preflightEvidence =
+      freshEvidence ??
+      (await this.observe('preflight', () =>
+        this.evidence.preflightForDispatch(input.evidenceId, input.audit, claimOptions),
       ));
-    if (!attempt) fail('ATTEMPT_NOT_FOUND', 'claimed prepared evidence attempt was not found');
-    if (
-      attempt.preparedEvidenceId !== null ||
-      attempt.dispatchState !== 'not_sent' ||
-      attempt.resultState !== 'pending' ||
-      attempt.responseStarted
-    ) {
-      fail('EVIDENCE_BINDING_MISMATCH', 'prepared evidence is not bound to a fresh attempt');
+    if (!freshEvidence) {
+      const attempt =
+        getAuthoritativePreparedAttempt(preflightEvidence, this.evidence) ??
+        (await this.observe('attempt-read', () =>
+          this.metering.getAttempt(
+            preflightEvidence.tenantId,
+            preflightEvidence.requestId,
+            preflightEvidence.attemptId,
+          ),
+        ));
+      if (!attempt) fail('ATTEMPT_NOT_FOUND', 'claimed prepared evidence attempt was not found');
+      if (
+        attempt.preparedEvidenceId !== null ||
+        attempt.dispatchState !== 'not_sent' ||
+        attempt.resultState !== 'pending' ||
+        attempt.responseStarted
+      ) {
+        fail('EVIDENCE_BINDING_MISMATCH', 'prepared evidence is not bound to a fresh attempt');
+      }
     }
 
     let lease: PreparedEvidenceLease;
