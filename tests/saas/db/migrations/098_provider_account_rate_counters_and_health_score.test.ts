@@ -12,15 +12,13 @@ test('098 registers after 097 ahead of later forwards with the documented gaps',
   assert.equal(migration.name, 'provider_account_rate_counters_and_health_score');
   assert.deepEqual(Object.keys(migration).sort(), ['name', 'sql', 'version']);
   const registered = SAAS_MIGRATIONS.map(({ version }) => version);
-  assert.deepEqual(registered.slice(-5), [139, 140, 141, 142, 143]);
+  assert.deepEqual(registered.slice(-5), [141, 142, 143, 144, 145]);
   for (let skipped = 64; skipped <= 79; skipped += 1) {
     assert.equal(registered.includes(skipped), false);
   }
-  // 104 (R2 embeddings), 105 (R1 billing groups), 106 (R4 registration
-  // admission) and 108 (R5b OpenCode Go scheduling) follow at the tail.
-  // K2: 129 (provider_account_durable_fault_classification, renumbered
-  // from main's 112 in this merge) is the new head.
-  assert.equal(registered.at(-1), 143);
+  // Later forwards retain their order through 143 journal, 144 audited
+  // resolution and the current 145 credit-stripe head.
+  assert.equal(registered.at(-1), 145);
   assert.equal(SAAS_MIGRATIONS[78], migration);
 });
 

@@ -7,14 +7,14 @@ import { BILLING_GROUP_SPEND_WINDOWS_SAAS_MIGRATION } from '../../../../src/saas
 const migration = BILLING_GROUP_SPEND_WINDOWS_SAAS_MIGRATION;
 const commands = migration.sql.replace(/\/\*[\s\S]*?\*\//g, '').replace(/--[^\n]*/g, '');
 
-test('114 registers as the applied head after the 113 group rate counters', () => {
+test('114 remains registered after the 113 group rate counters', () => {
   assert.equal(migration.version, 114);
   assert.equal(migration.name, 'billing_group_spend_windows');
   assert.deepEqual(Object.keys(migration).sort(), ['name', 'sql', 'version']);
   const registered = SAAS_MIGRATIONS.map(({ version }) => version);
-  assert.equal(registered.at(-1), 143);
+  assert.equal(registered.at(-1), 145);
   assert.equal(SAAS_MIGRATIONS[registered.indexOf(114)], migration);
-  assert.deepEqual(registered.slice(-5), [139, 140, 141, 142, 143]);
+  assert.deepEqual(registered.slice(-5), [141, 142, 143, 144, 145]);
 });
 
 test('114 creates the KEY-BUD-shaped group spend counters and reservations', () => {

@@ -7,13 +7,13 @@ import { BILLING_GROUP_SNAPSHOT_LIMITS_SAAS_MIGRATION } from '../../../../src/sa
 const migration = BILLING_GROUP_SNAPSHOT_LIMITS_SAAS_MIGRATION;
 const commands = migration.sql.replace(/\/\*[\s\S]*?\*\//g, '').replace(/--[^\n]*/g, '');
 
-test('112 registers as the applied head after the 111 Gemini forward', () => {
+test('112 remains registered after the 111 Gemini forward', () => {
   assert.equal(migration.version, 112);
   assert.equal(migration.name, 'billing_group_snapshot_limits');
   assert.deepEqual(Object.keys(migration).sort(), ['name', 'sql', 'version']);
   const registered = SAAS_MIGRATIONS.map(({ version }) => version);
-  assert.deepEqual(registered.slice(-5), [139, 140, 141, 142, 143]);
-  assert.equal(registered.at(-1), 143);
+  assert.deepEqual(registered.slice(-5), [141, 142, 143, 144, 145]);
+  assert.equal(registered.at(-1), 145);
   assert.equal(registered.includes(migration.version), true);
 });
 
