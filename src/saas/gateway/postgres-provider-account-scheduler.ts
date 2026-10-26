@@ -1925,7 +1925,8 @@ function healthReadTime(input: Parameters<ProviderAccountSchedulerHealthPort['ge
 class HalfOpenProbeHealthPort implements ProviderAccountSchedulerHealthPort {
   // Share only an in-flight refresh, never its authority decision. Every waiter
   // reads its own current scheduling view after the fenced probe completes.
-  private readonly pendingProbes = new Map<string, Promise<ProviderAccountSchedulerHealthDecision>>();
+  // Keep bookkeeping out of the native authority observer's own-key contract.
+  readonly #pendingProbes = new Map<string, Promise<ProviderAccountSchedulerHealthDecision>>();
   private static readonly MAX_PENDING_PROBES = 1024;
   private static readonly REMOTE_PROBE_WAIT_MS = 1000;
   private static readonly REMOTE_PROBE_POLL_MS = 25;
@@ -1999,7 +2000,7 @@ class HalfOpenProbeHealthPort implements ProviderAccountSchedulerHealthPort {
       candidate.supplyMode === 'byok' ? candidate.tenantId : null,
       candidate.accountId,
     ]);
-    const pending = this.pendingProbes.get(key);
+    const pending = this.#pendingProbes.get(key);
     if (pending) {
       await pending;
       return this.readAfterProbe(input);
@@ -2007,12 +2008,12 @@ class HalfOpenProbeHealthPort implements ProviderAccountSchedulerHealthPort {
     const probe = this.runProbe(input, cause);
     // Cardinality is bounded without evicting live refreshes. The rare overflow
     // uses an uncached fenced probe; it cannot reuse an allow decision.
-    if (this.pendingProbes.size >= HalfOpenProbeHealthPort.MAX_PENDING_PROBES) return probe;
-    this.pendingProbes.set(key, probe);
+    if (this.#pendingProbes.size >= HalfOpenProbeHealthPort.MAX_PENDING_PROBES) return probe;
+    this.#pendingProbes.set(key, probe);
     try {
       return await probe;
     } finally {
-      if (this.pendingProbes.get(key) === probe) this.pendingProbes.delete(key);
+      if (this.#pendingProbes.get(key) === probe) this.#pendingProbes.delete(key);
     }
   }
 

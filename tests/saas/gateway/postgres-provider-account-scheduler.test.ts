@@ -2333,6 +2333,23 @@ test('modelCooldown is forwarded to the core scheduler and cools only the (accou
   if (result.decision === 'allow') assert.equal(result.value.accountId, 'account-b');
 });
 
+test('half-open refresh bookkeeping preserves the native authority observer shape', () => {
+  const { store } = probeStore(() => staleView(), 'admitted');
+  const { scheduler } = setup(
+    'byok',
+    {},
+    {
+      healthProbe: { store, leaseProvider: { acquire: async () => null } },
+    },
+  );
+  const health = (
+    scheduler as unknown as {
+      scheduler: { dependencies: { health: ProviderAccountSchedulerHealthPort } };
+    }
+  ).scheduler.dependencies.health;
+  assert.deepEqual(Reflect.ownKeys(health).sort(), ['leaseProvider', 'maxHealthAgeMs', 'store']);
+});
+
 test('concurrent stale-health callers await one refresh and independently re-read authority', async () => {
   const count = 32;
   let initialReads = 0;
