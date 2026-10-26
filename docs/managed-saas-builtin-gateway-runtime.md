@@ -34,6 +34,18 @@ the descriptors it executes from this set. PostgreSQL chooses custom or generic 
 automatic mode. Fresh reads, ordered fences, parameters and volatile database
 clocks execute on every request. No rows or authorization decisions are cached.
 
+The admission and prepared-evidence authority UNION batches also use native
+preparation when explicitly enabled. Their module-private descriptor storage is
+fixed at eight admission shapes (principal, ownership, supply mode) and sixteen
+evidence shapes (principal, ownership, optional customer/supplier prices).
+Descriptor names hash the complete SQL, never parameter values. A shape/text
+mismatch falls back to anonymous execution without growing the cache. Each
+batch still executes after its separate ordered fence statement, with a fresh
+READ COMMITTED snapshot; row locks, clocks and mutations remain unchanged.
+These are statement caches, not authority/result caches. Named-plan tests cover
+both custom and generic execution, but forcing a plan in correctness tests does
+not establish PostgreSQL's automatic plan choice or a performance improvement.
+
 Programmatic `createSaasDatabase` callers may set `preparedStatements: 'native'`
 or `'off'`; an explicit option wins over the environment. Injected pools ignore
 the environment and need an explicit native option plus their own optional

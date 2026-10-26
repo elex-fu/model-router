@@ -9,7 +9,9 @@ type PreparedStatementLabel =
   | 'prep-platform'
   | 'proof-core'
   | 'proof-tenant'
-  | 'proof-platform';
+  | 'proof-platform'
+  | 'auth-admit'
+  | 'auth-evidence';
 
 /** Called only for fixed gateway SQL constants, never for request values. */
 export function createPreparedSqlStatement(label: PreparedStatementLabel, text: string): PreparedSqlStatement {

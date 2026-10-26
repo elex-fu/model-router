@@ -7,6 +7,8 @@ import { SaasCatalogError, SaasCatalogService } from '../catalog/index.js';
 import { saasAdvisoryKey, sortAndDedupeAdvisoryKeys } from '../db/advisory-lock-keys.js';
 import type { SaasDatabase, SqlExecutor } from '../db/index.js';
 import { mapStoredAttemptRecord, mapStoredRequestRecord } from '../metering/service.js';
+import { createPreparedSqlStatement, queryPreparedOrAnonymous } from '../db/prepared-statements.js';
+import type { PreparedSqlStatement } from '../db/types.js';
 import type {
   AttemptRecord,
   AuthorizationBindingInput,
@@ -737,9 +739,16 @@ function toInitialAttempt(candidate: AttemptRecord): InitialAttemptInput {
   deny('AUTHORITY_MISMATCH');
 }
 
-async function rows(executor: SqlExecutor, sql: string, values: readonly unknown[]): Promise<Row[]> {
+async function rows(
+  executor: SqlExecutor,
+  sql: string,
+  values: readonly unknown[],
+  statement?: PreparedSqlStatement,
+): Promise<Row[]> {
   try {
-    const result = await executor.query<Row>(sql, values);
+    const result = statement
+      ? await queryPreparedOrAnonymous<Row>(executor, statement, values)
+      : await executor.query<Row>(sql, values);
     return result.rows;
   } catch {
     storage();
@@ -920,6 +929,28 @@ const ADMISSION_AUTHORITY_PROJECTIONS: Readonly<Record<string, string>> = {
     protocol, endpoint, currency, resolved_model, effective_at, expires_at`,
 };
 
+// SQL descriptors only, never results or request values. Exactly three binary
+// shape choices below bound this process-local storage to eight entries.
+const admissionAuthorityStatements: (PreparedSqlStatement | undefined)[] = new Array(8);
+
+function admissionAuthorityStatement(
+  request: RequestRecord,
+  candidate: AttemptRecord,
+  sql: string,
+): PreparedSqlStatement | undefined {
+  const shape =
+    Number(request.principalKind === 'member') +
+    2 * Number(candidate.accountOwnerKind === 'tenant') +
+    4 * Number(request.supplyMode === 'byok');
+  const existing = admissionAuthorityStatements[shape];
+  // A future SQL shape not represented by these bits must use fresh anonymous
+  // execution, never the wrong named statement or an unbounded cache entry.
+  if (existing) return existing.text === sql ? existing : undefined;
+  const statement = createPreparedSqlStatement('auth-admit', sql);
+  admissionAuthorityStatements[shape] = statement;
+  return statement;
+}
+
 /** Request-local facts, loaded only after all authorization fences are held. */
 async function loadAdmissionAuthority(
   executor: SqlExecutor,
@@ -1097,11 +1128,10 @@ async function loadAdmissionAuthority(
   // The shared fences precede this statement and therefore its READ COMMITTED
   // snapshot. Request/attempt row locks, catalog and price lineage fences,
   // final DB clocks and every wallet/capacity write remain separate.
-  const result = await rows(
-    executor,
-    `/* postgres-request-admission:authority-batch */ ${parts.join('\nUNION ALL\n')}`,
-    values,
-  );
+  const sql = `/* postgres-request-admission:authority-batch */ ${parts.join('\nUNION ALL\n')}`;
+  const statement =
+    typeof executor.queryPrepared === 'function' ? admissionAuthorityStatement(request, candidate, sql) : undefined;
+  const result = await rows(executor, sql, values, statement);
   const facts = new Map<string, Row[]>();
   for (const row of result) {
     if (

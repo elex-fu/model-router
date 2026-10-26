@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { saasAdvisoryKey } from '../../../src/saas/db/advisory-lock-keys.js';
-import type { SaasDatabase, SqlExecutor, SqlResult } from '../../../src/saas/db/types.js';
+import type { PreparedSqlStatement, SaasDatabase, SqlExecutor, SqlResult } from '../../../src/saas/db/types.js';
 import {
   PLATFORM_REQUEST_ADMISSION_UPPER_BOUNDS_KIND,
   type PlatformRequestAdmissionHoldEvidence,
@@ -1576,4 +1576,84 @@ test('a composite candidate whose supplier cost row is the nominal version fails
     assert.equal(error.code, 'AUTHORITY_MISMATCH');
     return true;
   });
+});
+
+const nativeAdmissionNames = new Set<string>();
+for (const { mode, principal } of (['byok', 'platform'] as const).flatMap((mode) =>
+  (['member', 'project_service'] as const).map((principal) => ({ mode, principal })),
+)) {
+  test(`${mode}/${principal} authority batch native preparation preserves SQL/fences and rereads revocation`, async () => {
+    const anonymous = makeFixture(mode);
+    const fixture = makeFixture(mode);
+    if (principal === 'project_service')
+      for (const item of [anonymous, fixture]) {
+        item.request = { ...item.request, principalKind: 'project_service', principalId: 'project-a' };
+        Object.assign(item.rows.request as Row, { principal_kind: 'project_service', principal_id: 'project-a' });
+        Object.assign(item.rows.key as Row, {
+          principal_user_id: null,
+          execution_principal_type: 'project_service',
+          execution_principal_id: 'project-a',
+        });
+      }
+    await run(anonymous, mode);
+    const database = new FakeDatabase(fixture);
+    const descriptors: PreparedSqlStatement[] = [];
+    const valuesSeen: readonly unknown[][] = [];
+    const executor: SqlExecutor = {
+      query: database.executor.query.bind(database.executor),
+      async queryPrepared<RowType>(statement: PreparedSqlStatement, values?: readonly unknown[]) {
+        descriptors.push(statement);
+        (valuesSeen as unknown[][]).push([...(values ?? [])]);
+        assert.match(statement.name, /^mr_auth-admit_[A-Za-z0-9_-]{43}$/u);
+        assert.ok(Object.isFrozen(statement));
+        return database.executor.query<RowType>(statement.text, values);
+      },
+    };
+    const guard = new PostgresRequestAdmissionGuard(database, { now: () => NOW, idFactory: () => 'snapshot-a' });
+    const input = {
+      executor,
+      request: fixture.request,
+      candidate: fixture.attempt,
+      holdEvidence: mode === 'platform' ? evidence() : null,
+      clientAddress: null,
+    };
+    await guard.revalidate(input);
+    assert.deepEqual(fixture.statements, anonymous.statements, 'off/native preserve every SQL byte and ordering');
+    assert.equal(descriptors.length, 1);
+    assert.equal(
+      nativeAdmissionNames.has(descriptors[0]!.name),
+      false,
+      'principal/owner SQL shapes require distinct names',
+    );
+    nativeAdmissionNames.add(descriptors[0]!.name);
+    assert.equal(valuesSeen[0]?.[0], fixture.request.tenantId);
+    (fixture.rows.key as Row).status = 'revoked';
+    await assert.rejects(
+      guard.revalidate(input),
+      (error: unknown) => error instanceof PostgresRequestAdmissionGuardError && error.code === 'AUTHORITY_MISMATCH',
+    );
+    assert.equal(descriptors.length, 2, 'cached statement must execute a fresh authority read');
+    assert.equal(descriptors[0], descriptors[1]);
+  });
+}
+
+test('admission native authority failure is not replayed anonymously', async () => {
+  const fixture = makeFixture('byok');
+  const database = new FakeDatabase(fixture);
+  let preparedCalls = 0;
+  const executor: SqlExecutor = {
+    query: database.executor.query.bind(database.executor),
+    async queryPrepared() {
+      preparedCalls++;
+      throw new Error('synthetic prepared failure');
+    },
+  };
+  const guard = new PostgresRequestAdmissionGuard(database, { now: () => NOW });
+  await assert.rejects(
+    guard.revalidate({ executor, request: fixture.request, candidate: fixture.attempt, holdEvidence: null }),
+    (error: unknown) => error instanceof PostgresRequestAdmissionGuardError && error.code === 'STORAGE_ERROR',
+  );
+  assert.equal(preparedCalls, 1);
+  assert.equal(fixture.statements.filter((sql) => sql.includes('authority-batch')).length, 0);
+  assert.equal(fixture.snapshot, null);
 });

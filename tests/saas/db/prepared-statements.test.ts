@@ -16,6 +16,8 @@ test('fixed prepared descriptors are frozen, SQL-hashed and shorter than the wir
     'proof-core',
     'proof-tenant',
     'proof-platform',
+    'auth-admit',
+    'auth-evidence',
   ] as const) {
     const statement = createPreparedSqlStatement(label, sql);
     assert.ok(Object.isFrozen(statement));

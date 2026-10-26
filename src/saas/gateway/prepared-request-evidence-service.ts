@@ -3,6 +3,8 @@ import { saasAdvisoryKey, sortAndDedupeAdvisoryKeys } from '../db/advisory-lock-
 import type { SaasDatabase, SqlExecutor } from '../db/index.js';
 import { mapStoredAttemptRecord, storedAttemptColumns } from '../metering/service.js';
 import type { AttemptRecord } from '../metering/types.js';
+import { createPreparedSqlStatement, queryPreparedOrAnonymous } from '../db/prepared-statements.js';
+import type { PreparedSqlStatement } from '../db/types.js';
 import type { ModelResolutionProvenance } from './contracts.js';
 import { takePreparationTransactionFacts } from './postgres-request-admission-guard.js';
 
@@ -1351,9 +1353,12 @@ async function queryRows<T extends EvidenceRow>(
   executor: SqlExecutor,
   sql: string,
   values: readonly unknown[],
+  statement?: PreparedSqlStatement,
 ): Promise<T[]> {
   try {
-    const result = await executor.query<T>(sql, values);
+    const result = statement
+      ? await queryPreparedOrAnonymous<T>(executor, statement, values)
+      : await executor.query<T>(sql, values);
     return result.rows;
   } catch (error) {
     if (error instanceof SaasPreparedRequestEvidenceError) throw error;
@@ -1608,6 +1613,25 @@ const EVIDENCE_AUTHORITY_COLUMNS: Readonly<Record<string, string>> = {
     endpoint, protocol, public_model_id, public_model_version`,
 };
 
+// SQL descriptors only; all authority rows remain fresh transaction-local
+// reads. Four binary shape choices bound storage to sixteen entries.
+const evidenceAuthorityStatements: (PreparedSqlStatement | undefined)[] = new Array(16);
+
+function evidenceAuthorityStatement(input: NormalizedEvidence, sql: string): PreparedSqlStatement | undefined {
+  const shape =
+    Number(input.principalKind === 'member') +
+    2 * Number(input.accountOwnerKind === 'tenant') +
+    4 * Number(input.customerPriceVersion !== null) +
+    8 * Number(input.supplierCostVersion !== null);
+  const existing = evidenceAuthorityStatements[shape];
+  // Keep unknown future shapes correct and bounded, without silently reusing
+  // an incompatible prepared name or retrying a failed prepared execution.
+  if (existing) return existing.text === sql ? existing : undefined;
+  const statement = createPreparedSqlStatement('auth-evidence', sql);
+  evidenceAuthorityStatements[shape] = statement;
+  return statement;
+}
+
 /** Fresh, transaction-local authority facts, read after every ordered fence. */
 async function loadEvidenceAuthority(
   tx: SqlExecutor,
@@ -1728,11 +1752,9 @@ async function loadEvidenceAuthority(
   // Fences are separate preceding statements: a waiter gets a fresh
   // READ COMMITTED snapshot after the writer commits. Request/attempt/evidence
   // row reads and locks, final DB clocks, CAS and audit remain separate too.
-  const result = await queryRows<EvidenceRow>(
-    tx,
-    `/* prepared-evidence:authority-batch */ ${parts.join('\nUNION ALL\n')}`,
-    values,
-  );
+  const sql = `/* prepared-evidence:authority-batch */ ${parts.join('\nUNION ALL\n')}`;
+  const statement = typeof tx.queryPrepared === 'function' ? evidenceAuthorityStatement(input, sql) : undefined;
+  const result = await queryRows<EvidenceRow>(tx, sql, values, statement);
   const facts = new Map<string, EvidenceRow[]>();
   for (const row of result) {
     if (

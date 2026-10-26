@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import { types as pgTypes } from 'pg';
 import type { Dispatcher } from 'undici';
 import { saasAdvisoryKey } from '../../../src/saas/db/advisory-lock-keys.js';
-import type { SaasDatabase, SqlExecutor, SqlResult } from '../../../src/saas/db/index.js';
+import type { PreparedSqlStatement, SaasDatabase, SqlExecutor, SqlResult } from '../../../src/saas/db/index.js';
 import {
   canonicalPreparedRequestEvidencePayload,
   consumeFreshPreparedEvidence,
@@ -1927,4 +1927,86 @@ test('fresh registration hints are frozen single-use issuer/evidence/payload cap
       undefined,
     );
   }
+});
+
+const nativeEvidenceNames = new Set<string>();
+for (const { mode, principal } of (['byok', 'platform'] as const).flatMap((mode) =>
+  (['member', 'project_service'] as const).map((principal) => ({ mode, principal })),
+)) {
+  test(`${mode}/${principal} evidence native authority batch preserves SQL/fences and refreshes revoked facts`, async () => {
+    const input =
+      principal === 'project_service'
+        ? signedInput({ ...modeInput(mode), principalKind: 'project_service', principalId: 'project-1' })
+        : modeInput(mode);
+    const anonymous = modeFake(input);
+    await service(anonymous).register(input);
+    const fake = modeFake(input);
+    const descriptors: PreparedSqlStatement[] = [];
+    Object.assign(fake, {
+      async queryPrepared<RowType>(statement: PreparedSqlStatement, values?: readonly unknown[]) {
+        descriptors.push(statement);
+        assert.match(statement.name, /^mr_auth-evidence_[A-Za-z0-9_-]{43}$/u);
+        assert.ok(Object.isFrozen(statement));
+        return fake.query<RowType>(statement.text, values);
+      },
+    });
+    const evidenceService = service(fake);
+    const registered = await evidenceService.register(input);
+    fake.evidence.statement_sha256 = registered.statementSha256;
+    assert.deepEqual(fake.statements, anonymous.statements);
+    const batchIndex = fake.statements.findIndex((sql) => sql.includes('prepared-evidence:authority-batch'));
+    assert.deepEqual(fake.statementValues[batchIndex], anonymous.statementValues[batchIndex]);
+    assert.equal(descriptors.length, 1);
+    assert.equal(
+      nativeEvidenceNames.has(descriptors[0]!.name),
+      false,
+      'principal/owner SQL shapes require distinct names',
+    );
+    nativeEvidenceNames.add(descriptors[0]!.name);
+    await evidenceService.preflightForDispatch(String(input.evidenceId), input.audit);
+    assert.equal(descriptors.length, 2);
+    assert.equal(descriptors[0], descriptors[1]);
+    (fake.rows.credential as Record<string, unknown>).status = 'revoked';
+    await expectCode(evidenceService.preflightForDispatch(String(input.evidenceId), input.audit), 'AUTHORITY_MISMATCH');
+    assert.equal(descriptors.length, 3, 'SQL descriptor caching never caches authority facts');
+    assert.equal(fake.evidence.status, 'registered');
+  });
+}
+
+test('evidence native authority failure never retries the same operation anonymously', async () => {
+  const input = modeInput('byok');
+  const fake = modeFake(input);
+  let calls = 0;
+  Object.assign(fake, {
+    async queryPrepared() {
+      calls++;
+      throw new Error('synthetic prepared failure');
+    },
+  });
+  await expectCode(service(fake).register(input), 'STORAGE_ERROR');
+  assert.equal(calls, 1);
+  assert.equal(fake.statements.filter((sql) => sql.includes('authority-batch')).length, 0);
+  assert.equal(fake.lastEvidenceInsertValues, null);
+});
+
+test('evidence optional price presence selects a distinct SQL-only descriptor without caching request values', async () => {
+  const descriptors: PreparedSqlStatement[] = [];
+  for (const customerPriceVersion of [null, 'price-1'] as const) {
+    for (const tenantId of ['tenant-1', 'tenant-2']) {
+      const input = signedInput({ tenantId, customerPriceVersion });
+      const fake = modeFake(input);
+      Object.assign(fake, {
+        async queryPrepared<RowType>(statement: PreparedSqlStatement, values?: readonly unknown[]) {
+          descriptors.push(statement);
+          assert.equal(values?.[0], tenantId);
+          return fake.query<RowType>(statement.text, values);
+        },
+      });
+      await service(fake).register(input);
+    }
+  }
+  assert.equal(descriptors.length, 4);
+  assert.equal(descriptors[0], descriptors[1], 'different tenant parameters reuse only the descriptor');
+  assert.equal(descriptors[2], descriptors[3]);
+  assert.notEqual(descriptors[0]?.name, descriptors[2]?.name, 'optional price changes the SQL shape/name');
 });
