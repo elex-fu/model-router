@@ -514,6 +514,105 @@ test('settles the platform hold and composes every write on one transaction exec
   assert.ok(harness.metering.executors.every((executor) => executor === harness.billing.executor));
 });
 
+const authorityVersionColumns = [
+  'attempt_project_policy_version',
+  'request_project_policy_version',
+  'supply_profile_authz_version',
+  'supply_profile_version',
+  'credential_version',
+  'credential_authz_version',
+  'account_authz_version',
+  'request_route_config_version',
+  'request_route_public_model_version',
+  'attempt_route_config_version',
+  'attempt_route_public_model_version',
+  'attempt_customer_metering_policy_version',
+  'request_customer_metering_policy_version',
+  'attempt_provider_metering_policy_version',
+  'request_provider_metering_policy_version',
+  'pool_authz_version',
+  'pool_member_account_authz_version',
+  'pool_member_authz_version',
+  'pool_grant_authz_version',
+  'pool_grant_profile_authz_version',
+  'pool_grant_pool_authz_version',
+] as const;
+
+test('reconciliation accepts exact PostgreSQL integer, bigint and decimal-string authority versions', async (t) => {
+  for (const representation of [1, 1n, '1', '0001']) {
+    await t.test(`${typeof representation}:${representation}`, async () => {
+      const row = initialRow(Object.fromEntries(authorityVersionColumns.map((column) => [column, representation])));
+      const harness = createHarness(initialState({ row }));
+      assert.equal((await harness.adapter.submit(settlementInput())).status, 'settled');
+      assert.equal((await harness.adapter.submit(settlementInput())).status, 'replayed');
+      assert.equal(harness.database.state.ledgerTransactionCount, 1);
+    });
+  }
+  const harness = createHarness(
+    initialState({
+      row: initialRow({
+        attempt_project_policy_version: 9_223_372_036_854_775_807n,
+        request_project_policy_version: '9223372036854775807',
+      }),
+    }),
+  );
+  assert.equal((await harness.adapter.submit(settlementInput())).status, 'settled');
+});
+
+test('reconciliation rejects invalid or inexact authority versions without usage or money writes', async () => {
+  for (const column of authorityVersionColumns) {
+    for (const value of [
+      0,
+      -1,
+      1.5,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      Number.MAX_SAFE_INTEGER + 1,
+      9_223_372_036_854_775_808n,
+      '9223372036854775808',
+      '1.0',
+      '',
+      null,
+      undefined,
+      true,
+      {},
+    ]) {
+      const harness = createHarness(initialState({ row: initialRow({ [column]: value }) }));
+      assert.equal((await harness.adapter.submit(settlementInput())).status, 'conflict', `${column}: ${String(value)}`);
+      assert.equal(harness.database.state.usageEventCount, 0);
+      assert.equal(harness.billing.callCount, 0);
+      assert.equal(harness.database.state.hold?.state, 'reserved');
+    }
+  }
+});
+
+test('mixed-representation authority version mismatches still fail closed; identity strings are not coerced', async () => {
+  for (const [left, right] of [
+    ['attempt_project_policy_version', 'request_project_policy_version'],
+    ['attempt_customer_metering_policy_version', 'request_customer_metering_policy_version'],
+    ['attempt_provider_metering_policy_version', 'request_provider_metering_policy_version'],
+    ['supply_profile_version', 'supply_profile_authz_version'],
+  ]) {
+    const harness = createHarness(initialState({ row: initialRow({ [left]: 1, [right]: 2n }) }));
+    assert.equal((await harness.adapter.submit(settlementInput())).status, 'conflict');
+    assert.equal(harness.billing.callCount, 0);
+  }
+  for (const column of [
+    'attempt_tenant_id',
+    'request_id',
+    'account_id',
+    'provider_id',
+    'credential_id',
+    'pool_id',
+    'attempt_customer_price_version',
+    'supplier_cost_version',
+  ]) {
+    const harness = createHarness(initialState({ row: initialRow({ [column]: 1 }) }));
+    assert.equal((await harness.adapter.submit(settlementInput())).status, 'conflict', column);
+    assert.equal(harness.billing.callCount, 0);
+  }
+});
+
 test('replays a stable idempotency key and conflicts when its charge changes', async () => {
   const harness = createHarness();
   const input = settlementInput();

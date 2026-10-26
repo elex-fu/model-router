@@ -410,4 +410,70 @@ test('settlement locks coexist with real deferred Redis projection FKs and still
     assert.equal((await port(gateway).submit(input)).status, 'conflict');
     assert.deepEqual(await financialSnapshot(migrator, fixture), before);
   });
+
+  await t.test(
+    'conditional reconciliation accepts native PG integer versions and settles/replays exactly once',
+    async () => {
+      const { fixture, namespace } = await redisFixture(migrator, gateway);
+      const attempt = await successPort(gateway, fixture).retainUnknown({
+        ...fixture.input,
+        reason: 'dispatch_uncertain',
+      });
+      const request = await fixture.metering.getRequest(fixture.tenantId, fixture.input.requestId);
+      assert.ok(request);
+      assert.ok(fixture.input.priceSnapshotRef);
+      // These are native int4 columns. Do not add a parser or test adapter that
+      // stringifies them: the original decoder incorrectly rejected real rows.
+      const native = (
+        await gateway.query<{ credential_version: number; route_public_model_version: number }>(
+          'SELECT credential_version, route_public_model_version FROM saas_attempts WHERE tenant_id=$1 AND id=$2',
+          [fixture.tenantId, fixture.input.attemptId],
+        )
+      ).rows[0];
+      assert.equal(typeof native?.credential_version, 'number');
+      assert.equal(typeof native?.route_public_model_version, 'number');
+      const input: ConditionalSettlementInput = {
+        tenantId: fixture.tenantId,
+        requestId: fixture.input.requestId,
+        attemptId: fixture.input.attemptId,
+        idempotencyKey: fixture.input.settlementKey,
+        providerOperationId: `projection-reconciled-${randomUUID()}`,
+        usage: observedUsage(),
+        charge: {
+          amountMinorUnits: '12',
+          currency: 'USD',
+          rateCardId: fixture.input.priceSnapshotRef,
+          rateCardVersion: '1',
+        },
+        expectedState: { attempt, request },
+      };
+      const port = (db: SaasDatabase) =>
+        new DurableConditionalSettlementPort(db, { metering: fixture.metering, billing: fixture.billing });
+      const results = await raceProjection(gateway, fixture, namespace, (db) => port(db).submit(input));
+      for (const result of results)
+        assert.equal(result.status, 'fulfilled', result.status === 'rejected' ? String(result.reason) : '');
+      assert.equal(results[1].status === 'fulfilled' && results[1].value.status, 'settled');
+      const replays = await Promise.all(Array.from({ length: 8 }, () => port(gateway).submit(input)));
+      assert.ok(replays.every((result) => result.status === 'replayed'));
+      const snapshot = await financialSnapshot(migrator, fixture);
+      assert.deepEqual(snapshot, {
+        usage: '1',
+        settlements: '1',
+        charges: '1',
+        balance: '88',
+        ledger: '88',
+        held: '0',
+        holdState: 'settled',
+        unbalanced: '0',
+      });
+      assert.equal(
+        (await port(gateway).submit({ ...input, charge: { ...input.charge, amountMinorUnits: '13' } })).status,
+        'conflict',
+      );
+      await assert.rejects(() =>
+        successPort(gateway, fixture).retainUnknown({ ...fixture.input, reason: 'settlement_failed' }),
+      );
+      assert.deepEqual(await financialSnapshot(migrator, fixture), snapshot);
+    },
+  );
 });

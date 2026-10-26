@@ -541,8 +541,6 @@ function permissionAndIdentityMatch(row: LockedStateRow, input: NormalizedSettle
     row.attempt_request_id,
     row.request_id,
     row.request_tenant_id,
-    row.attempt_project_policy_version,
-    row.request_project_policy_version,
     row.account_id,
     row.provider_id,
     row.product_id,
@@ -551,41 +549,57 @@ function permissionAndIdentityMatch(row: LockedStateRow, input: NormalizedSettle
     row.attempt_protocol,
     row.request_protocol,
     row.dispatch_profile_id,
-    row.supply_profile_authz_version,
     row.supply_profile_id,
-    row.supply_profile_version,
     row.credential_id,
-    row.credential_version,
-    row.credential_authz_version,
-    row.account_authz_version,
     row.attempt_customer_price_version,
     row.request_customer_price_version,
     row.request_route_config_id,
-    row.request_route_config_version,
     row.request_route_public_model_id,
-    row.request_route_public_model_version,
     row.request_route_protocol,
     row.request_route_target_mode,
     row.route_upstream_id,
     row.attempt_route_config_id,
-    row.attempt_route_config_version,
     row.attempt_route_public_model_id,
-    row.attempt_route_public_model_version,
     row.attempt_route_protocol,
     row.attempt_route_target_mode,
     row.attempt_customer_metering_policy_id,
     row.request_customer_metering_policy_id,
-    row.attempt_customer_metering_policy_version,
-    row.request_customer_metering_policy_version,
     row.attempt_provider_metering_policy_id,
     row.request_provider_metering_policy_id,
-    row.attempt_provider_metering_policy_version,
-    row.request_provider_metering_policy_version,
     row.attempt_contract_attestation_id,
     row.request_contract_attestation_id,
     row.supplier_cost_version,
+    row.pool_id,
   ];
   if (requiredText.some((value) => text(value) === null)) return false;
+
+  // node-pg returns int4 versions as numbers and int8 versions as decimal
+  // strings (custom executors may return bigint). Validate only numeric
+  // version fields this way; UUID/text identities must remain strings.
+  const requiredVersions = [
+    row.attempt_project_policy_version,
+    row.request_project_policy_version,
+    row.supply_profile_authz_version,
+    row.supply_profile_version,
+    row.credential_version,
+    row.credential_authz_version,
+    row.account_authz_version,
+    row.request_route_config_version,
+    row.request_route_public_model_version,
+    row.attempt_route_config_version,
+    row.attempt_route_public_model_version,
+    row.attempt_customer_metering_policy_version,
+    row.request_customer_metering_policy_version,
+    row.attempt_provider_metering_policy_version,
+    row.request_provider_metering_policy_version,
+    row.pool_authz_version,
+    row.pool_member_account_authz_version,
+    row.pool_member_authz_version,
+    row.pool_grant_authz_version,
+    row.pool_grant_profile_authz_version,
+    row.pool_grant_pool_authz_version,
+  ];
+  if (requiredVersions.some((value) => version(value) === null)) return false;
 
   if (
     rowText(row, 'attempt_tenant_id') !== input.tenantId ||
@@ -603,30 +617,19 @@ function permissionAndIdentityMatch(row: LockedStateRow, input: NormalizedSettle
     rowText(row, 'attempt_route_protocol') !== rowText(row, 'request_route_protocol') ||
     rowText(row, 'route_upstream_id') !== rowText(row, 'upstream_id') ||
     rowText(row, 'supply_profile_id') !== rowText(row, 'dispatch_profile_id') ||
-    rowText(row, 'request_project_policy_version') !== rowText(row, 'attempt_project_policy_version') ||
+    !sameVersion(row.request_project_policy_version, row.attempt_project_policy_version) ||
     rowText(row, 'request_customer_price_version') !== rowText(row, 'attempt_customer_price_version') ||
     rowText(row, 'request_customer_metering_policy_id') !== rowText(row, 'attempt_customer_metering_policy_id') ||
-    rowText(row, 'request_customer_metering_policy_version') !==
-      rowText(row, 'attempt_customer_metering_policy_version') ||
+    !sameVersion(row.request_customer_metering_policy_version, row.attempt_customer_metering_policy_version) ||
     rowText(row, 'request_provider_metering_policy_id') !== rowText(row, 'attempt_provider_metering_policy_id') ||
-    rowText(row, 'request_provider_metering_policy_version') !==
-      rowText(row, 'attempt_provider_metering_policy_version') ||
+    !sameVersion(row.request_provider_metering_policy_version, row.attempt_provider_metering_policy_version) ||
     rowText(row, 'request_contract_attestation_id') !== rowText(row, 'attempt_contract_attestation_id') ||
     !sameVersion(row.supply_profile_version, row.supply_profile_authz_version)
   ) {
     return false;
   }
 
-  const platformAuthorityVersions = [
-    row.pool_id,
-    row.pool_authz_version,
-    row.pool_member_account_authz_version,
-    row.pool_member_authz_version,
-    row.pool_grant_authz_version,
-    row.pool_grant_profile_authz_version,
-    row.pool_grant_pool_authz_version,
-  ];
-  return platformAuthorityVersions.every((value) => text(value) !== null) && row.profile_account_authz_version === null;
+  return row.profile_account_authz_version === null;
 }
 
 function expectedStateMatches(row: LockedStateRow, input: NormalizedSettlement): boolean {
