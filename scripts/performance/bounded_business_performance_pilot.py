@@ -24,7 +24,7 @@ from async_receipt_performance_pilot import (
 from bounded_business_launcher_adapter import adapt
 
 from bounded_business_profiles import (
-    MAXIMUM, PROFILE_NAMES, aggregate_budgets, expected_budgets, get_profile, scene_parameters,
+    MAXIMUM, PROFILE_NAMES, SERIAL_PROFILES, aggregate_budgets, expected_budgets, get_profile, profile_stream, scene_parameters,
 )
 
 # Backward-compatible default-profile exports; every execution uses its explicit
@@ -284,8 +284,15 @@ def verify_sse_qualification(raw, count):
             "scope": "Unchanged native client reads complete body and requires data: [DONE] in SSE mode; every retained sample is200, complete, nonempty and fast-reserved-max. Exact35 fee and15-token reconciliation are separately checked in financial/TPM census."}
 
 
+def profile_client(fixture, profile, name, count, concurrency, duration=0):
+    """Use the same native protocol flag for the 128 warm requests and main scene."""
+    return fixture.client(name, count, concurrency, duration=duration, stream=profile_stream(profile))
+
+
 def verify_main_client(raw, profile, scene):
     plan = scene_parameters(profile, scene)
+    if profile in SERIAL_PROFILES:
+        assert raw["stream"] is profile_stream(profile), "BOUNDED_BUSINESS_SERIAL_PROTOCOL_REQUIRED"
     assert raw["concurrency"] == plan["concurrency"]
     assert raw["requests"] == len(raw["samples"]), "BOUNDED_BUSINESS_ALL_ATTEMPTS_REQUIRED"
     if plan["duration"] == 0:
@@ -504,6 +511,8 @@ def main():
     parser.add_argument("--pending-term", action="store_true",
                         help="Untimed qualification only: prove native queue drain while receipt INSERT is temporarily locked")
     args = parser.parse_args()
+    if args.profile in SERIAL_PROFILES and (args.workers != 1 or args.scene != "timed"):
+        parser.error("serial profiles require --workers 1 --scene timed; they are diagnostics, not a new acceptance gate")
     selected = get_profile(args.profile)
     totals = aggregate_budgets(args.profile)
     scene = scene_parameters(args.profile, args.scene)
@@ -747,7 +756,9 @@ def main():
             "client_sha256": hashlib.sha256(args.client.read_bytes()).hexdigest(),
             "helper_hashes": {file.name: hashlib.sha256(file.read_bytes()).hexdigest()
                               for file in here.glob("*bounded*business*") if file.is_file()},
-            "warm_protocol": "10 bootstrap +128 c32, same total138 in both arms; both owners must have actual completed work; full finance+TPM drain and minimum1s gap",
+            "warm_protocol": ("10 JSON bootstrap +128 protocol-matched c32; total138; full finance+TPM drain and minimum1s gap"
+                              if args.profile in SERIAL_PROFILES else
+                              "10 bootstrap +128 c32, same total138 in both arms; both owners must have actual completed work; full finance+TPM drain and minimum1s gap"),
             "qualification_request_counts": {"warm": 138, "JSON": 256, "SSE": 32, "held_before_TERM": 32 if args.pending_term else 0,
                                              "total": 458 if args.pending_term else 426} if args.scene == "qualification" else None,
             "caveats": ["No lifetime aggregate T guarantee across restart/retired unresolved liabilities; exactly the fresh fixed-M owners are allowed.",
@@ -779,8 +790,10 @@ def main():
         assert initial["census"]["allocations"] == [] and initial["census"]["maxima"] == [], "BOUNDED_BUSINESS_FRESH_FIXTURE_REQUIRED"
         fixture.warm(10)
         fixture.checkpoint(name)
-        warm = fixture.client(name + "-warm", 128, 32)
+        warm = profile_client(fixture, args.profile, name + "-warm", 128, 32)
         assert warm["success"] == warm["requests"] == 128 and warm["status_counts"] == {"200": 128}
+        if args.profile in SERIAL_PROFILES:
+            assert warm["stream"] is profile_stream(args.profile), "BOUNDED_BUSINESS_SERIAL_WARM_PROTOCOL_REQUIRED"
         fixture.total += 128
         fixture.drain(name + "-warm", fixture.total)
         fixture.tpm_drain(name + "-warm")
@@ -811,7 +824,7 @@ def main():
         thread = threading.Thread(target=guard, daemon=True)
         thread.start()
         try:
-            raw = fixture.client(name, scene["count"], scene["concurrency"], duration=scene["duration"])
+            raw = profile_client(fixture, args.profile, name, scene["count"], scene["concurrency"], duration=scene["duration"])
             fixture.total += raw["success"]
             immediate = fixture.census()
             fixture.save(name + "-immediate", immediate)

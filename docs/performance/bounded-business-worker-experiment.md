@@ -143,3 +143,19 @@ for this instrumentation. Successful collection can exit zero with
 unknown errors or incomplete cleanup still fail collection. Before/after/final
 probe artifacts preserve sample drops and invariant violations. Historical
 failed experiments must never be relabeled as passes.
+
+
+## Opt-in serial protocol diagnostics
+
+`--profile serial-json` and `--profile serial-sse` require `--workers 1 --scene timed`.
+Each retains all 1000 native-client attempts at c1 (including the first request and all tails),
+with the same c32 HTTP cap64/T67133440, PG pool16, queue256/2MiB/per-tenant64, phase8+8 and8 stripes.
+Warm remains 10 JSON bootstrap plus 128 protocol-matched c32 requests, real finance/TPM drain
+and at least 1 second quiet gap. SSE uses the unchanged native client's `-stream` terminal
+validation; JSON does not. Source/runtime pins and shared generation admission remain required.
+No inference observer, CPU profiler, capacity probe or queue sampler is installed. Existing
+all-attempt, fee35, actual15 tokens, whole-fixture mock, postshutdown finance/TPM and native
+owned-process cleanup checks apply unchanged (1138 total successful requests per fixture).
+These are diagnostics, not a new performance-acceptance gate or the legacy pilot-six plan.
+The original c32/c200 plans and budget definitions are unchanged. Use the same diagnostic
+runner revision for baseline/candidate; the application supplied by `--source` is independently pinned.

@@ -170,6 +170,23 @@ test('budget arithmetic preserves exact totals, stripes, phases and owner separa
     assert.throws(() => workerBudget(2, profile), /INVALID_PROFILE/);
   }
 });
+test('serial profiles keep c32 totals, actual startup budgets and one business process', () => {
+  for (const profile of ['serial-json', 'serial-sse']) {
+    assert.deepEqual(totalBudgets(profile), totalBudgets('c32'));
+    assert.deepEqual(workerBudget(1, profile), totalBudgets('c32'));
+    assert.throws(() => workerBudget(2, profile), /SERIAL_REQUIRES_ONE_WORKER/);
+    const env = { ...validEnv('/tmp/bounded-serial-pure', 1), BOUNDED_CLUSTER_PROFILE: profile };
+    const config = configuration(env, ['/absolute/entry.js'], [], true);
+    const child = childEnvironment(env, config, 0);
+    assert.equal(child.BOUNDED_CLUSTER_PROFILE, profile);
+    assert.equal(child.MODEL_ROUTER_SAAS_DB_POOL_MAX, '16');
+    assert.equal(child.MODEL_ROUTER_SAAS_GATEWAY_MAX_HTTP_IN_FLIGHT, '64');
+    assert.equal(child.MODEL_ROUTER_FAST_RECEIPT_MAX_PER_TENANT, '64');
+    assert.equal(child.MODEL_ROUTER_FAST_RECEIPT_WORKERS, '8');
+    assert.equal(child.MODEL_ROUTER_FAST_CREDIT_STRIPES, '8');
+    assert.throws(() => configuration({ ...env, BOUNDED_CLUSTER_WORKERS: '2' }, ['/absolute/entry.js'], [], true), /SERIAL_REQUIRES_ONE_WORKER/);
+  }
+});
 test('fail closed on implicit mode, explicit money, foreign preload and invalid setup', () => {
   const env = validEnv('/tmp/bounded-pure');
   for (const change of [{ BOUNDED_CLUSTER_DIAGNOSTIC: '' }, { BOUNDED_CLUSTER_WORKERS: '3' },

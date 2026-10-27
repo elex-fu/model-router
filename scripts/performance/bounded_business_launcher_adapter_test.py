@@ -56,6 +56,19 @@ async function mkdir(){}
 
 
 class AdapterTests(unittest.TestCase):
+    def test_serial_profiles_keep_native_budgets_and_disable_observers(self):
+        for profile in ("serial-json", "serial-sse"):
+            result = select({"BOUNDED_CLUSTER_WORKERS": "1", "BOUNDED_CLUSTER_PROFILE": profile}, profile)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            env = json.loads(result.stdout)["env"]
+            self.assertEqual(env["BOUNDED_CLUSTER_PROFILE"], profile)
+            self.assertEqual(env["MODEL_ROUTER_SAAS_DB_POOL_MAX"], "16")
+            self.assertEqual(env["MODEL_ROUTER_SAAS_GATEWAY_MAX_HTTP_IN_FLIGHT"], "64")
+            self.assertEqual(env["MODEL_ROUTER_FAST_RECEIPT_WORKERS"], "8")
+            self.assertEqual(env["MODEL_ROUTER_FAST_RECEIPT_MAX_PER_TENANT"], "64")
+            self.assertNotEqual(select({"BOUNDED_CLUSTER_WORKERS": "1", "BOUNDED_CLUSTER_PROFILE": profile, "PAIR_ASYNC_METRICS": "1"}, profile).returncode, 0)
+            with self.assertRaises(ValueError): generated(profile, capacity_diagnostic=True)
+
     def test_capacity_probe_requires_explicit_generated_optin(self):
         normal = generated("c200")
         instrumented = generated("c200", capacity_diagnostic=True)

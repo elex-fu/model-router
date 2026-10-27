@@ -17,10 +17,10 @@ from bounded_business_performance_pilot import (
     cleanup_owned_cluster, finalize_run,
     cleanup_owned_group, process_group_members,
     verify_sse_qualification, verify_mock_counts, verify_main_client, verify_client_outcomes, verify_capacity_snapshots,
-    experiment_passed,
+    experiment_passed, profile_client,
 )
 
-from bounded_business_profiles import aggregate_budgets, get_profile, scene_parameters
+from bounded_business_profiles import aggregate_budgets, get_profile, profile_stream, scene_parameters
 
 
 def bootstrap(workers=2, profile="c32"):
@@ -58,6 +58,57 @@ def census(workers=2, profile="c32"):
     return {"owners": [{"owner": owner, "epoch": owner + "-epoch"} for owner in owners],
             "allocations": allocations, "maxima": [{"maximum": "524480", "intents": 16}],
             "all_backing": str(target), "all_available": str(target)}, owners
+
+
+class SerialProfileTests(unittest.TestCase):
+    def test_serial_profiles_preserve_c32_budgets_and_require_one_process(self):
+        for profile, stream in (("serial-json", False), ("serial-sse", True)):
+            self.assertEqual(aggregate_budgets(profile), aggregate_budgets("c32"))
+            self.assertEqual(expected_budgets(1, profile), aggregate_budgets("c32"))
+            self.assertEqual(scene_parameters(profile, "timed"), {"count": 1000, "concurrency": 1, "duration": 0})
+            self.assertIs(profile_stream(profile), stream)
+            with self.assertRaises(ValueError): expected_budgets(2, profile)
+            with self.assertRaises(ValueError): scene_parameters(profile, "qualification")
+            state, proofs = bootstrap(1, profile)
+            self.assertTrue(verify_bootstrap(state, proofs, 1, profile)["verified"])
+            self.assertEqual(proofs[0]["receiptQueues"][0]["workers"], 8)
+            rows, owners = census(1, profile)
+            self.assertTrue(verify_owner_bounds(rows, owners, 1, profile=profile)["verified"])
+            env = router_environment({"PAIR_ASYNC_METRICS": "1"}, 1, profile)
+            self.assertEqual(env["PAIR_ASYNC_METRICS"], "0")
+            self.assertEqual(env["PAIR_CONCURRENCY_CAP"], "64")
+            proofs[0]["profile"] = "c32"
+            with self.assertRaises(AssertionError): verify_bootstrap(state, proofs, 1, profile)
+
+    def test_protocol_flag_matches_warm_and_main_without_changing_legacy_calls(self):
+        class Fixture:
+            def __init__(self): self.calls = []
+            def client(self, *args, **kwargs):
+                self.calls.append((args, kwargs))
+                return "native-client-result"
+        for profile, stream, count, concurrency, duration in (
+                ("serial-json", False, 1000, 1, 0), ("serial-sse", True, 1000, 1, 0),
+                ("c32", False, 1000000, 32, 60), ("c200", False, 10000, 200, 0)):
+            fixture = Fixture()
+            profile_client(fixture, profile, "warm", 128, 32)
+            result = profile_client(fixture, profile, "main", count, concurrency, duration)
+            self.assertEqual(result, "native-client-result")
+            self.assertEqual(fixture.calls, [(("warm", 128, 32), {"duration": 0, "stream": stream}),
+                (("main", count, concurrency), {"duration": duration, "stream": stream})])
+
+    def test_serial_preserves_all1000_and_checks_native_protocol_including_tail(self):
+        for profile, stream in (("serial-json", False), ("serial-sse", True)):
+            raw = {"stream": stream, "concurrency": 1, "requests": 1000,
+                   "samples": [{"MS": 1}] * 999 + [{"MS": 10000, "Err": "tail-error"}]}
+            self.assertEqual(verify_main_client(raw, profile, "timed")["retained_attempts"], 1000)
+            for change in ({"stream": not stream}, {"stream": int(stream)}, {"concurrency": 32},
+                           {"requests": 999, "samples": raw["samples"][:-1]}, {"samples": raw["samples"][:-1]}):
+                with self.assertRaises(AssertionError): verify_main_client({**raw, **change}, profile, "timed")
+            with self.assertRaises(KeyError): verify_main_client({k:v for k,v in raw.items() if k != "stream"}, profile, "timed")
+
+    def test_legacy_profiles_are_unchanged_and_have_no_new_protocol_field(self):
+        self.assertEqual(get_profile("c32"), {"httpInFlight": 64, "concurrency": 32, "timedSeconds": 60, "timedRequests": None})
+        self.assertEqual(get_profile("c200"), {"httpInFlight": 256, "concurrency": 200, "timedSeconds": None, "timedRequests": 10000})
 
 
 class CapacityDiagnosticTests(unittest.TestCase):

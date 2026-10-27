@@ -9,7 +9,7 @@ const path = require('node:path');
 
 const PROFILE_DATA = require('./bounded-business-profiles.json');
 function totalBudgets(profile = 'c32') {
-  if (!['c32', 'c200'].includes(profile)) throw new Error('BOUNDED_CLUSTER_INVALID_PROFILE');
+  if (!['c32', 'c200', 'serial-json', 'serial-sse'].includes(profile)) throw new Error('BOUNDED_CLUSTER_INVALID_PROFILE');
   const httpInFlight = PROFILE_DATA.profiles[profile].httpInFlight;
   return Object.freeze({ ...PROFILE_DATA.fixedTotals, httpInFlight,
     automaticCreditTarget: 2 * PROFILE_DATA.maximum * httpInFlight });
@@ -28,6 +28,8 @@ function processStartTicks(pid) {
 
 function workerBudget(workers, profile = 'c32') {
   if (workers !== 1 && workers !== 2) throw new Error('BOUNDED_CLUSTER_WORKER_COUNT');
+  if (['serial-json', 'serial-sse'].includes(profile) && workers !== 1)
+    throw new Error('BOUNDED_CLUSTER_SERIAL_REQUIRES_ONE_WORKER');
   return Object.fromEntries(Object.entries(totalBudgets(profile)).map(([key, value]) => [key, value / workers]));
 }
 function positive(raw, fallback, minimum, maximum) {

@@ -21,6 +21,20 @@
       "concurrency": 200,
       "timedSeconds": null,
       "timedRequests": 10000
+    },
+    "serial-json": {
+      "httpInFlight": 64,
+      "concurrency": 1,
+      "timedSeconds": null,
+      "timedRequests": 1000,
+      "stream": false
+    },
+    "serial-sse": {
+      "httpInFlight": 64,
+      "concurrency": 1,
+      "timedSeconds": null,
+      "timedRequests": 1000,
+      "stream": true
     }
   }
 }
