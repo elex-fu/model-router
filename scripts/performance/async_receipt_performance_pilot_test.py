@@ -2,7 +2,7 @@
 import copy
 import unittest
 
-from async_receipt_performance_pilot import receipt_append_calls, scene_plan, verify_phase_metrics
+from async_receipt_performance_pilot import receipt_append_calls, scene_plan, scene_worker_override, verify_phase_metrics
 
 
 class PilotTests(unittest.TestCase):
@@ -21,6 +21,18 @@ class PilotTests(unittest.TestCase):
             {"query": "WITH receipt AS ( SELECT count(*) FROM saas_fast_gateway_receipts)", "calls": 100},
         ]
         self.assertEqual(receipt_append_calls(rows), 8)
+
+    def test_worker_comparison_is_exactly_three_scenes_with_only_both_phase_worker_override(self):
+        plan = scene_plan("workers4-8-c32-60s")
+        self.assertEqual(plan, [
+            ("sustained-c32", "durable", 1000000, 32, False, 60),
+            ("sustained-c32-workers4", "memory-queue", 1000000, 32, False, 60),
+            ("sustained-c32-workers8", "memory-queue", 1000000, 32, False, 60)])
+        self.assertEqual([scene_worker_override("workers4-8-c32-60s", row[0]) for row in plan], [None, 4, 8])
+        self.assertIsNone(scene_worker_override("pilot-six", "sustained-c32"))
+        self.assertIsNone(scene_worker_override("phase-workers2-30s", "phase-c32-workers2"))
+        with self.assertRaises(KeyError):
+            scene_worker_override("workers4-8-c32-60s", "sustained-c32-workers16")
 
     def test_settled_attempt_conservation_and_missing_observation_rejects(self):
         expected = {"receiptQueueWait": 5, "receiptAwait": 5,

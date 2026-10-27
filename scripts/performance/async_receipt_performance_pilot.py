@@ -28,6 +28,10 @@ def distribution(values):
 def scene_plan(name):
     if name == "phase-workers2-30s":
         return [("phase-c32-workers2", "memory-queue", 1000000, 32, False, 30)]
+    if name == "workers4-8-c32-60s":
+        return [("sustained-c32", "durable", 1000000, 32, False, 60),
+                ("sustained-c32-workers4", "memory-queue", 1000000, 32, False, 60),
+                ("sustained-c32-workers8", "memory-queue", 1000000, 32, False, 60)]
     if name != "pilot-six":
         raise ValueError("ASYNC_PILOT_UNKNOWN_PLAN")
     return [("serial-json", "durable", 1000, 1, False, 0),
@@ -36,6 +40,13 @@ def scene_plan(name):
             ("serial-sse", "durable", 1000, 1, True, 0),
             ("sustained-c32", "durable", 1000000, 32, False, 60),
             ("sustained-c32", "memory-queue", 1000000, 32, False, 60)]
+
+
+def scene_worker_override(plan, protocol):
+    if plan != "workers4-8-c32-60s":
+        return None
+    return {"sustained-c32": None, "sustained-c32-workers4": 4,
+            "sustained-c32-workers8": 8}[protocol]
 
 
 def receipt_append_calls(rows):
@@ -77,7 +88,7 @@ def main():
     parser.add_argument("--label", required=True)
     parser.add_argument("--generation", type=int, required=True)
     parser.add_argument("--client", type=Path, required=True)
-    parser.add_argument("--plan", choices=["pilot-six", "phase-workers2-30s"], default="pilot-six")
+    parser.add_argument("--plan", choices=["pilot-six", "phase-workers2-30s", "workers4-8-c32-60s"], default="pilot-six")
     args = parser.parse_args()
     if not args.execute: parser.error("--execute requires root quiet-window GO")
     assert args.label.startswith("async-receipt-pilot-")
@@ -100,6 +111,7 @@ def main():
 
     class Pilot(Evaluation):
         receipt_mode = "durable"
+        receipt_workers = None
 
         def spawn(self, name, command, env=None):
             if name == "router-launch":
@@ -108,6 +120,8 @@ def main():
                 for key in list(env):
                     if key.startswith("MODEL_ROUTER_FAST_RECEIPT_"): del env[key]
                 env["MODEL_ROUTER_FAST_RECEIPT_MODE"] = self.receipt_mode
+                if self.receipt_workers is not None:
+                    env["MODEL_ROUTER_FAST_RECEIPT_WORKERS"] = str(self.receipt_workers)
             return super().spawn(name, command, env)
 
         def stop(self, process):
@@ -149,7 +163,8 @@ def main():
 
     fixture = Pilot(args)
     planned = scene_plan(args.plan)
-    phase_required = args.plan == "phase-workers2-30s"
+    phase_required = args.plan != "pilot-six"
+    diagnostic_only = args.plan == "phase-workers2-30s"
     results = []
     owned_gateway_identities = []
     try:
@@ -157,7 +172,7 @@ def main():
         fixture.save("manifest", {"source_commit": args.expected_source, "generation": args.generation,
             "planned": planned, "plan": args.plan, "pilot_only": True, "not_full_performance_acceptance": True,
             "built_in_queue_phase_metrics_required": phase_required,
-            "diagnostic_only": phase_required,
+            "diagnostic_only": diagnostic_only,
             "queue_telemetry_factory_wrapper": True, "fault_preload": False, "phase_profiler": False,
             "extra_SQL_periodic_sampler": False, "quiet_guard_file_sampler_seconds": 1,
             "client_change": "GEN17 transport/body/workload unchanged; post-loop wall-clock endpoints added",
@@ -166,11 +181,14 @@ def main():
             "M": 524480, "automatic_credit_target": 67133440, "concurrency_cap": 64, "database_pool_max": 16,
             "warm_protocol": "10 bootstrap + 128 c32 protocol-matched + full financial and queue drain + minimum1s gap",
             "queue_defaults": {"entries": 256, "bytes": 2097152, "workers": 2, "per_tenant": 64, "max_age_ms": 5000, "drain_timeout_ms": 10000},
-            "claim_limit": "Same-source mode pilot only. Not an updated sub2api comparison or repeated acceptance."})
+            "scene_worker_overrides": {protocol: scene_worker_override(args.plan, protocol) for protocol, *_ in planned},
+            "worker_knob_scope": "Existing WORKERS knob changes BOTH receipt and reconciliation phase concurrency; PG pool, queue entries/bytes/per-tenant, M and credit target unchanged.",
+            "claim_limit": "Same-source bounded mode/worker pilot only. Not an updated sub2api comparison or repeated acceptance."})
         fixture.start_services()
         for protocol, mode, n, concurrency, stream, duration in planned:
             name = protocol + "-" + mode
             fixture.receipt_mode = mode; fixture.total = 0
+            fixture.receipt_workers = scene_worker_override(args.plan, protocol)
             fixture.start_router(observer=False)
             owned_gateway_identities.append(process_snapshot(fixture.info["gatewayPid"]))
             fixture.save("source-manifest", {"commit": args.expected_source, "tracked_clean": True,
@@ -180,7 +198,10 @@ def main():
                 "SQL_observer": False, "periodic_SQL_sampler": False})
             profile = json.loads((fixture.out / "async-receipt-profile.json").read_text())
             assert profile["mode"] == mode and profile["metricsEnabled"] and not profile["faultEnabled"]
-            assert profile["receiptOverrides"] == {"MODEL_ROUTER_FAST_RECEIPT_MODE": mode}
+            expected_overrides = {"MODEL_ROUTER_FAST_RECEIPT_MODE": mode}
+            if fixture.receipt_workers is not None:
+                expected_overrides["MODEL_ROUTER_FAST_RECEIPT_WORKERS"] = str(fixture.receipt_workers)
+            assert profile["receiptOverrides"] == expected_overrides
             fixture.save(name + "-profile", profile)
             fixture.warm(10)
             fixture.checkpoint(name)
@@ -231,7 +252,8 @@ def main():
                 cpu_ms = ((cpu_after["user_ticks"] + cpu_after["system_ticks"]) - (cpu_before["user_ticks"] + cpu_before["system_ticks"])) * 1000 / cpu_after["ticks_per_second"]
                 resource.update(cpu_total_ms=cpu_ms, cpu_ms_per_success=cpu_ms / raw["success"] if raw["success"] else None)
             summary = {"scene": name, "mode": mode, "source_commit": args.expected_source,
-                "plan": args.plan, "diagnostic_only": phase_required,
+                "plan": args.plan, "diagnostic_only": diagnostic_only,
+                "receipt_and_reconciliation_workers_each": fixture.receipt_workers or 2,
                 "pilot_only": True, "client": {key: value for key, value in raw.items() if key != "samples"},
                 "client_completion_success_rps": raw["throughput_success_rps"],
                 "client_plus_durable_drain_seconds": full_duration,
@@ -271,7 +293,7 @@ def main():
                 assert telemetry["counterDeltas"]["accepted"] == telemetry["counterDeltas"]["durable"] == telemetry["counterDeltas"]["completed"]
                 assert telemetry["receiptAckLag"]["missedDurableTransitions"] == 0
                 assert telemetry["counterDeltas"]["accepted"] + telemetry["counterDeltas"]["fallbacks"] == raw["success"]
-            if phase_required:
+            if phase_required and mode == "memory-queue":
                 fixture.save(name + "-phase-verification", verify_phase_metrics(telemetry))
             fixture.stop(fixture.gateway)
             cleanup = json.loads((fixture.out / "async-gateway-cleanup.json").read_text())
