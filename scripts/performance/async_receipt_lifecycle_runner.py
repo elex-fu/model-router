@@ -39,6 +39,17 @@ def readiness_closed(url):
 
 
 def pressure_case(fixture, case, before, before_mock, hold, waiting):
+    if case == "intent-ack-loss":
+        hold.unlink()
+        (fixture.out / "intent-ack-loss.once").write_text("arm\n")
+        result = fixture.request()
+        assert result["status"] == 503, result
+        after = fixture.census(); assert_receipt_not_written(before, after)
+        assert fixture.metrics()["received"] == before_mock["received"]
+        fixture.save("intent-ack-loss-no-send-proof", {"response": result, "before": before,
+            "after": after, "raw_upstream_send_delta": 0, "unknown_durable_intent_M_retained": 524480})
+        fixture.drain("intent-ack-loss-known-unknown", fixture.total, allow_unknown=1)
+        return
     if case == "receipt-ack-loss":
         hold.unlink()
         (fixture.out / "receipt-ack-loss.once").write_text("arm\n")
@@ -115,6 +126,55 @@ def pressure_case(fixture, case, before, before_mock, hold, waiting):
     assert fixture.metrics()["received"] - before_mock["received"] == 2
 
 
+def semantic_case(fixture, case, capture):
+    before = fixture.metrics()
+    if case == "byok":
+        responses = [fixture.request(stream=stream) for stream in [False, True, False]]
+        for result, stream in zip(responses, [False, True, False]): assert_completed_http(result, stream)
+        def drained():
+            state = fixture.census()
+            return state if state["completed_jobs"] == 3 else None
+        census = wait_until(drained, timeout=15)
+        assert census["intent_count"] == census["receipt_success_count"] == census["completed_jobs"] == 3
+        assert census["input_tokens"] == 30 and census["output_tokens"] == 15
+        for key in ("wallet_posted_minor_units", "allocation_count", "receipt_charge_minor_units", "settlement_ledger_count",
+                    "receipt_release_count", "legacy_requests", "legacy_attempts", "legacy_evidence", "legacy_usage_events", "unresolved_intents"):
+            assert census[key] == 0, key
+        bounds = json.loads(fixture.sql(fixture.db, "SELECT json_agg(t) FROM (SELECT currency,max_cost_minor_units,count(*) FROM model_router_saas.saas_fast_gateway_intents GROUP BY currency,max_cost_minor_units) t"))
+        assert bounds == [{"currency": None, "max_cost_minor_units": 0, "count": 3}]
+        metrics = fixture.save_observers("byok-final")
+        assert metrics["latest"]["accepted"] == metrics["latest"]["durable"] == metrics["latest"]["completed"] == 3
+        assert metrics["latest"]["undurableLiabilityByCurrency"] == {}
+        counters = capture(fixture)
+        for scope in ("tenant", "project", "key"):
+            assert counters[scope]["reserved_requests"] == 3 and counters[scope]["reserved_token_units"] == 45
+            assert counters[scope]["live_slots"] == 0
+        fixture.save("byok-proof", {"responses": responses, "census": census, "persisted_bounds": bounds,
+            "redis": counters, "unfunded_platform_wallet": True, "platform_customer_charge": 0})
+    else:
+        assert case == "strict-fallback"
+        first = fixture.request(extra_headers={"Idempotency-Key": "async-receipt-strict-control"})
+        assert first["status"] == 200 and first["mode"] == "strict" and first["fallback"] == "client_idempotency", first
+        replay = fixture.request(extra_headers={"Idempotency-Key": "async-receipt-strict-control"})
+        assert replay["status"] in (200, 202)
+        assert fixture.metrics()["received"] - before["received"] == 1
+        tools = fixture.request(body_patch={"tools": []})
+        assert tools["status"] == 200 and tools["mode"] == "strict" and tools["fallback"] == "unbounded_request_field", tools
+        # Mutate before the first eligible fast snapshot, not an immediate-revoke claim.
+        fixture.sql(fixture.db, "UPDATE model_router_saas.saas_api_key_budget_policies SET token_daily=1000000")
+        cap = fixture.request()
+        assert cap["status"] == 200 and cap["mode"] == "strict" and cap["fallback"] == "snapshot_policy", cap
+        def legacy_drained():
+            value = json.loads(fixture.sql(fixture.db, "SELECT json_build_object('fast_intents',(SELECT count(*) FROM model_router_saas.saas_fast_gateway_intents),'legacy_requests',(SELECT count(*) FROM model_router_saas.saas_requests),'settled',(SELECT count(*) FROM model_router_saas.saas_requests WHERE execution_state='succeeded' AND financial_status='settled'),'ledger_count',(SELECT count(*) FROM model_router_saas.saas_ledger_transactions WHERE source_type='billing_settlement'),'charge',(SELECT COALESCE(sum(amount_minor_units),0) FROM model_router_saas.saas_ledger_transactions WHERE source_type='billing_settlement'),'wallet',(SELECT sum(posted_balance_minor_units) FROM model_router_saas.saas_wallets))"))
+            return value if value["settled"] == 3 else None
+        census = wait_until(legacy_drained, timeout=20)
+        assert census == {"fast_intents": 0, "legacy_requests": 3, "settled": 3, "ledger_count": 3, "charge": 105, "wallet": 99999999895}
+        fixture.save("strict-fallback-proof", {"responses": [first, replay, tools, cap], "census": census,
+            "idempotent_replay_upstream_send": False, "fast_intents_before_fallback": 0,
+            "finite_cap_scope": "configured before any eligible fast snapshot; not an immediate invalidation test"})
+    assert fixture.metrics()["received"] - before["received"] == 3
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--execute", action="store_true")
@@ -123,7 +183,7 @@ def main():
     parser.add_argument("--expected-source", required=True)
     parser.add_argument("--label", required=True)
     parser.add_argument("--window", type=Path, required=True)
-    parser.add_argument("--case", choices=["kill-after-eof", "term-inflight", "queue-full", "queue-age", "receipt-ack-loss", "ledger-pause"], required=True)
+    parser.add_argument("--case", choices=["kill-after-eof", "term-inflight", "queue-full", "queue-age", "receipt-ack-loss", "intent-ack-loss", "ledger-pause", "byok", "strict-fallback"], required=True)
     args = parser.parse_args()
     if not args.execute:
         parser.error("--execute requires an explicitly authorized local functional scope")
@@ -140,7 +200,7 @@ def main():
     os.environ.update(PAIR_CONCURRENCY_CAP="64", PAIR_PREPARED="off", PAIR_CONNECTION_REUSE="auto",
         PAIR_BUILTIN_ESTIMATOR="1", PAIR_TRANCHE_MINOR_UNITS="auto", PAIR_EXPECT_COLD_SUCCESS="1", PAIR_SEED_HEALTH="0",
         PAIR_MOCK_DELAY_MS="1000" if args.case == "term-inflight" else "5")
-    args.mode = "smoke"; args.replicates = 1
+    args.mode = "byok-smoke" if args.case == "byok" else "smoke"; args.replicates = 1
 
     class OwnedFixture(Evaluation):
         def spawn(self, name, command, env=None):
@@ -185,7 +245,14 @@ def main():
             "harness_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
             "generated_launcher_sha256": hashlib.sha256(generated.read_bytes()).hexdigest(),
             "restart_contract": "same database/namespace/owner, new process epoch, DRAINED=0, no reseed; private env stays in memory"})
-        fixture.start_services(); fixture.start_router(observer=False); fixture.warm(1)
+        fixture.start_services(); fixture.start_router(observer=False)
+        if args.case in ("byok", "strict-fallback"):
+            semantic_case(fixture, args.case, capture)
+            fixture.save("result", {"passed": True, "not_performance_acceptance": True,
+                "case": args.case, "publication_status": "LOCAL_UNPUBLISHED"})
+            print("ASYNC_RECEIPT_SEMANTICS_PASS", args.case, flush=True)
+            return
+        fixture.warm(1)
         before = fixture.census(); before_mock = fixture.metrics(); before_redis = capture(fixture)
         assert_conservation(before)
         hold = fixture.out / "receipt-before-sql.hold"
