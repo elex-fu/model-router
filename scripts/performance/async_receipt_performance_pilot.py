@@ -21,6 +21,7 @@ from async_receipt_cpu_profile import summarize_cpu_profile
 
 OBSERVER_COST_PLAN = "observer-workers8-c32-60s"
 CPU_PROFILE_PLAN = "cpu-profile-workers8-c32-30s"
+OBSERVER_OFF_PLAN = "observer-off-workers8-c32-60s"
 
 # Atomic read-only, post-load census of this fixture's lease tombstones. Only
 # aggregate counts leave Redis; no lease identity, binding or token is emitted.
@@ -77,6 +78,8 @@ def distribution(values):
 
 
 def scene_plan(name):
+    if name == OBSERVER_OFF_PLAN:
+        return [("observer-off-c32-workers8", "memory-queue", 1000000, 32, False, 60)]
     if name == CPU_PROFILE_PLAN:
         return [("cpu-profile-c32-workers8", "memory-queue", 1000000, 32, False, 30)]
     if name == OBSERVER_COST_PLAN:
@@ -99,6 +102,8 @@ def scene_plan(name):
 
 
 def scene_worker_override(plan, protocol):
+    if plan == OBSERVER_OFF_PLAN:
+        return {"observer-off-c32-workers8": 8}[protocol]
     if plan == CPU_PROFILE_PLAN:
         return {"cpu-profile-c32-workers8": 8}[protocol]
     if plan == OBSERVER_COST_PLAN:
@@ -110,6 +115,8 @@ def scene_worker_override(plan, protocol):
 
 
 def scene_metrics_enabled(plan, protocol):
+    if plan == OBSERVER_OFF_PLAN:
+        return {"observer-off-c32-workers8": False}[protocol]
     if plan == CPU_PROFILE_PLAN:
         return {"cpu-profile-c32-workers8": False}[protocol]
     if plan == OBSERVER_COST_PLAN:
@@ -216,7 +223,7 @@ def main():
     parser.add_argument("--label", required=True)
     parser.add_argument("--generation", type=int, required=True)
     parser.add_argument("--client", type=Path, required=True)
-    parser.add_argument("--plan", choices=["pilot-six", "phase-workers2-30s", "workers4-8-c32-60s", OBSERVER_COST_PLAN, CPU_PROFILE_PLAN], default="pilot-six")
+    parser.add_argument("--plan", choices=["pilot-six", "phase-workers2-30s", "workers4-8-c32-60s", OBSERVER_COST_PLAN, CPU_PROFILE_PLAN, OBSERVER_OFF_PLAN], default="pilot-six")
     args = parser.parse_args()
     if not args.execute: parser.error("--execute requires root quiet-window GO")
     assert args.label.startswith("async-receipt-pilot-")
@@ -302,7 +309,8 @@ def main():
     phase_required = args.plan != "pilot-six"
     observer_cost = args.plan == OBSERVER_COST_PLAN
     cpu_profile = args.plan == CPU_PROFILE_PLAN
-    background_truth_required = observer_cost or cpu_profile
+    observer_off = args.plan == OBSERVER_OFF_PLAN
+    background_truth_required = observer_cost or cpu_profile or observer_off
     diagnostic_only = args.plan == "phase-workers2-30s" or background_truth_required
     results = []
     owned_gateway_identities = []
@@ -312,7 +320,7 @@ def main():
             "planned": planned, "plan": args.plan, "pilot_only": True, "not_full_performance_acceptance": True,
             "built_in_queue_phase_metrics_required": "when observer enabled" if background_truth_required else phase_required,
             "diagnostic_only": diagnostic_only,
-            "queue_telemetry_factory_wrapper": False if cpu_profile else "per-scene" if observer_cost else True, "fault_preload": False, "phase_profiler": False,
+            "queue_telemetry_factory_wrapper": False if cpu_profile or observer_off else "per-scene" if observer_cost else True, "fault_preload": False, "phase_profiler": False,
             "cpu_profile_only": cpu_profile,
             "cpu_profile_scope": "Gateway child Node CLI --cpu-prof at 1000us; whole process startup/warm/load/drain/shutdown, not timed-window-only. No HTTP/fetch/PG/eventloop observer. Profiled throughput is diagnostic and must not be compared as unprofiled acceptance." if cpu_profile else None,
             "extra_SQL_periodic_sampler": False, "quiet_guard_file_sampler_seconds": 1,
@@ -320,11 +328,12 @@ def main():
             "client_sha256": hashlib.sha256(args.client.read_bytes()).hexdigest(),
             "helper_hashes": {file.name: hashlib.sha256(file.read_bytes()).hexdigest() for file in here.glob("async*receipt*") if file.is_file()},
             "M": 524480, "automatic_credit_target": 67133440, "concurrency_cap": 64, "database_pool_max": 16,
-            "warm_protocol": "10 bootstrap + 128 c32 protocol-matched + full financial drain; observer-cost/CPU-profile also prove retained TPM/slots drain; queue snapshot only if observer enabled; minimum1s gap",
+            "warm_protocol": "10 bootstrap + 128 c32 protocol-matched + full financial drain; observer-controlled/CPU-profile plans also prove retained TPM/slots drain; queue snapshot only if observer enabled; minimum1s gap",
             "queue_defaults": {"entries": 256, "bytes": 2097152, "workers": 2, "per_tenant": 64, "max_age_ms": 5000, "drain_timeout_ms": 10000},
             "scene_worker_overrides": {protocol: scene_worker_override(args.plan, protocol) for protocol, *_ in planned},
             "scene_metrics_enabled": {protocol: scene_metrics_enabled(args.plan, protocol) for protocol, *_ in planned},
             "observer_cost_scope": "ON then OFF, one pair only; order-confounded diagnostic, not a repeated acceptance. OFF removes only the synchronous snapshot/observer sink; queue scheduling, internal scalar phase counters and all production behavior remain unchanged." if observer_cost else None,
+            "single_observer_off_scope": "One source per invocation, workers8/c32/60s, no observer/profiler. Matched cross-source use requires separate frozen-source/quiet-generation invocations; one baseline-then-candidate pair is order-confounded, not repeated acceptance or a new sub2api comparison." if observer_off else None,
             "worker_knob_scope": "Existing WORKERS knob changes BOTH receipt and reconciliation phase concurrency; PG pool, queue entries/bytes/per-tenant, M and credit target unchanged.",
             "claim_limit": "Same-source bounded mode/worker pilot only. Not an updated sub2api comparison or repeated acceptance."})
         fixture.start_services()

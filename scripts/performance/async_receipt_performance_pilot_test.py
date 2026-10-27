@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from async_receipt_performance_pilot import (
-    OBSERVER_COST_PLAN, CPU_PROFILE_PLAN, queue_metrics_snapshot, receipt_append_calls,
+    OBSERVER_COST_PLAN, CPU_PROFILE_PLAN, OBSERVER_OFF_PLAN, queue_metrics_snapshot, receipt_append_calls,
     router_environment, scene_metrics_enabled, scene_plan, scene_worker_override,
     unavailable_queue_telemetry, verify_phase_metrics, verify_tpm_reconciled,
     verify_lease_reconciliation,
@@ -13,6 +13,18 @@ from async_receipt_performance_pilot import (
 
 
 class PilotTests(unittest.TestCase):
+    def test_single_observer_off_plan_matches_pair_off_without_cpu_profiler(self):
+        plan = scene_plan(OBSERVER_OFF_PLAN)
+        self.assertEqual(plan, [scene_plan(OBSERVER_COST_PLAN)[1]])
+        self.assertEqual(scene_worker_override(OBSERVER_OFF_PLAN, plan[0][0]), 8)
+        self.assertFalse(scene_metrics_enabled(OBSERVER_OFF_PLAN, plan[0][0]))
+        env = router_environment({}, "memory-queue", 8, False)
+        self.assertEqual(env["PAIR_ASYNC_CPU_PROFILE"], "0")
+        self.assertEqual(env["PAIR_ASYNC_METRICS"], "0")
+        self.assertEqual(env["PAIR_ASYNC_FAULTS"], "0")
+        self.assertEqual({key: value for key, value in env.items() if key.startswith("MODEL_ROUTER_FAST_RECEIPT_")},
+                         {"MODEL_ROUTER_FAST_RECEIPT_MODE": "memory-queue", "MODEL_ROUTER_FAST_RECEIPT_WORKERS": "8"})
+
     def test_cpu_profile_is_one_workers8_observer_off_c32_30s_scene(self):
         plan = scene_plan(CPU_PROFILE_PLAN)
         self.assertEqual(plan, [("cpu-profile-c32-workers8", "memory-queue", 1000000, 32, False, 30)])
