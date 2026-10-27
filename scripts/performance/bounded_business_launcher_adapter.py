@@ -12,8 +12,10 @@ from async_receipt_launcher_adapter import BASE_SHA256, adapt as adapt_async, re
 from bounded_business_profiles import PROFILE_NAMES, aggregate_budgets, get_profile
 
 
-def adapt(source, *, base_directory, observer_directory, profile="c32"):
+def adapt(source, *, base_directory, observer_directory, profile="c32", capacity_diagnostic=False):
     get_profile(profile)
+    if capacity_diagnostic and profile != "c200":
+        raise ValueError("Capacity diagnostic requires c200")
     totals = aggregate_budgets(profile)
     here = Path(observer_directory).resolve()
     source = adapt_async(source, base_directory=base_directory, observer_directory=here)
@@ -39,7 +41,10 @@ def adapt(source, *, base_directory, observer_directory, profile="c32"):
   const boundedClusterProfile = process.env.BOUNDED_CLUSTER_PROFILE ?? 'c32';
   assert.equal(boundedClusterProfile, __BOUNDED_PROFILE__, 'BOUNDED_CLUSTER_PROFILE_MISMATCH');
   const boundedClusterTotals = __BOUNDED_TOTALS__;
+  const boundedCapacityDiagnostic = __CAPACITY_DIAGNOSTIC__;
+  assert.equal(process.env.BOUNDED_CLUSTER_CAPACITY_DIAGNOSTIC === '1', boundedCapacityDiagnostic, 'BOUNDED_CAPACITY_EXPLICIT_OPTIN_REQUIRED');
   const boundedClusterWorkers = Number(process.env.BOUNDED_CLUSTER_WORKERS);
+  if (boundedCapacityDiagnostic) assert.equal(boundedClusterWorkers, 2);
   assert.ok([1, 2].includes(boundedClusterWorkers), 'BOUNDED_CLUSTER_WORKER_COUNT_REQUIRED');
   assert.ok(!faultEnabled && !metricsEnabled && !cpuProfileEnabled && !env.NODE_OPTIONS && gatewayNodeArgs.length === 0,
     'BOUNDED_CLUSTER_TIMED_OBSERVERS_FORBIDDEN');
@@ -52,6 +57,7 @@ def adapt(source, *, base_directory, observer_directory, profile="c32"):
   Object.assign(env, {
     BOUNDED_CLUSTER_DIAGNOSTIC: '1', BOUNDED_CLUSTER_WORKERS: String(boundedClusterWorkers),
     BOUNDED_CLUSTER_PROFILE: boundedClusterProfile,
+    ...(boundedCapacityDiagnostic ? { BOUNDED_CLUSTER_CAPACITY_DIAGNOSTIC: '1' } : {}),
     BOUNDED_CLUSTER_STATE_FILE: boundedClusterStateFile,
     BOUNDED_CLUSTER_CHILD_DIRECTORY: boundedClusterChildDirectory,
     BOUNDED_CLUSTER_SHUTDOWN_MS: '45000',
@@ -64,7 +70,7 @@ def adapt(source, *, base_directory, observer_directory, profile="c32"):
     MODEL_ROUTER_FAST_CREDIT_STRIPES: String(boundedClusterTotals.creditStripes),
   });
 '''
-    hook = hook.replace('__BOUNDED_PROFILE__', json.dumps(profile)).replace('__BOUNDED_TOTALS__', json.dumps(totals))
+    hook = hook.replace('__BOUNDED_PROFILE__', json.dumps(profile)).replace('__BOUNDED_TOTALS__', json.dumps(totals)).replace('__CAPACITY_DIAGNOSTIC__', json.dumps(capacity_diagnostic))
     source = replace_once(source, "  const log = createWriteStream(join(out, 'gateway.log'),",
                           hook + "  const log = createWriteStream(join(out, 'gateway.log'),")
     source = replace_once(source,
@@ -99,7 +105,8 @@ def adapt(source, *, base_directory, observer_directory, profile="c32"):
     assert.equal(proof.poolObserverRemoved, true); assert.equal(proof.nativePoolPrototypes, true);
     assert.equal(proof.nativeFastPrototypes, true);
     assert.equal(proof.startupObserversRemoved, true);
-    assert.equal(proof.inferenceHooksInstalled, false);
+    assert.equal(proof.inferenceHooksInstalled, boundedCapacityDiagnostic);
+    assert.equal(Boolean(proof.capacityDiagnostic?.enabled), boundedCapacityDiagnostic);
   }
 '''
     source = replace_once(source, "  await writeFile(join(out, 'paired-ready.json'),",

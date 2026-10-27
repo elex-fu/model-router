@@ -103,6 +103,8 @@ function install() {
     process.channel?.unref();
   });
 
+  const capacityDiagnostic = env.BOUNDED_CLUSTER_CAPACITY_DIAGNOSTIC === '1'
+    ? require('./bounded-business-capacity-probe.cjs').install(dist, env) : null;
   const requireSource = createRequire(path.join(dist, '../package.json'));
   const pg = requireSource('pg');
   const OriginalPool = pg.Pool;
@@ -176,6 +178,7 @@ function install() {
         await options.onReady?.(runtime);
         const readyStatus = await ownReadiness(runtime.gateway, startupMs);
         restoreStartup();
+        capacityDiagnostic?.attachPublicServer(runtime.listeners?.gateway);
         const expectedQueue = { maxEntries: budgets.receiptEntries, maxBytes: budgets.receiptBytes,
           maxPerTenant: budgets.receiptPerTenant, workers: budgets.receiptWorkers, maxAgeMs: 5000,
           drainTimeoutMs: 10000 };
@@ -192,7 +195,8 @@ function install() {
             executorModule.FastGatewayExecutor === OriginalExecutor &&
             compositionModule.createManagedSaasGatewayProductionComposition === OriginalComposition,
           readinessSource: 'exclusive_process_local_GET_readyz_real_gateway_handler',
-          inferenceHooksInstalled: false,
+          inferenceHooksInstalled: Boolean(capacityDiagnostic),
+          ...(capacityDiagnostic ? { capacityDiagnostic: capacityDiagnostic.proof() } : {}),
           automaticCreditTargetBasis: '2 * fixture M524480 * trusted local concurrency; not a lifetime aggregate cap',
         };
         const temporary = `${proofFile}.tmp-${process.pid}`;
@@ -207,13 +211,18 @@ function install() {
               !Number.isSafeInteger(message.sequence) || message.sequence < 1) return;
           try {
             const value = { pid: process.pid, slot, sequence: message.sequence,
-              observedMonotonicNs: process.hrtime.bigint().toString(), snapshot: nativeQueue.snapshot() };
+              observedMonotonicNs: process.hrtime.bigint().toString(), snapshot: nativeQueue.snapshot(),
+              ...(capacityDiagnostic ? { capacityDiagnostic: capacityDiagnostic.snapshot() } : {}) };
             const temporary = `${snapshotFile}.tmp-${process.pid}`;
             fs.writeFileSync(temporary, `${JSON.stringify(value)}\n`, { mode: 0o600 });
             fs.renameSync(temporary, snapshotFile);
           } catch {
             if (process.connected) process.send({ type: 'bounded-business-observation-failed', slot });
           }
+        });
+        if (capacityDiagnostic) process.once('exit', () => {
+          fs.writeFileSync(`${snapshotFile}.capacity-final.json`, JSON.stringify({ pid: process.pid, slot, final: true,
+            capacityDiagnostic: capacityDiagnostic.snapshot() }) + '\n', { mode: 0o600 });
         });
         await new Promise((resolve, reject) => process.send(
           { type: 'bounded-business-ready', pid: process.pid, slot }, error => error ? reject(error) : resolve()));

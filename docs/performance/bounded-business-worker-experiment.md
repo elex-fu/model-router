@@ -72,7 +72,7 @@ Linux `/proc` is required for PID/start-identity ownership checks. Offline
 checks (also wired into the existing CI build/test job):
 
 ```sh
-node --test scripts/performance/bounded-business-cluster.test.cjs
+node --test scripts/performance/bounded-business-cluster.test.cjs scripts/performance/bounded-business-capacity-probe.test.cjs
 python3 -m unittest discover -s scripts/performance -p 'bounded_business_*_test.py'
 node --import tsx --test tests/ci/bounded-business-diagnostic-gates.test.ts
 ```
@@ -117,3 +117,29 @@ all statuses, per-owner work, summed business CPU and separate primary CPU.
 Repeat/reverse fresh-fixture arms before drawing conclusions. A profile's
 nonidle share and process CPU above one core do not prove spare CPU quota or
 multicore speedup. No sub2api or production-capacity claim follows from this test.
+
+### Opt-in HTTP-cap rejection diagnosis
+
+`--profile c200 --workers 2 --scene timed --capacity-diagnostic` enables a
+strict SHA-256-pinned, startup-only compiled-module transform. Application source
+and normal runs are unchanged; the module loader is restored immediately after
+loading the target. HTTP stays 128 per child / 256 total, with all financial,
+receipt, tenant, pool and worker budgets unchanged. Do not compare instrumented
+throughput with ordinary runs.
+
+The probe retains at most 128 accepted-but-unsettled response/socket references
+per child and 128 aggregate rejection samples; settlement or synchronous throw
+removes each retained reference. Samples include the native counter/limit,
+closing flag, PID/monotonic timestamp, ended/finished responses and unique
+sockets. The native local `Server._connections` count is reported when available.
+Server end/finish is not client EOF, and boundary snapshots are not simultaneous
+cross-worker occupancy evidence. No body, credential or per-request log is added.
+
+Only exact `GATEWAY_CAPACITY_EXHAUSTED` 429s may continue this diagnostic through
+success-only financial/TPM/mock and post-shutdown proofs. Every attempt remains
+in the client artifact, `passed=false` and `performance_acceptance=false` always
+for this instrumentation. Successful collection can exit zero with
+`diagnostic_collection_complete=true` while the experiment remains failed;
+unknown errors or incomplete cleanup still fail collection. Before/after/final
+probe artifacts preserve sample drops and invariant violations. Historical
+failed experiments must never be relabeled as passes.

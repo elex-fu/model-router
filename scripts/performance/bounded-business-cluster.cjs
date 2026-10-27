@@ -42,6 +42,10 @@ function configuration(env, argv, execArgv, primary) {
   const [entrypoint, ...args] = argv;
   const workers = Number(env.BOUNDED_CLUSTER_WORKERS);
   const profile = env.BOUNDED_CLUSTER_PROFILE ?? 'c32';
+  const capacityDiagnostic = env.BOUNDED_CLUSTER_CAPACITY_DIAGNOSTIC === '1';
+  if (env.BOUNDED_CLUSTER_CAPACITY_DIAGNOSTIC !== undefined &&
+      (!capacityDiagnostic || profile !== 'c200' || workers !== 2))
+    throw new Error('BOUNDED_CAPACITY_DIAGNOSTIC_PROFILE');
   const totals = totalBudgets(profile);
   const budgets = workerBudget(workers, profile);
   const directory = env.BOUNDED_CLUSTER_CHILD_DIRECTORY;
@@ -62,7 +66,7 @@ function configuration(env, argv, execArgv, primary) {
       env.MODEL_ROUTER_SAAS_WORKLOAD_ROLE !== 'gateway') {
     throw new Error('BOUNDED_CLUSTER_INVALID_DIAGNOSTIC_SETUP');
   }
-  return { entrypoint, args, workers, profile, totals, budgets, namespace, directory, stateFile,
+  return { entrypoint, args, workers, profile, totals, budgets, namespace, directory, stateFile, capacityDiagnostic,
     shutdownMs: positive(env.BOUNDED_CLUSTER_SHUTDOWN_MS, 45000, 100, 60000),
     startupMs: positive(env.BOUNDED_CLUSTER_STARTUP_MS, 90000, 100, 180000) };
 }
@@ -94,7 +98,10 @@ function verifyProof(proof, worker, config) {
   return proof?.pid === worker.pid && proof.owner === worker.owner && proof.slot === worker.slot &&
     proof.profile === config.profile &&
     proof.readyStatus === 200 && proof.readinessListenerClosed === true &&
-    proof.poolObserverRemoved === true && proof.inferenceHooksInstalled === false &&
+    proof.poolObserverRemoved === true && proof.inferenceHooksInstalled === Boolean(config.capacityDiagnostic) &&
+    (config.capacityDiagnostic ? proof.capacityDiagnostic?.enabled === true &&
+      proof.capacityDiagnostic.compiledSha256 === require('./bounded-business-capacity-probe.cjs').COMPILED_SHA256
+      : proof.capacityDiagnostic === undefined) &&
     proof.nativePoolPrototypes === true &&
     proof.nativeFastPrototypes === true && proof.startupObserversRemoved === true &&
     JSON.stringify(proof.receiptQueues) === JSON.stringify([queue]) &&
@@ -114,7 +121,7 @@ function main() {
   const state = { diagnosticOnly: true, topology: `cluster_rr_${config.workers}_business_workers`,
     primaryPid: process.pid, primaryStartTicks: processStartTicks(process.pid),
     primaryApplicationImports: false, businessWorkersStarted: 0,
-    restartEnabled: false, profile: config.profile, totalBudgets: config.totals, perWorkerBudgets: config.budgets,
+    restartEnabled: false, profile: config.profile, capacityDiagnostic: config.capacityDiagnostic, totalBudgets: config.totals, perWorkerBudgets: config.budgets,
     pendingHandoffQueue: 'node_cluster_internal_not_production_bounded',
     phase: 'starting', workers: [], snapshotSequence: 0, events: [], eventDrops: 0 };
   const live = new Map();

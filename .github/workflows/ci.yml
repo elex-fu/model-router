@@ -27,7 +27,7 @@ jobs:
         run: npm test
       - name: Run bounded business diagnostic harness tests
         run: |
-          node --test scripts/performance/bounded-business-cluster.test.cjs
+          node --test scripts/performance/bounded-business-cluster.test.cjs scripts/performance/bounded-business-capacity-probe.test.cjs
           python3 -m unittest discover -s scripts/performance -p 'bounded_business_*_test.py'
       - name: Run pinned Sub2api diagnostic runner unit tests
         run: python3 -m unittest discover -s scripts/performance -p 'sub2api_fresh_*_test.py'

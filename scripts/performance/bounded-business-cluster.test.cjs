@@ -215,6 +215,28 @@ test('c200 config proof scales actual local HTTP only, not tenant receipt or PG 
       {pools:[{max:16},{max:2}]}]) assert.equal(verifyProof({...proof,...change},row,config),false);
   }
 });
+test('capacity probe is explicit c200/two only and cannot forge an ordinary startup proof', () => {
+  const env = { ...validEnv('/tmp/capacity-config'), BOUNDED_CLUSTER_PROFILE: 'c200',
+    BOUNDED_CLUSTER_CAPACITY_DIAGNOSTIC: '1' };
+  const config = configuration(env, ['/absolute/entry.js'], [], true);
+  assert.equal(config.capacityDiagnostic, true);
+  assert.equal(config.budgets.httpInFlight, 128);
+  assert.equal(config.totals.httpInFlight, 256);
+  for (const change of [{ BOUNDED_CLUSTER_PROFILE: 'c32' }, { BOUNDED_CLUSTER_WORKERS: '1' },
+    { BOUNDED_CLUSTER_CAPACITY_DIAGNOSTIC: '0' }])
+    assert.throws(() => configuration({ ...env, ...change }, ['/absolute/entry.js'], [], true));
+  const row = { slot: 0, pid: 123, owner: 'fixture-slot-0' };
+  const proof = { ...row, profile: 'c200', budgets: config.budgets, pools: [{ max: 6 }, { max: 2 }],
+    readyStatus: 200, readinessListenerClosed: true, poolObserverRemoved: true,
+    nativePoolPrototypes: true, inferenceHooksInstalled: true, nativeFastPrototypes: true,
+    startupObserversRemoved: true, compositionHttpCaps: [128], executorLocalCaps: [128],
+    receiptQueues: [{maxEntries:128,maxBytes:1048576,maxPerTenant:32,workers:4,maxAgeMs:5000,drainTimeoutMs:10000}],
+    capacityDiagnostic: { enabled: true, compiledSha256: require('./bounded-business-capacity-probe.cjs').COMPILED_SHA256 } };
+  assert.equal(verifyProof(proof, row, config), true);
+  assert.equal(verifyProof(proof, row, { ...config, capacityDiagnostic: false }), false);
+  assert.equal(verifyProof({ ...proof, inferenceHooksInstalled: false }, row, config), false);
+  assert.equal(verifyProof({ ...proof, capacityDiagnostic: { enabled: true, compiledSha256: 'wrong' } }, row, config), false);
+});
 for (const profile of ['c32', 'c200']) for (const workers of [1, 2])
   test(`${profile}: ${workers} business fixture processes, per-PID health and natural resource-owner drain`, async t => {
   const run = await setup(t, workers, { BOUNDED_CLUSTER_PROFILE: profile, BOUNDED_TEST_SLOW_SLOT: String(workers - 1) });

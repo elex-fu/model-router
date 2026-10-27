@@ -32,9 +32,9 @@ try {
 """
 
 
-def generated(profile="c32"):
+def generated(profile="c32", capacity_diagnostic=False):
     with patch("async_receipt_launcher_adapter.BASE_SHA256", hashlib.sha256(BASE.encode()).hexdigest()):
-        return adapt(BASE, base_directory=Path.cwd(), observer_directory=Path(__file__).parent, profile=profile)
+        return adapt(BASE, base_directory=Path.cwd(), observer_directory=Path(__file__).parent, profile=profile, capacity_diagnostic=capacity_diagnostic)
 
 
 def select(env, profile="c32"):
@@ -56,6 +56,16 @@ async function mkdir(){}
 
 
 class AdapterTests(unittest.TestCase):
+    def test_capacity_probe_requires_explicit_generated_optin(self):
+        normal = generated("c200")
+        instrumented = generated("c200", capacity_diagnostic=True)
+        self.assertIn("const boundedCapacityDiagnostic = false;", normal)
+        self.assertIn("const boundedCapacityDiagnostic = true;", instrumented)
+        self.assertIn("BOUNDED_CAPACITY_EXPLICIT_OPTIN_REQUIRED", instrumented)
+        self.assertIn("assert.equal(proof.inferenceHooksInstalled, boundedCapacityDiagnostic)", instrumented)
+        with self.assertRaises(ValueError):
+            generated("c32", capacity_diagnostic=True)
+
     def test_two_workers_use_one_primary_with_explicit_aggregate_budgets(self):
         for workers in (1, 2):
             result = select({"BOUNDED_CLUSTER_WORKERS": str(workers)})

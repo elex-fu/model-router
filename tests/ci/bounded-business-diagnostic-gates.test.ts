@@ -3,7 +3,8 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 
 const workflow = readFileSync('.github/workflows/ci.yml', 'utf8');
-const nodeCommand = 'node --test scripts/performance/bounded-business-cluster.test.cjs';
+const nodeCommand =
+  'node --test scripts/performance/bounded-business-cluster.test.cjs scripts/performance/bounded-business-capacity-probe.test.cjs';
 const pythonCommand = "python3 -m unittest discover -s scripts/performance -p 'bounded_business_*_test.py'";
 
 function validate(source: string): void {

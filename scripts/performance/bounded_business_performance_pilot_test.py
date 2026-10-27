@@ -10,13 +10,14 @@ import time
 import unittest
 
 from bounded_business_performance_pilot import (
-    TOTAL_BUDGETS, TOTAL_CREDIT_TARGET, aggregate_resources, expected_budgets,
+    TOTAL_BUDGETS, TOTAL_CREDIT_TARGET, CAPACITY_COMPILED_SHA256, aggregate_resources, expected_budgets,
     router_environment, verify_bootstrap, verify_cluster_cleanup, verify_owner_bounds,
     verify_pending_term_observation,
     verify_queue_snapshots,
     cleanup_owned_cluster, finalize_run,
     cleanup_owned_group, process_group_members,
-    verify_sse_qualification, verify_mock_counts, verify_main_client,
+    verify_sse_qualification, verify_mock_counts, verify_main_client, verify_client_outcomes, verify_capacity_snapshots,
+    experiment_passed,
 )
 
 from bounded_business_profiles import aggregate_budgets, get_profile, scene_parameters
@@ -57,6 +58,60 @@ def census(workers=2, profile="c32"):
     return {"owners": [{"owner": owner, "epoch": owner + "-epoch"} for owner in owners],
             "allocations": allocations, "maxima": [{"maximum": "524480", "intents": 16}],
             "all_backing": str(target), "all_available": str(target)}, owners
+
+
+class CapacityDiagnosticTests(unittest.TestCase):
+    def test_instrumented_zero_rejections_still_cannot_pass_experiment(self):
+        raw = {"success": 10000, "requests": 10000}
+        self.assertFalse(experiment_passed(raw, capacity_diagnostic=True))
+        self.assertTrue(experiment_passed(raw))
+        self.assertFalse(experiment_passed({"success": 9961, "requests": 10000}))
+
+    def test_optin_never_inherited_and_budgets_unchanged(self):
+        dirty = {"BOUNDED_CLUSTER_CAPACITY_DIAGNOSTIC": "1"}
+        self.assertNotIn("BOUNDED_CLUSTER_CAPACITY_DIAGNOSTIC", router_environment(dirty, 2, "c200"))
+        enabled = router_environment(dirty, 2, "c200", capacity_diagnostic=True)
+        self.assertEqual(enabled["BOUNDED_CLUSTER_CAPACITY_DIAGNOSTIC"], "1")
+        self.assertEqual(enabled["PAIR_CONCURRENCY_CAP"], "256")
+        with self.assertRaises(AssertionError):
+            router_environment({}, 1, "c200", capacity_diagnostic=True)
+
+    def test_bootstrap_requires_instrumentation_only_when_explicit(self):
+        state, proofs = bootstrap(2, "c200")
+        state["capacityDiagnostic"] = True
+        for proof in proofs:
+            proof.update(inferenceHooksInstalled=True, capacityDiagnostic={"enabled": True, "compiledSha256": CAPACITY_COMPILED_SHA256})
+        self.assertTrue(verify_bootstrap(state, proofs, 2, "c200", capacity_diagnostic=True)["verified"])
+        with self.assertRaises(AssertionError):
+            verify_bootstrap(state, proofs, 2, "c200")
+
+    def test_only_known429_can_continue_and_never_passes_zero_error_gate(self):
+        success = {"Status": 200, "Err": "", "Bytes": 276, "Mode": "fast-reserved-max", "Fallback": ""}
+        rejected = {"Status": 429, "Bytes": 150, "Mode": "", "Fallback": "", "Err": json.dumps({"error": {
+            "code": "GATEWAY_CAPACITY_EXHAUSTED", "message": "The request could not be completed",
+            "requestId": "033779f3-c541-4338-98ee-21a8fe8d7715"}})}
+        raw = {"samples": [success, rejected], "success": 1, "requests": 2, "status_counts": {"200": 1, "429": 1}}
+        with self.assertRaises(AssertionError):
+            verify_client_outcomes(raw)
+        proof = verify_client_outcomes(raw, capacity_diagnostic=True)
+        self.assertFalse(proof["zero_error_gate_passed"])
+        self.assertFalse(proof["performance_acceptance"])
+        for change in ({"Status": 503}, {"Mode": "fast-reserved-max"}, {"Err": '{"error":{"code":"FAST_CREDIT_BUSY"}}'}):
+            bad = copy.deepcopy(raw); bad["samples"][1].update(change)
+            with self.assertRaises((AssertionError, KeyError)):
+                verify_client_outcomes(bad, capacity_diagnostic=True)
+        self.assertEqual(len(raw["samples"]), 2)
+
+    def test_snapshot_exact_cap128_and_bounded_samples(self):
+        state, _ = bootstrap(2, "c200")
+        values = [{"pid": row["pid"], "slot": row["slot"], "capacityDiagnostic": {
+            "enabled": True, "pid": row["pid"], "limit": 128, "current": 0, "peak": 128,
+            "accepted": 10, "settled": 10, "rejected": 0, "dropped": 0, "violations": 0, "samples": [],
+            "compiledSha256": "a98faa12c22e5283281af4e70b96c7153c0e57aacf12788de9afb3622aa9307f"}} for row in state["workers"]]
+        self.assertTrue(verify_capacity_snapshots(values, state)["verified"])
+        values[0]["capacityDiagnostic"]["limit"] = 256
+        with self.assertRaises(AssertionError):
+            verify_capacity_snapshots(values, state)
 
 
 class BudgetTests(unittest.TestCase):

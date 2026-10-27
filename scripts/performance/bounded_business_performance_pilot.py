@@ -8,6 +8,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import selectors
 import signal
@@ -30,6 +31,7 @@ from bounded_business_profiles import (
 # selected profile, never these aliases for c200 accounting.
 TOTAL_BUDGETS = aggregate_budgets()
 TOTAL_CREDIT_TARGET = TOTAL_BUDGETS["automaticCreditTarget"]
+CAPACITY_COMPILED_SHA256 = "a98faa12c22e5283281af4e70b96c7153c0e57aacf12788de9afb3622aa9307f"
 
 # All allocations, including retired epochs, are included. Nothing here mutates
 # financial authority, creates jobs, repairs state, or waits for TTL expiry.
@@ -59,8 +61,9 @@ SELECT jsonb_build_object(
 """
 
 
-def verify_bootstrap(state, proofs, workers, profile="c32"):
+def verify_bootstrap(state, proofs, workers, profile="c32", *, capacity_diagnostic=False):
     budgets = expected_budgets(workers, profile)
+    assert state.get("capacityDiagnostic", False) is capacity_diagnostic
     assert state["profile"] == profile, "BOUNDED_BUSINESS_STATE_PROFILE_MISMATCH"
     assert state["businessWorkersStarted"] == workers and state["restartEnabled"] is False
     assert state["phase"] == "ready"
@@ -82,7 +85,10 @@ def verify_bootstrap(state, proofs, workers, profile="c32"):
         assert proof["poolObserverRemoved"] is True and proof["nativePoolPrototypes"] is True
         assert proof["nativeFastPrototypes"] is True
         assert proof["startupObserversRemoved"] is True
-        assert proof["inferenceHooksInstalled"] is False
+        assert proof["inferenceHooksInstalled"] is capacity_diagnostic
+        assert bool(proof.get("capacityDiagnostic", {}).get("enabled", False)) is capacity_diagnostic
+        if capacity_diagnostic:
+            assert proof["capacityDiagnostic"]["compiledSha256"] == CAPACITY_COMPILED_SHA256
         for key, expected in budgets.items():
             assert proof["budgets"][key] == expected, (key, proof["budgets"], budgets)
         assert sorted(pool["max"] for pool in proof["pools"]) == expected_pools
@@ -205,7 +211,7 @@ def verify_cluster_cleanup(state, bootstrap, outer):
             "scope": "Both business children and primary exited normally with no restart or forced kill; native application lifecycle owns receipt and ledger drain."}
 
 
-def router_environment(env, workers, profile="c32"):
+def router_environment(env, workers, profile="c32", *, capacity_diagnostic=False):
     budgets = expected_budgets(workers, profile)
     result = dict(env)
     for key in list(result):
@@ -216,6 +222,9 @@ def router_environment(env, workers, profile="c32"):
                   PAIR_ASYNC_CPU_PROFILE="0", MODEL_ROUTER_FAST_RECEIPT_MODE="memory-queue",
                   BOUNDED_CLUSTER_WORKERS=str(workers), BOUNDED_CLUSTER_PROFILE=profile,
                   PAIR_CONCURRENCY_CAP=str(budgets["httpInFlight"] * workers))
+    if capacity_diagnostic:
+        assert profile == "c200" and workers == 2
+        result["BOUNDED_CLUSTER_CAPACITY_DIAGNOSTIC"] = "1"
     return result
 
 
@@ -284,6 +293,51 @@ def verify_main_client(raw, profile, scene):
     assert raw["requests"] > 0
     return {"verified": True, "plan": plan, "retained_attempts": len(raw["samples"]),
             "scope": "All native client attempts retained, including errors and finite-run tails; no warm, status, duration or outlier filtering."}
+
+
+def verify_client_outcomes(raw, *, capacity_diagnostic=False):
+    """Only the native pre-auth capacity code may continue diagnostic collection."""
+    successes = rejections = 0
+    for sample in raw["samples"]:
+        if sample["Status"] == 200:
+            assert sample["Err"] == "" and sample["Bytes"] > 0
+            assert sample["Mode"] == "fast-reserved-max" and sample["Fallback"] == ""
+            successes += 1
+        else:
+            assert capacity_diagnostic, "BOUNDED_BUSINESS_ZERO_ERROR_GATE"
+            assert sample["Status"] == 429 and sample["Mode"] == sample["Fallback"] == ""
+            payload = json.loads(sample["Err"])
+            assert set(payload) == {"error"} and set(payload["error"]) == {"code", "message", "requestId"}
+            error = payload["error"]
+            assert error["code"] == "GATEWAY_CAPACITY_EXHAUSTED"
+            assert error["message"] == "The request could not be completed"
+            assert isinstance(error["requestId"], str) and re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", error["requestId"])
+            assert sample["Bytes"] > 0
+            rejections += 1
+    assert successes == raw["success"] and successes + rejections == raw["requests"]
+    assert raw["status_counts"] == {**({"200": successes} if successes else {}), **({"429": rejections} if rejections else {})}
+    return {"verified": True, "successes": successes, "capacity_rejections": rejections,
+            "zero_error_gate_passed": rejections == 0, "performance_acceptance": not capacity_diagnostic and rejections == 0}
+
+
+def experiment_passed(raw, *, capacity_diagnostic=False):
+    # An instrumented diagnostic is never promoted to a passing experiment.
+    return not capacity_diagnostic and raw["success"] == raw["requests"]
+
+
+def verify_capacity_snapshots(values, bootstrap):
+    assert len(values) == len(bootstrap["workers"])
+    for value, worker in zip(values, bootstrap["workers"]):
+        assert value["pid"] == worker["pid"] and value["slot"] == worker["slot"]
+        probe = value["capacityDiagnostic"]
+        assert probe["enabled"] is True and probe["pid"] == worker["pid"]
+        assert probe["limit"] == 128 and 0 <= probe["current"] <= probe["peak"] <= 128
+        assert len(probe["samples"]) <= 128 and probe["violations"] == 0
+        assert probe["accepted"] - probe["settled"] == probe["current"]
+        assert probe["rejected"] == len(probe["samples"]) + probe["dropped"]
+        assert probe["compiledSha256"] == CAPACITY_COMPILED_SHA256
+    return {"verified": True, "workers": values,
+            "scope": "Bounded native rejection snapshots; boundary observations are not simultaneous cross-worker occupancy proof."}
 
 
 def verify_mock_counts(before, after, expected, *, fresh=False):
@@ -446,6 +500,7 @@ def main():
     parser.add_argument("--profile", choices=PROFILE_NAMES, default="c32")
     parser.add_argument("--workers", type=int, choices=(1, 2), required=True)
     parser.add_argument("--scene", choices=("qualification", "timed"), required=True)
+    parser.add_argument("--capacity-diagnostic", action="store_true", help="Opt-in bounded HTTP-cap rejection probe; never a performance comparison")
     parser.add_argument("--pending-term", action="store_true",
                         help="Untimed qualification only: prove native queue drain while receipt INSERT is temporarily locked")
     args = parser.parse_args()
@@ -456,6 +511,8 @@ def main():
         parser.error("--execute requires root quiet-window GO")
     if args.pending_term and args.scene != "qualification":
         parser.error("--pending-term is forbidden in timed performance scenes")
+    if args.capacity_diagnostic and (args.profile, args.workers, args.scene) != ("c200", 2, "timed"):
+        parser.error("--capacity-diagnostic requires --profile c200 --workers 2 --scene timed")
     assert args.label.startswith("bounded-business-pilot-"), "BOUNDED_BUSINESS_UNIQUE_LABEL_REQUIRED"
     assert subprocess.check_output(["git", "-C", args.source, "rev-parse", "HEAD"], text=True).strip() == args.expected_source
     here = Path(__file__).resolve().parent
@@ -463,7 +520,7 @@ def main():
     generated = args.harness / ("router-launch-" + args.label + ".mjs")
     assert not generated.exists(), "BOUNDED_BUSINESS_REFUSE_LAUNCHER_OVERWRITE"
     generated.write_text(adapt((args.harness / "router-launch.mjs").read_text(),
-                               base_directory=args.harness, observer_directory=here, profile=args.profile))
+                               base_directory=args.harness, observer_directory=here, profile=args.profile, capacity_diagnostic=args.capacity_diagnostic))
     subprocess.run(["node", "--check", str(generated)], check=True)
     sys.path.insert(0, str(args.harness.resolve()))
     from evaluate import Evaluation, A, PG, ROUTERPORT
@@ -486,7 +543,7 @@ def main():
         def spawn(self, name, command, env=None):
             if name == "router-launch":
                 command = ["node", generated]
-                env = router_environment(env, args.workers, args.profile)
+                env = router_environment(env, args.workers, args.profile, capacity_diagnostic=args.capacity_diagnostic)
                 log = (A / "logs" / f"{self.label}-{name}.log").open("w")
                 self.logs.append(log)
                 process = subprocess.Popen([str(value) for value in command], env=env,
@@ -679,6 +736,8 @@ def main():
             "scene": args.scene, "profile": args.profile, "client_plan": scene, "business_workers": args.workers, "diagnostic_only": True,
             "pending_TERM_qualification_requested": args.pending_term,
             "not_full_performance_acceptance": True, "production_changes": False,
+            "capacity_diagnostic": args.capacity_diagnostic, "performance_acceptance": False,
+            "native_http_capacity_probe": args.capacity_diagnostic,
             "topology": "same RR primary and public port; one or two actual business workers",
             "aggregate_budgets": totals, "per_child_budgets": expected_budgets(args.workers, args.profile),
             "M": MAXIMUM, "fee_per_success": 35, "actual_usage": {"input": 10, "output": 5},
@@ -705,7 +764,7 @@ def main():
         state_file = Path(fixture.info["clusterStateFile"])
         bootstrap = json.loads(state_file.read_text())
         proofs = [json.loads(Path(row["bootstrapProofFile"]).read_text()) for row in bootstrap["workers"]]
-        bootstrap_proof = verify_bootstrap(bootstrap, proofs, args.workers, args.profile)
+        bootstrap_proof = verify_bootstrap(bootstrap, proofs, args.workers, args.profile, capacity_diagnostic=args.capacity_diagnostic)
         fixture.owners = bootstrap_proof["owners"]
         primary_pid = bootstrap["primaryPid"]
         business_pids = bootstrap_proof["pids"]
@@ -734,6 +793,9 @@ def main():
         fixture.save(name + "-warm-mock-after", mock_before)
         fixture.save(name + "-warm-mock", verify_mock_counts(mock_initial, mock_before, 138, fresh=True))
         time.sleep(max(0, warm_drained + 1 - time.monotonic()))
+        if args.capacity_diagnostic:
+            capacity_before = verify_capacity_snapshots(fixture.queue_snapshots(bootstrap, state_file), bootstrap)
+            fixture.save(name + "-capacity-before", capacity_before)
         fixture.sql(fixture.db, "SELECT pg_stat_statements_reset()")
         quiet_before = capture(fixture)
         assert quiet_before["valid"]
@@ -763,6 +825,9 @@ def main():
             stop_guard.set()
             thread.join()
         quiet_after = capture(fixture)
+        if args.capacity_diagnostic:
+            capacity_after = verify_capacity_snapshots(fixture.queue_snapshots(bootstrap, state_file), bootstrap)
+            fixture.save(name + "-capacity-after", capacity_after)
         owners_after = fixture.owner_census(name + "-after", epochs=epochs)
         app_stats(fixture, name, fixture.db, True)
         sql_rows = json.loads((A / "results" / f"{fixture.label}-{name}-sql.json").read_text())
@@ -770,6 +835,14 @@ def main():
         lookup_calls = sum(row["calls"] for row in sql_rows if row["query"].startswith("SELECT i.request_id, i.intent_digest, COALESCE("))
         mock_after = fixture.metrics()
         client_proof = verify_main_client(raw, args.profile, args.scene)
+        # Preserve ordinary failed-run summaries before its unchanged strict gate.
+        # Diagnostic mode must classify every failure before continuing collection.
+        outcome_proof = (verify_client_outcomes(raw, capacity_diagnostic=args.capacity_diagnostic)
+                         if args.capacity_diagnostic or raw["success"] == raw["requests"] else
+                         {"verified": False, "zero_error_gate_passed": False, "performance_acceptance": False})
+        if args.capacity_diagnostic:
+            reject_delta = sum(v["capacityDiagnostic"]["rejected"] for v in capacity_after["workers"]) - sum(v["capacityDiagnostic"]["rejected"] for v in capacity_before["workers"])
+            assert reject_delta == outcome_proof["capacity_rejections"], "BOUNDED_CAPACITY_REJECTION_CENSUS_MISMATCH"
         client_start, client_end = int(raw["started_at_unix_ns"]), int(raw["completed_at_unix_ns"])
         clock_error_ns = abs((client_end - client_start) - round(raw["duration_s"] * 1e9))
         clock_stable = clock_error_ns <= 1000000 and abs(clock_after - clock_before) <= 1000000
@@ -780,7 +853,8 @@ def main():
         summary = {
             "scene": name, "profile": args.profile, "client_plan": scene, "source_commit": args.expected_source, "business_workers": args.workers,
             "diagnostic_only": True, "qualification_only": args.scene == "qualification",
-            "all_attempt_client_proof": client_proof,
+            "all_attempt_client_proof": client_proof, "outcome_proof": outcome_proof,
+            "capacity_diagnostic": args.capacity_diagnostic, "performance_acceptance": False if args.capacity_diagnostic else None,
             "client": {key: value for key, value in raw.items() if key != "samples"},
             "client_completion_success_rps": raw["throughput_success_rps"],
             "client_plus_financial_and_tpm_drain_seconds": financial_duration,
@@ -815,7 +889,10 @@ def main():
                           "p99": summary["all_attempt_latency_ms"]["p99"],
                           "financial": summary["financial_drain_ok"], "quiet": summary["quiet"]["valid"]}), flush=True)
         assert summary["quiet"]["valid"] and clock_stable and resource["valid"]
-        assert final["drain"]["ok"] and raw["success"] == raw["requests"]
+        assert final["drain"]["ok"]
+        if not args.capacity_diagnostic:
+            verify_client_outcomes(raw)
+        assert args.capacity_diagnostic or raw["success"] == raw["requests"]
         assert summary["mock_received_delta"] == summary["mock_completed_delta"] == raw["success"]
         assert raw["execution_modes"].get("fast-reserved-max", 0) == raw["success"] and not raw["fallback_reasons"]
         assert all(value["intents"] == value["completed"] and value["completed"] > 0 for value in owner_deltas.values())
@@ -847,6 +924,11 @@ def main():
         stopped = json.loads(state_file.read_text())
         cleanup = verify_cluster_cleanup(stopped, bootstrap, outer)
         fixture.save(name + "-gateway-cleanup", cleanup)
+        if args.capacity_diagnostic:
+            capacity_final = [json.loads(Path(row["queueSnapshotFile"] + ".capacity-final.json").read_text()) for row in bootstrap["workers"]]
+            final_probe = verify_capacity_snapshots(capacity_final, bootstrap)
+            assert all(value["final"] is True and value["capacityDiagnostic"]["current"] == 0 for value in capacity_final)
+            fixture.save(name + "-capacity-postshutdown", final_probe)
         fixture.drain(name + "-postshutdown", fixture.total)
         fixture.tpm_drain(name + "-postshutdown")
         fixture.owner_census(name + "-postshutdown", epochs=epochs, postshutdown=True)
@@ -858,7 +940,9 @@ def main():
             fixture.save(name + "-pending-term-qualification", {**pending_term, "verified": True,
                          "all_original_children_graceful": True, "postshutdown_finance_and_TPM_exact": True,
                          "total_successes_including_warm_and_pending": fixture.total})
-        result = {"passed": True, "scene": name, "profile": args.profile, "diagnostic_only": True,
+        result = {"passed": experiment_passed(raw, capacity_diagnostic=args.capacity_diagnostic), "scene": name,
+                  "performance_acceptance": False, "capacity_diagnostic": args.capacity_diagnostic,
+                  "diagnostic_collection_complete": args.capacity_diagnostic, "outcome_proof": outcome_proof, "profile": args.profile, "diagnostic_only": True,
                   "qualification_only": args.scene == "qualification", "business_workers": args.workers,
                   "whole_fixture_mock_verified": True, "whole_fixture_successes": fixture.total,
                   "pending_TERM_qualification_verified": bool(pending_term)}
@@ -921,7 +1005,7 @@ def main():
             cleanup_record["process_group_cleanup"] = group_cleanup
             fixture.save("cleanup", cleanup_record)
             assert cleanup_record["all_exited"]
-            if (descendant_cleanup["abnormal_cleanup"] or group_cleanup["abnormal_cleanup"]) and result.get("passed"):
+            if (descendant_cleanup["abnormal_cleanup"] or group_cleanup["abnormal_cleanup"]) and (result.get("passed") or result.get("diagnostic_collection_complete")):
                 raise RuntimeError("BOUNDED_BUSINESS_ABNORMAL_CLEANUP_CANNOT_PASS")
 
         finalize_run(result, cleanup_run,
