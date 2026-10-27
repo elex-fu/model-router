@@ -3,6 +3,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { FastReceiptInput } from '../../../../src/saas/gateway/fast/executor.js';
+import { fastJournalCanonicalJson } from '../../../../src/saas/gateway/fast/journal.js';
 import { FastReceiptQueue } from '../../../../src/saas/gateway/fast/receipt-queue.js';
 import { priceFixture } from './journal-fixture.js';
 
@@ -93,6 +94,118 @@ test('byte budget includes running work and oversize evidence falls back without
   await queue.close();
 });
 
+test('duplicates and rejected receipts do not freeze evidence; pressure never bypasses validation', async (t) => {
+  for (const pressure of ['entries', 'bytes', 'tenant', 'stopped', 'age'] as const) {
+    await t.test(pressure, async (t) => {
+      const ack = deferred();
+      const original = receipt('intent-\u00e9');
+      const bytes = Buffer.byteLength(fastJournalCanonicalJson(original)) * 2 + 256;
+      let calls = 0;
+      let now = 0;
+      const queue = new FastReceiptQueue({
+        maxEntries: pressure === 'entries' ? 1 : 2,
+        maxBytes: pressure === 'bytes' ? bytes : bytes * 2,
+        maxPerTenant: pressure === 'tenant' ? 1 : 2,
+        maxAgeMs: 5,
+        now: () => now,
+        journal: {
+          appendReceipt: async () => {
+            calls++;
+            await ack.promise;
+          },
+        },
+      });
+      const freeze = t.mock.method(Object, 'freeze');
+      const frozenReceiptCount = () =>
+        freeze.mock.calls.filter(
+          ({ arguments: [value] }) => typeof value === 'object' && value !== null && Object.hasOwn(value, 'intentId'),
+        ).length;
+      try {
+        assert.equal(queue.tryEnqueue(original, completion), true);
+        assert.equal(frozenReceiptCount(), 1);
+        assert.equal(queue.snapshot().bytes, bytes, 'canonical UTF-8 evidence is charged exactly twice plus envelope');
+        if (pressure === 'stopped') queue.stopAccepting();
+        if (pressure === 'age') now = 6;
+
+        assert.equal(queue.tryEnqueue(original, completion), true);
+        assert.throws(() => queue.tryEnqueue({ ...original, usageDigest: 'b'.repeat(64) }, completion), /CONFLICT/);
+        assert.throws(
+          () => queue.tryEnqueue(original, { ...completion, retainedLiabilityMinorUnits: '145' }),
+          /CONFLICT/,
+        );
+        for (const input of [original, receipt('new')]) {
+          assert.throws(() => queue.tryEnqueue({ ...input, chargeMinorUnits: '99' }, completion), /INVALID_PROOF/);
+          assert.throws(() => queue.tryEnqueue({ ...input, usageDigest: 'invalid' }, completion), /INVALID/);
+          assert.throws(
+            () => queue.tryEnqueue({ ...input, usage: { ...input.usage, body: '0' } }, completion),
+            /INVALID/,
+          );
+          assert.throws(() => queue.tryEnqueue(input, { ...completion, currency: 'JPY' }), /INVALID_COMPLETION/);
+          assert.throws(
+            () =>
+              queue.tryEnqueue(input, { ...completion, actualTokenUnits: 10, reconcileDurableUsage: async () => {} }),
+            /INVALID_COMPLETION/,
+          );
+        }
+        assert.equal(queue.snapshot().fallbacks, 0, 'invalid or duplicate attempts do not count as fallback');
+        assert.equal(queue.tryEnqueue(receipt('new'), completion), false);
+        assert.equal(queue.snapshot().fallbacks, 1, 'one capacity rejection is one fallback');
+        assert.equal(frozenReceiptCount(), 1, 'only accepted evidence requires recursive freezing');
+        assert.equal(calls, 1, 'neither duplicate nor rejected evidence starts another append');
+        assert.equal(queue.snapshot().accepted, 1);
+        assert.equal(queue.snapshot().pending, 1);
+        assert.equal(queue.snapshot().bytes, bytes);
+        assert.deepEqual(queue.snapshot().undurableLiabilityByCurrency, { USD: '144' });
+      } finally {
+        freeze.mock.restore();
+        ack.resolve();
+        await queue.close();
+      }
+      assert.equal(queue.snapshot().completed, 1);
+      assert.equal(queue.snapshot().bytes, 0);
+    });
+  }
+});
+
+test('completion getters cannot change canonical evidence or tenant accounting before acceptance', async () => {
+  const ack = deferred();
+  const original = receipt();
+  const captured = JSON.parse(fastJournalCanonicalJson(original)) as FastReceiptInput;
+  const observed: FastReceiptInput[] = [];
+  const queue = new FastReceiptQueue({
+    maxPerTenant: 1,
+    journal: {
+      appendReceipt: async (value) => {
+        observed.push(value);
+        await ack.promise;
+      },
+    },
+  });
+  try {
+    assert.equal(
+      queue.tryEnqueue(original, {
+        ...completion,
+        get currency() {
+          Object.assign(original, { intentId: 'mutated', tenantId: 'other' });
+          Object.assign(original.usage, { inputTotal: '900' });
+          assert.ok(original.verification);
+          Object.assign(original.verification.priceSnapshot.customerPrice, { currency: 'JPY' });
+          return 'USD';
+        },
+      }),
+      true,
+    );
+    assert.deepEqual(observed, [captured]);
+    assert.equal(queue.tryEnqueue(captured, completion), true, 'duplicate key comes from the canonical snapshot');
+    assert.equal(queue.tryEnqueue(receipt('next'), completion), false, 'captured tenant still owns its capacity');
+    assert.equal(queue.snapshot().accepted, 1);
+    assert.deepEqual(queue.snapshot().undurableLiabilityByCurrency, { USD: '144' });
+  } finally {
+    ack.resolve();
+    await queue.close();
+  }
+});
+
 test('lost ACK retries the identical frozen receipt; successful ACK alone unlocks usage reconciliation', async () => {
   const original = receipt();
   const observed: FastReceiptInput[] = [];
@@ -103,6 +216,12 @@ test('lost ACK retries the identical frozen receipt; successful ACK alone unlock
     retryMaxMs: 1,
     journal: {
       appendReceipt: async (value) => {
+        assert.ok(Object.isFrozen(value), 'accepted evidence is frozen before the first append');
+        assert.ok(Object.isFrozen(value.usage));
+        assert.ok(Object.isFrozen(value.verification));
+        assert.ok(Object.isFrozen(value.verification?.priceSnapshot));
+        assert.ok(Object.isFrozen(value.verification?.priceSnapshot.customerPrice));
+        assert.ok(Object.isFrozen(value.verification?.priceSnapshot.customerPrice.rates.input));
         observed.push(value);
         order.push('receipt');
         if (observed.length < 2) throw new Error('uncertain commit ACK');
@@ -124,11 +243,14 @@ test('lost ACK retries the identical frozen receipt; successful ACK alone unlock
   Object.assign(original.usage, { inputTotal: '900' });
   assert.ok(original.verification);
   Object.assign(original.verification.priceSnapshot.customerPrice, { currency: 'changed' });
+  assert.ok(original.verification.priceSnapshot.customerPrice.rates.input);
+  Object.assign(original.verification.priceSnapshot.customerPrice.rates.input, { numeratorMinorUnits: '900' });
   await queue.close();
   assert.equal(observed.length, 2);
   assert.equal(observed[0], observed[1]);
   assert.equal(observed[0].usage.inputTotal, '10');
   assert.equal(observed[0].verification?.priceSnapshot.customerPrice.currency, 'USD');
+  assert.equal(observed[0].verification?.priceSnapshot.customerPrice.rates.input?.numeratorMinorUnits, '1');
   assert.ok(Object.isFrozen(observed[0].verification?.priceSnapshot.customerPrice.rates));
   assert.deepEqual(order, ['receipt', 'receipt', 'reconcile', 'reconcile']);
   assert.equal(queue.snapshot().retries, 1);

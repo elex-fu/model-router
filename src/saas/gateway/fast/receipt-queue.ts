@@ -217,7 +217,8 @@ function capture(input: FastReceiptInput): { receipt: FastReceiptInput; canonica
     httpStatus: input.httpStatus,
     ...(proof ? { verification: { priceSnapshot: proof } } : {}),
   });
-  return { receipt: freeze(JSON.parse(canonical) as FastReceiptInput), canonical };
+  // Admission must use the canonical snapshot, not re-read caller-owned getters.
+  return { receipt: JSON.parse(canonical) as FastReceiptInput, canonical };
 }
 function positive(value: number, maximum = Number.MAX_SAFE_INTEGER): number {
   if (!Number.isSafeInteger(value) || value < 1 || value > maximum)
@@ -393,6 +394,8 @@ export class FastReceiptQueue {
       this.noteFallback();
       return false;
     }
+    // Only accepted evidence is retained; duplicates and fallbacks need no recursive freeze.
+    freeze(receipt);
     const acceptedAt = this.#now();
     const entry: Entry = {
       receipt,
