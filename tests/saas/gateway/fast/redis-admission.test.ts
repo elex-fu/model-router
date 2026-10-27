@@ -71,7 +71,13 @@ test('late acquire ACK cannot produce a dispatch-valid lease', async () => {
     eval: async (_script, options) => {
       const parameters = JSON.parse(options.arguments[0] ?? '{}');
       await new Promise<void>((resolve) => setTimeout(resolve, 25));
-      return JSON.stringify({ ok: true, token: parameters.token, incarnation: parameters.incarnation, renewInMs: 10 });
+      return JSON.stringify({
+        ok: true,
+        token: parameters.token,
+        incarnation: parameters.incarnation,
+        bucket: String(Math.floor(Date.now() / 1000)),
+        renewInMs: 10,
+      });
     },
   });
   assert.deepEqual(await admission.acquire(request()), { allowed: false, reason: 'unavailable' });
@@ -104,7 +110,13 @@ test('renewal failure invalidates locally without sending an implicit release', 
       calls++;
       if (calls > 1) throw new Error('Redis unavailable');
       const parameters = JSON.parse(options.arguments[0] ?? '{}');
-      return JSON.stringify({ ok: true, token: parameters.token, incarnation: parameters.incarnation, renewInMs: 150 });
+      return JSON.stringify({
+        ok: true,
+        token: parameters.token,
+        incarnation: parameters.incarnation,
+        bucket: String(Math.floor(Date.now() / 1000)),
+        renewInMs: 150,
+      });
     },
   });
   const result = await admission.acquire(request());
@@ -121,7 +133,13 @@ test('actual-token feedback is bounded by the original lease and successful rece
     eval: async (_script, options) => {
       calls++;
       const p = JSON.parse(options.arguments[0]);
-      return JSON.stringify({ ok: true, token: p.token, incarnation: p.incarnation, renewInMs: 100 });
+      return JSON.stringify({
+        ok: true,
+        token: p.token,
+        incarnation: p.incarnation,
+        bucket: String(Math.floor(Date.now() / 1000)),
+        renewInMs: 100,
+      });
     },
   });
   const admitted = await service.acquire(request());
@@ -148,7 +166,13 @@ test('split lifecycle validates durable usage and keeps independent idempotent o
     eval: async (_script, options) => {
       const p = JSON.parse(options.arguments[0]);
       calls.push(p);
-      return JSON.stringify({ ok: true, token: p.token, incarnation: p.incarnation, renewInMs: 100 });
+      return JSON.stringify({
+        ok: true,
+        token: p.token,
+        incarnation: p.incarnation,
+        bucket: String(Math.floor(Date.now() / 1000)),
+        renewInMs: 100,
+      });
     },
   });
   const source = request();
@@ -194,7 +218,13 @@ test('uncertain split operation ACKs can retry independently with the same immut
         seen.push(p.operation);
         if (failures.delete(p.operation)) throw new Error('private remote fault');
       }
-      return JSON.stringify({ ok: true, token: p.token, incarnation: p.incarnation, renewInMs: 100 });
+      return JSON.stringify({
+        ok: true,
+        token: p.token,
+        incarnation: p.incarnation,
+        bucket: String(Math.floor(Date.now() / 1000)),
+        renewInMs: 100,
+      });
     },
   });
   const result = await service.acquire(request());
@@ -211,14 +241,28 @@ test('uncertain split operation ACKs can retry independently with the same immut
   assert.deepEqual(seen, ['concurrency', 'usage', 'usage', 'concurrency']);
 });
 
-test('acquire requires an incarnation and renewal cannot acknowledge a different incarnation', async () => {
-  const missing = create({
-    eval: async (_script, options) => {
-      const p = JSON.parse(options.arguments[0]);
-      return JSON.stringify({ ok: true, token: p.token, renewInMs: 100 });
-    },
-  });
-  assert.deepEqual(await missing.acquire(request()), { allowed: false, reason: 'unavailable' });
+test('acquire requires canonical incarnation/bucket and renewal cannot acknowledge another incarnation', async () => {
+  for (const invalid of [
+    { incarnation: undefined },
+    { bucket: undefined },
+    { bucket: 'not-a-bucket' },
+    { bucket: '-1' },
+  ]) {
+    const missing = create({
+      eval: async (_script, options) => {
+        const p = JSON.parse(options.arguments[0]);
+        return JSON.stringify({
+          ok: true,
+          token: p.token,
+          incarnation: p.incarnation,
+          bucket: String(Math.floor(Date.now() / 1000)),
+          renewInMs: 100,
+          ...invalid,
+        });
+      },
+    });
+    assert.deepEqual(await missing.acquire(request()), { allowed: false, reason: 'unavailable' });
+  }
   let calls = 0;
   const changed = create({
     eval: async (_script, options) => {
@@ -227,6 +271,7 @@ test('acquire requires an incarnation and renewal cannot acknowledge a different
         ok: true,
         token: p.token,
         incarnation: calls++ === 0 ? p.incarnation : 'wrong-incarnation',
+        bucket: String(Math.floor(Date.now() / 1000)),
         renewInMs: 100,
       });
     },

@@ -55,6 +55,8 @@ export interface FastAdmissionLease {
    * Reconcile the original TPM reservation ONLY after a durable, validated
    * successful receipt ACK. Does not release concurrency. Retry the SAME actual
    * after an uncertain ACK; conflicting usage is rejected. No RPM refund.
+   * May complete without writing when Redis TIME proves the original bucket
+   * expired, with a valid authority sentinel and no conflicting incarnation.
    */
   reconcileDurableUsage?(actualTokenUnits: number): Promise<void>;
 }
@@ -112,11 +114,14 @@ local p=cjson.decode(ARGV[1])
 local rawMeta=redis.call('GET',KEYS[1])
 if not rawMeta then return cjson.encode({ok=false,reason='unavailable'}) end
 local meta=cjson.decode(rawMeta)
-if meta.runId~=p.runId or meta.horizon~=p.horizon then return cjson.encode({ok=false,reason='unavailable'}) end
+if type(meta.runId)~='string' or meta.runId=='' or meta.horizon~=p.horizon or type(meta.readyAt)~='number' or meta.readyAt<0 then return cjson.encode({ok=false,reason='unavailable'}) end
+-- Expired usage may be proved irrelevant under a newer valid generation, but
+-- no lease mutation or admission may cross the run-id authority boundary.
+if meta.runId~=p.runId and p.operation~='usage' then return cjson.encode({ok=false,reason='unavailable'}) end
 local raw=redis.call('GET',KEYS[2])
 local record=raw and cjson.decode(raw) or nil
 local function reply(r)
-  return cjson.encode({ok=true,untilMs=r.untilMs,renewInMs=math.max(0,r.renewBy-now),token=r.token,incarnation=r.incarnation})
+  return cjson.encode({ok=true,untilMs=r.untilMs,renewInMs=math.max(0,r.renewBy-now),token=r.token,incarnation=r.incarnation,bucket=r.bucket})
 end
 local function matches(r)
   return r and r.token==p.token and r.binding==p.binding and r.runId==p.runId
@@ -205,10 +210,8 @@ end
 redis.call('SET',KEYS[2],cjson.encode(record),'PX',p.renew+p.ttl+p.grace+p.retention)
 return reply(record)`;
 const RELEASE = `${PREFIX}
-if not owns(record) then return cjson.encode({ok=false,reason='unavailable'}) end
 local mode=p.operation
 if mode~='legacy' and mode~='concurrency' and mode~='usage' then return redis.error_reply('FAST_ADMISSION_STATE') end
-if record.state~='active' and record.state~='released' then return redis.error_reply('FAST_ADMISSION_STATE') end
 local feedback=p.feedback
 local actual=feedback and feedback.actualTokenUnits
 if mode=='concurrency' and actual~=nil then return redis.error_reply('FAST_ADMISSION_USAGE') end
@@ -216,6 +219,21 @@ if mode=='usage' and actual==nil then return redis.error_reply('FAST_ADMISSION_U
 if actual~=nil and (feedback.outcome~='success' or type(actual)~='number' or actual<0 or actual>p.tokenUnits or actual~=math.floor(actual)) then
   return redis.error_reply('FAST_ADMISSION_USAGE')
 end
+if mode=='usage' then
+  -- The canonical bucket comes from the original acknowledged admission, not
+  -- a caller clock/TTL estimate. This is a terminal NO-WRITE result: a bucket
+  -- outside the longest supported rate window can no longer need a refund.
+  local bucket=tonumber(p.admissionBucket)
+  if bucket and bucket>=0 and bucket==math.floor(bucket) and bucket*1000+1000<=now-60000 then
+    if record then
+      if not owns(record) or (record.state~='active' and record.state~='released') then return cjson.encode({ok=false,reason='unavailable'}) end
+      if record.usageState=='settled' and record.actualTokenUnits~=actual then return redis.error_reply('FAST_ADMISSION_USAGE') end
+    end
+    return cjson.encode({ok=true,usageExpired=true})
+  end
+end
+if meta.runId~=p.runId or not owns(record) then return cjson.encode({ok=false,reason='unavailable'}) end
+if record.state~='active' and record.state~='released' then return redis.error_reply('FAST_ADMISSION_STATE') end
 -- Preserve the legacy one-shot release contract, including no late feedback.
 if mode~='usage' and record.state=='released' then return cjson.encode({ok=true}) end
 if mode=='usage' then
@@ -294,6 +312,7 @@ type Decision = {
   reason?: 'rate_limited' | 'quota_exceeded' | 'unavailable';
   token?: string;
   incarnation?: string;
+  bucket?: string;
   renewInMs?: number;
   readyInMs?: number;
   retryAfterMs?: number;
@@ -310,6 +329,46 @@ function decode(reply: unknown): Decision {
   const result = JSON.parse(reply) as Decision;
   if (typeof result?.ok !== 'boolean') throw new Error('Fast admission unavailable');
   return result;
+}
+/**
+ * Separate lexical scope from acquire/release/renew: a detached queue retains
+ * only this rate capability, not lifecycle promises or request async contexts.
+ * Command parameters/keys are immutable serialized scalar snapshots.
+ */
+function durableUsageReconciler(
+  redis: RedisEvalClient,
+  keys: readonly string[],
+  serializedParameters: string,
+  reservedTokenUnits: number,
+): (actualTokenUnits: number) => Promise<void> {
+  const commandKeys = [...keys];
+  const argumentPrefix = serializedParameters.slice(0, -1);
+  let reconciling: Promise<void> | undefined;
+  let reconciliationTokenUnits: number | undefined;
+  return (actualTokenUnits) => {
+    if (
+      !integer(actualTokenUnits, 0, reservedTokenUnits) ||
+      (reconciliationTokenUnits !== undefined && reconciliationTokenUnits !== actualTokenUnits)
+    )
+      return Promise.reject(new Error('Invalid fast admission durable usage'));
+    if (reconciling) return reconciling;
+    reconciliationTokenUnits = actualTokenUnits;
+    reconciling = redis
+      .eval(RELEASE, {
+        keys: commandKeys,
+        arguments: [
+          `${argumentPrefix},"operation":"usage","feedback":{"outcome":"success","actualTokenUnits":${actualTokenUnits},"cooldownMs":0}}`,
+        ],
+      })
+      .then((raw) => {
+        if (!decode(raw).ok) throw new Error('Fast admission usage reconciliation unavailable');
+      })
+      .catch(() => {
+        reconciling = undefined;
+        throw new Error('Fast admission usage reconciliation unavailable');
+      });
+    return reconciling;
+  };
 }
 function normalize(limit: FastLimit | undefined) {
   const value = {
@@ -332,6 +391,8 @@ function normalize(limit: FastLimit | undefined) {
  * All dimensions deliberately share ONE Redis hash slot. Platform supply is global,
  * not tenant-sharded. No Redis Cluster client/failover/replica-read support is claimed.
  * Redis must use noeviction; missing state or a lost connection fails closed.
+ * Pre-split binaries cannot take over these versioned lease bindings (or vice
+ * versa). Drain old instances normally; never clear authority to speed rollout.
  */
 export class RedisFastGatewayAdmission implements FastGatewayAdmission {
   private readonly prefix: string;
@@ -440,13 +501,25 @@ export class RedisFastGatewayAdmission implements FastGatewayAdmission {
         member,
         token,
         incarnation: randomBytes(24).toString('hex'),
+        admissionBucket: '',
         limits,
         tokenUnits: input.tokenUnits,
         ttl: input.ttlMs,
         grace: this.grace,
         renew: renewWindow,
         retention: this.retention,
-        binding: digest([ids, input.userId, input.groupId, input.model, input.tokenUnits, input.ttlMs, limits]),
+        // Old Lua does not understand split usage/incarnation fencing. Version
+        // the binding so old/new binaries cannot operate each other's records.
+        binding: digest([
+          'split-v1',
+          ids,
+          input.userId,
+          input.groupId,
+          input.model,
+          input.tokenUnits,
+          input.ttlMs,
+          limits,
+        ]),
       };
       const started = performance.now();
       const result = decode(await this.options.redis.eval(ACQUIRE, { keys, arguments: [JSON.stringify(parameters)] }));
@@ -457,11 +530,18 @@ export class RedisFastGatewayAdmission implements FastGatewayAdmission {
             result.reason === 'rate_limited' || result.reason === 'quota_exceeded' ? result.reason : 'unavailable',
           ...(result.retryAfterMs ? { retryAfterMs: result.retryAfterMs } : {}),
         };
-      if (result.token !== token || !identity(result.incarnation) || !integer(result.renewInMs ?? -1, 1, renewWindow))
+      if (
+        result.token !== token ||
+        !identity(result.incarnation) ||
+        typeof result.bucket !== 'string' ||
+        !/^[0-9]{1,12}$/.test(result.bucket) ||
+        !integer(result.renewInMs ?? -1, 1, renewWindow)
+      )
         throw new Error('Invalid fast admission receipt');
       // A retried acquire returns the existing incarnation, not our proposal.
       // Pin every operation to it to prevent ABA after a tombstone expires.
       parameters.incarnation = result.incarnation;
+      parameters.admissionBucket = result.bucket;
       const reservedTokenUnits = input.tokenUnits;
       const hasModel = input.model !== undefined;
       const redis = this.options.redis;
@@ -471,8 +551,6 @@ export class RedisFastGatewayAdmission implements FastGatewayAdmission {
       let renewing: Promise<void> | undefined;
       let releasing: Promise<void> | undefined;
       let releasingConcurrency: Promise<void> | undefined;
-      let reconciling: Promise<void> | undefined;
-      let reconciliationTokenUnits: number | undefined;
       const validFeedback = (feedback: FastAdmissionFeedback | undefined): boolean =>
         !feedback ||
         (['success', 'failure', 'rate_limited'].includes(feedback.outcome) &&
@@ -482,7 +560,7 @@ export class RedisFastGatewayAdmission implements FastGatewayAdmission {
             (feedback.outcome === 'success' && integer(feedback.actualTokenUnits, 0, reservedTokenUnits))));
       // Captures only the Redis capability and immutable admission scalars/keys,
       // never request bodies, credentials, response handles or upstream objects.
-      const complete = (operation: 'legacy' | 'concurrency' | 'usage', feedback?: FastAdmissionFeedback) =>
+      const complete = (operation: 'legacy' | 'concurrency', feedback?: FastAdmissionFeedback) =>
         redis
           .eval(RELEASE, {
             keys,
@@ -553,20 +631,7 @@ export class RedisFastGatewayAdmission implements FastGatewayAdmission {
           });
           return releasingConcurrency;
         },
-        reconcileDurableUsage: (actualTokenUnits) => {
-          if (
-            !integer(actualTokenUnits, 0, reservedTokenUnits) ||
-            (reconciliationTokenUnits !== undefined && reconciliationTokenUnits !== actualTokenUnits)
-          )
-            return Promise.reject(new Error('Invalid fast admission durable usage'));
-          if (reconciling) return reconciling;
-          reconciliationTokenUnits = actualTokenUnits;
-          reconciling = complete('usage', { outcome: 'success', actualTokenUnits }).catch(() => {
-            reconciling = undefined;
-            throw new Error('Fast admission usage reconciliation unavailable');
-          });
-          return reconciling;
-        },
+        reconcileDurableUsage: durableUsageReconciler(redis, keys, JSON.stringify(parameters), reservedTokenUnits),
       };
       if (invalid) return { allowed: false, reason: 'unavailable' };
       return { allowed: true, lease };
