@@ -10,6 +10,7 @@ import {
 } from '../../../../src/saas/gateway/fast/executor.js';
 import { fastJournalCanonicalJson } from '../../../../src/saas/gateway/fast/journal.js';
 import { FastReceiptQueue } from '../../../../src/saas/gateway/fast/receipt-queue.js';
+import type { FastAdmissionFeedback } from '../../../../src/saas/gateway/fast/redis-admission.js';
 import { CachedFastGatewaySnapshots } from '../../../../src/saas/gateway/fast/snapshots.js';
 import type { PreparedEvidenceClientStream } from '../../../../src/saas/gateway/prepared-evidence-dispatch-service.js';
 import {
@@ -1016,4 +1017,464 @@ test('async mode never enqueues incomplete upstream cancellation/error as a succ
   assert.equal(s.calls.filter((c) => c === 'fetch').length, 1);
   assert.equal(s.calls.includes('release-concurrency'), false);
   await queue.close();
+});
+
+// A reusable keep-alive client may send its next request as soon as EOF arrives.
+// The prior handler must not retain operational Redis/heartbeat work after EOF.
+test('queued JSON and SSE wait for operational release before EOF, not for receipt SQL', async () => {
+  for (const stream of [false, true]) {
+    const s = setup({}, stream, true);
+    const receiptAck = deferred<void>();
+    const receiptEntered = deferred<void>();
+    const releaseAck = deferred<void>();
+    const releaseEntered = deferred<void>();
+    const reconciled: number[] = [];
+    const feedback: (FastAdmissionFeedback | undefined)[] = [];
+    const admission = splitAdmission(s, reconciled);
+    const queue = new FastReceiptQueue({
+      journal: {
+        appendReceipt: async (receipt) => {
+          await s.options.journal.appendReceipt(receipt);
+          receiptEntered.resolve();
+          await receiptAck.promise;
+        },
+      },
+    });
+    const executor = new FastGatewayExecutor({
+      ...s.options,
+      receiptQueue: queue,
+      admission: {
+        acquire: async (input) => {
+          const result = await admission.acquire(input);
+          if (!result.allowed) return result;
+          return {
+            ...result,
+            lease: {
+              ...result.lease,
+              releaseConcurrency: async (value) => {
+                feedback.push(value);
+                releaseEntered.resolve();
+                await releaseAck.promise;
+                s.calls.push('release-concurrency');
+              },
+            },
+          };
+        },
+      },
+    });
+    const pending = executor.execute(s.input);
+    try {
+      await Promise.all([receiptEntered.promise, releaseEntered.promise]);
+      assert.match(s.text(), /hello/, 'first body bytes must flow before operational release');
+      assert.equal(s.ended(), false, 'EOF must wait until operational release settles');
+      if (stream) assert.doesNotMatch(s.text(), /\[DONE\]/);
+      else assert.throws(() => JSON.parse(s.text()), 'the final JSON byte remains held');
+      assert.deepEqual(feedback, [{ outcome: 'success' }], 'undurable usage cannot refund TPM');
+      assert.deepEqual(reconciled, []);
+      assert.equal(queue.snapshot().undurableLiabilityByCurrency.USD, '144');
+      releaseAck.resolve();
+      assert.equal(await pending, true, 'receipt SQL must not join the queue-accepted critical path');
+      assert.equal(s.ended(), true);
+      assert.ok(s.calls.indexOf('release-concurrency') < s.calls.indexOf('end'));
+      assert.equal(queue.snapshot().durable, 0);
+      assert.equal(queue.snapshot().pending, 1);
+      assert.equal(feedback.length, 1, 'finally must reuse the completed cleanup');
+      assert.equal(s.calls.includes('release'), false);
+      receiptAck.resolve();
+      await queue.close();
+      assert.deepEqual(reconciled, [15]);
+      assert.equal(s.receipts.length, 1);
+    } finally {
+      releaseAck.resolve();
+      receiptAck.resolve();
+      await pending.catch(() => undefined);
+      await queue.close();
+    }
+  }
+});
+
+test('durable mode and queue fallback release actual usage only after SQL ACK and before EOF', async () => {
+  for (const mode of ['durable', 'bytes', 'capability'] as const) {
+    const s = setup({}, true, true);
+    const receiptAck = deferred<void>();
+    const receiptEntered = deferred<void>();
+    const releaseAck = deferred<void>();
+    const releaseEntered = deferred<void>();
+    const feedback: (FastAdmissionFeedback | undefined)[] = [];
+    const journal = {
+      ...s.options.journal,
+      appendReceipt: async (receipt: FastReceiptInput) => {
+        receiptEntered.resolve();
+        await receiptAck.promise;
+        await s.options.journal.appendReceipt(receipt);
+      },
+    };
+    const queue = mode === 'durable' ? undefined : new FastReceiptQueue({ journal, maxBytes: 1 });
+    const admission = mode === 'capability' ? s.options.admission : splitAdmission(s);
+    const executor = new FastGatewayExecutor({
+      ...s.options,
+      journal,
+      receiptQueue: queue,
+      admission: {
+        acquire: async (input) => {
+          const result = await admission.acquire(input);
+          if (!result.allowed) return result;
+          return {
+            ...result,
+            lease: {
+              ...result.lease,
+              release: async (value) => {
+                feedback.push(value);
+                releaseEntered.resolve();
+                await releaseAck.promise;
+                s.calls.push('release');
+              },
+            },
+          };
+        },
+      },
+    });
+    const pending = executor.execute(s.input);
+    try {
+      await receiptEntered.promise;
+      assert.match(s.text(), /hello/);
+      assert.equal(s.ended(), false);
+      assert.deepEqual(feedback, [], 'actual usage stays reserved until durable receipt ACK');
+      receiptAck.resolve();
+      await releaseEntered.promise;
+      assert.deepEqual(feedback, [{ outcome: 'success', actualTokenUnits: 15 }]);
+      assert.equal(s.ended(), false, 'durable receipt alone cannot finish before operational release');
+      assert.doesNotMatch(s.text(), /\[DONE\]/);
+      releaseAck.resolve();
+      assert.equal(await pending, true);
+      assert.equal(feedback.length, 1);
+      assert.ok(s.calls.indexOf('receipt') < s.calls.indexOf('release'));
+      assert.ok(s.calls.indexOf('release') < s.calls.indexOf('end'));
+      assert.equal(s.calls.includes('release-concurrency'), false);
+      if (queue) assert.equal(queue.snapshot().fallbacks, 1);
+    } finally {
+      releaseAck.resolve();
+      receiptAck.resolve();
+      await pending.catch(() => undefined);
+      await queue?.close();
+    }
+  }
+});
+
+test('pending heartbeat drains and renewal stops before operational release and terminal EOF', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const s = setup({}, true, true);
+  const fetchEntered = deferred<void>();
+  const fetchAllowed = deferred<void>();
+  const renewAck = deferred<void>();
+  const receiptEntered = deferred<void>();
+  const receiptAck = deferred<void>();
+  const queue = new FastReceiptQueue({
+    journal: {
+      appendReceipt: async (receipt) => {
+        await s.options.journal.appendReceipt(receipt);
+        receiptEntered.resolve();
+        await receiptAck.promise;
+      },
+    },
+  });
+  let renewals = 0;
+  let releases = 0;
+  const admission = splitAdmission(s);
+  const executor = new FastGatewayExecutor({
+    ...s.options,
+    receiptQueue: queue,
+    transport: {
+      ...s.options.transport,
+      fetch: async (...args) => {
+        fetchEntered.resolve();
+        await fetchAllowed.promise;
+        assert.ok(s.options.transport.fetch);
+        return s.options.transport.fetch(...args);
+      },
+    },
+    admission: {
+      acquire: async (input) => {
+        const result = await admission.acquire(input);
+        if (!result.allowed) return result;
+        return {
+          ...result,
+          lease: {
+            ...result.lease,
+            renewIntervalMs: 1,
+            renew: async () => {
+              renewals++;
+              await renewAck.promise;
+              s.calls.push('renew-ack');
+            },
+            releaseConcurrency: async () => {
+              releases++;
+              s.calls.push('release-concurrency');
+            },
+          },
+        };
+      },
+    },
+  });
+  const pending = executor.execute(s.input);
+  try {
+    await fetchEntered.promise;
+    t.mock.timers.tick(1);
+    assert.equal(renewals, 1);
+    fetchAllowed.resolve();
+    await receiptEntered.promise;
+    assert.match(s.text(), /hello/);
+    assert.equal(s.ended(), false, 'a held renewal must not survive HTTP EOF');
+    assert.equal(releases, 0, 'release cannot race the last renewal');
+    renewAck.resolve();
+    assert.equal(await pending, true);
+    t.mock.timers.tick(100);
+    assert.equal(renewals, 1, 'cleanup must stop future renewals');
+    assert.equal(releases, 1);
+    assert.ok(s.calls.indexOf('renew-ack') < s.calls.indexOf('release-concurrency'));
+    assert.ok(s.calls.indexOf('release-concurrency') < s.calls.indexOf('end'));
+    assert.equal(queue.snapshot().durable, 0);
+  } finally {
+    fetchAllowed.resolve();
+    renewAck.resolve();
+    receiptAck.resolve();
+    await pending.catch(() => undefined);
+    await queue.close();
+  }
+});
+
+test('operational release failure or lost ACK is swallowed once without resend or conflicting receipt', async () => {
+  for (const queued of [false, true]) {
+    for (const committed of [false, true]) {
+      const s = setup({}, false, true);
+      const admission = queued ? splitAdmission(s) : s.options.admission;
+      const queue = queued ? new FastReceiptQueue({ journal: s.options.journal }) : undefined;
+      let releases = 0;
+      let applied = 0;
+      const release = async () => {
+        releases++;
+        if (committed) applied++;
+        s.calls.push('release-error');
+        throw new Error(committed ? 'release committed but ACK lost' : 'release failed before commit');
+      };
+      const executor = new FastGatewayExecutor({
+        ...s.options,
+        receiptQueue: queue,
+        admission: {
+          acquire: async (input) => {
+            const result = await admission.acquire(input);
+            if (!result.allowed) return result;
+            return {
+              ...result,
+              lease: { ...result.lease, ...(queued ? { releaseConcurrency: release } : { release }) },
+            };
+          },
+        },
+      });
+      try {
+        assert.equal(await executor.execute(s.input), true);
+        assert.equal(releases, 1, 'finally must not retry ambiguous operational release');
+        assert.equal(applied, committed ? 1 : 0);
+        assert.ok(s.calls.indexOf('release-error') < s.calls.indexOf('end'));
+        assert.equal(s.calls.filter((call) => call === 'fetch').length, 1);
+        await queue?.close();
+        assert.equal(s.receipts.length, 1);
+        assert.equal(s.receipts[0].outcome, 'succeeded');
+        assert.equal(s.ended(), true);
+      } finally {
+        await queue?.close();
+      }
+    }
+  }
+});
+
+test('terminal write or end failure reuses operational cleanup without changing owned evidence', async () => {
+  for (const queued of [false, true]) {
+    for (const failedOperation of ['write', 'end'] as const) {
+      const s = setup({}, true, true);
+      const queue = queued ? new FastReceiptQueue({ journal: s.options.journal }) : undefined;
+      const executor = new FastGatewayExecutor({
+        ...s.options,
+        receiptQueue: queue,
+        admission: queued ? splitAdmission(s) : s.options.admission,
+      });
+      const releaseCall = queued ? 'release-concurrency' : 'release';
+      try {
+        await assert.rejects(
+          executor.execute({
+            ...s.input,
+            client: {
+              ...s.input.client,
+              write: (chunk) => {
+                if (failedOperation === 'write' && Buffer.from(chunk).includes('[DONE]')) {
+                  assert.equal(s.calls.filter((call) => call === releaseCall).length, 1);
+                  throw new Error('terminal write failed');
+                }
+                return s.input.client.write(chunk);
+              },
+              end: () => {
+                assert.equal(s.calls.filter((call) => call === releaseCall).length, 1);
+                throw new Error('terminal end failed');
+              },
+            },
+          }),
+          new RegExp(`terminal ${failedOperation} failed`),
+        );
+        await queue?.close();
+        assert.equal(s.calls.filter((call) => call === releaseCall).length, 1);
+        assert.equal(s.calls.filter((call) => call === 'fetch').length, 1);
+        assert.equal(s.receipts.length, 1);
+        assert.equal(s.receipts[0].outcome, 'succeeded');
+      } finally {
+        await queue?.close();
+      }
+    }
+  }
+});
+
+test('cancellation while operational release waits still fails the terminal client write without changing receipt', async () => {
+  const s = setup({}, true, true);
+  const releaseEntered = deferred<void>();
+  const releaseAck = deferred<void>();
+  const queue = new FastReceiptQueue({ journal: s.options.journal });
+  const admission = splitAdmission(s);
+  let releases = 0;
+  const executor = new FastGatewayExecutor({
+    ...s.options,
+    receiptQueue: queue,
+    admission: {
+      acquire: async (input) => {
+        const result = await admission.acquire(input);
+        if (!result.allowed) return result;
+        return {
+          ...result,
+          lease: {
+            ...result.lease,
+            releaseConcurrency: async () => {
+              releases++;
+              releaseEntered.resolve();
+              await releaseAck.promise;
+            },
+          },
+        };
+      },
+    },
+  });
+  const pending = executor.execute({
+    ...s.input,
+    client: {
+      ...s.input.client,
+      write: (chunk) => {
+        if (s.input.client.signal.aborted) throw new Error('client aborted');
+        return s.input.client.write(chunk);
+      },
+    },
+  });
+  const rejected = assert.rejects(pending, /client aborted/);
+  try {
+    await releaseEntered.promise;
+    assert.equal(s.ended(), false);
+    s.controller.abort();
+    releaseAck.resolve();
+    await rejected;
+    await queue.close();
+    assert.equal(releases, 1);
+    assert.equal(s.ended(), false);
+    assert.doesNotMatch(s.text(), /\[DONE\]/);
+    assert.equal(s.receipts.length, 1);
+    assert.equal(s.receipts[0].outcome, 'succeeded');
+    assert.equal(s.calls.filter((call) => call === 'fetch').length, 1);
+  } finally {
+    releaseAck.resolve();
+    await pending.catch(() => undefined);
+    await queue.close();
+  }
+});
+
+test('executor still awaits the final client drain after one operational cleanup', async () => {
+  const s = setup({}, false, true);
+  const endEntered = deferred<void>();
+  const endAck = deferred<void>();
+  let completed = false;
+  const pending = s.executor
+    .execute({
+      ...s.input,
+      client: {
+        ...s.input.client,
+        end: async () => {
+          endEntered.resolve();
+          await endAck.promise;
+          await s.input.client.end();
+        },
+      },
+    })
+    .then((result) => {
+      completed = true;
+      return result;
+    });
+  try {
+    await endEntered.promise;
+    assert.equal(s.calls.filter((call) => call === 'release').length, 1);
+    assert.equal(completed, false, 'cleanup cannot bypass the final client drain');
+    assert.equal(s.ended(), false);
+    endAck.resolve();
+    assert.equal(await pending, true);
+    assert.equal(completed, true);
+    assert.equal(s.calls.filter((call) => call === 'release').length, 1);
+  } finally {
+    endAck.resolve();
+    await pending.catch(() => undefined);
+  }
+});
+
+test('failed responses preserve rate-limit and failure feedback without actual usage before terminal', async () => {
+  for (const queued of [false, true]) {
+    for (const status of [429, 503]) {
+      const s = setup({}, false, true);
+      const feedback: (FastAdmissionFeedback | undefined)[] = [];
+      const admission = queued ? splitAdmission(s) : s.options.admission;
+      const queue = queued ? new FastReceiptQueue({ journal: s.options.journal }) : undefined;
+      const release = async (value?: FastAdmissionFeedback) => {
+        feedback.push(value);
+        s.calls.push('feedback');
+      };
+      const executor = new FastGatewayExecutor({
+        ...s.options,
+        receiptQueue: queue,
+        admission: {
+          acquire: async (input) => {
+            const result = await admission.acquire(input);
+            if (!result.allowed) return result;
+            return {
+              ...result,
+              lease: { ...result.lease, ...(queued ? { releaseConcurrency: release } : { release }) },
+            };
+          },
+        },
+        transport: {
+          ...s.options.transport,
+          fetch: async () =>
+            new Response('{"error":"provider unavailable"}', {
+              status,
+              headers: { 'content-type': 'application/json' },
+            }),
+        },
+      });
+      try {
+        assert.equal(await executor.execute(s.input), true);
+        await queue?.close();
+        assert.deepEqual(feedback, [
+          status === 429
+            ? { outcome: 'rate_limited', cooldownMs: 1000, modelOnly: true }
+            : { outcome: 'failure', cooldownMs: 1000 },
+        ]);
+        assert.ok(s.calls.indexOf('feedback') < s.calls.indexOf('end'));
+        assert.equal(s.receipts.length, 1);
+        assert.equal(s.receipts[0].outcome, 'failed');
+        assert.equal(s.receipts[0].chargeMinorUnits, '0');
+      } finally {
+        await queue?.close();
+      }
+    }
+  }
 });

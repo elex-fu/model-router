@@ -425,6 +425,40 @@ export class FastGatewayExecutor implements FastGatewayExecutorPort {
     const controller = new AbortController();
     const abort = () => controller.abort();
     input.client.signal.addEventListener('abort', abort, { once: true });
+    let cleanupPromise: Promise<void> | undefined;
+    // Both the successful terminal path and finally own the same cleanup. In
+    // particular, a failed terminal write or uncertain release ACK must never
+    // issue a second release or replace the already-owned receipt.
+    const cleanupOperationalLease = (): Promise<void> =>
+      (cleanupPromise ??= (async () => {
+        if (heartbeat) clearInterval(heartbeat);
+        if (heartbeatPending) await heartbeatPending;
+        input.client.signal.removeEventListener('abort', abort);
+        if (!upstreamStarted || upstreamComplete) {
+          const feedback =
+            responseStatus === undefined
+              ? undefined
+              : {
+                  outcome:
+                    responseStatus === 429
+                      ? ('rate_limited' as const)
+                      : responseStatus >= 500
+                        ? ('failure' as const)
+                        : ('success' as const),
+                  ...(actualTokenUnits === undefined ? {} : { actualTokenUnits }),
+                  ...(responseStatus === 429
+                    ? { cooldownMs: 1000, modelOnly: true }
+                    : responseStatus >= 500
+                      ? { cooldownMs: 1000 }
+                      : {}),
+                };
+          if (receiptState === 'queued' && lease.releaseConcurrency) {
+            await lease.releaseConcurrency(feedback).catch(() => undefined);
+          } else {
+            await lease.release(feedback).catch(() => undefined);
+          }
+        }
+      })());
     const attemptId = randomUUID();
     try {
       assertFresh();
@@ -630,6 +664,10 @@ export class FastGatewayExecutor implements FastGatewayExecutorPort {
         // mode performs this in its worker, independently of concurrency release.
         actualTokenUnits = completedTokenUnits;
       }
+      // EOF permits keep-alive clients to immediately reuse local HTTP capacity.
+      // Finish request-owned operational I/O first, while a queued money receipt
+      // and its durable TPM reconciliation remain independent background work.
+      await cleanupOperationalLease();
       await gate.finish();
       return true;
     } catch (error) {
@@ -650,33 +688,7 @@ export class FastGatewayExecutor implements FastGatewayExecutorPort {
       }
       throw error;
     } finally {
-      if (heartbeat) clearInterval(heartbeat);
-      if (heartbeatPending) await heartbeatPending;
-      input.client.signal.removeEventListener('abort', abort);
-      if (!upstreamStarted || upstreamComplete) {
-        const feedback =
-          responseStatus === undefined
-            ? undefined
-            : {
-                outcome:
-                  responseStatus === 429
-                    ? ('rate_limited' as const)
-                    : responseStatus >= 500
-                      ? ('failure' as const)
-                      : ('success' as const),
-                ...(actualTokenUnits === undefined ? {} : { actualTokenUnits }),
-                ...(responseStatus === 429
-                  ? { cooldownMs: 1000, modelOnly: true }
-                  : responseStatus >= 500
-                    ? { cooldownMs: 1000 }
-                    : {}),
-              };
-        if (receiptState === 'queued' && lease.releaseConcurrency) {
-          await lease.releaseConcurrency(feedback).catch(() => undefined);
-        } else {
-          await lease.release(feedback).catch(() => undefined);
-        }
-      }
+      await cleanupOperationalLease();
     }
   }
 }
