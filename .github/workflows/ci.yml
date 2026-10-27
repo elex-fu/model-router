@@ -25,6 +25,10 @@ jobs:
         run: npm run build
       - name: Run offline tests
         run: npm test
+      - name: Run bounded business diagnostic harness tests
+        run: |
+          node --test scripts/performance/bounded-business-cluster.test.cjs
+          python3 -m unittest discover -s scripts/performance -p 'bounded_business_*_test.py'
       - name: Install Chromium for browser E2E
         run: npx playwright install --with-deps chromium
       - name: Run browser E2E
