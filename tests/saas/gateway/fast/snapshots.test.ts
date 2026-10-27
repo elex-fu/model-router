@@ -12,6 +12,7 @@ import {
   fastGatewaySnapshotCacheKey,
 } from '../../../../src/saas/gateway/fast/snapshots.js';
 import type { AuthenticatedApiKey } from '../../../../src/saas/keys/types.js';
+import { fastExecutorFixture } from './executor-fixture.js';
 
 function fixture(
   tenant = 'tenant-a',
@@ -427,6 +428,200 @@ test('warm L1 is immutable, runs no source/database or Redis operations and expo
   assert.ok(Object.isFrozen(first));
   assert.ok(Object.isFrozen(first?.candidates[0].credential.version.envelope));
   assert.throws(() => Object.defineProperty(first?.caller, 'tenantId', { value: 'tenant-b' }));
+});
+
+test('only cache-owned validated snapshots reuse static version checks; caller versions still run every time', async (t) => {
+  const { input, snapshot } = fixture();
+  const cache = new CachedFastGatewaySnapshots(
+    {
+      async resolve() {
+        return snapshot;
+      },
+    },
+    { wallNow: () => 100_000, monotonicNow: () => 0 },
+  );
+  const held = await cache.resolve(input);
+  assert.ok(held);
+  const unowned = structuredClone(held);
+  Object.freeze(unowned);
+  const originalBigInt = BigInt;
+  let conversions = 0;
+  t.mock.method(globalThis, 'BigInt', (value: Parameters<typeof BigInt>[0]) => {
+    conversions++;
+    return originalBigInt(value);
+  });
+  for (let repeat = 0; repeat < 2; repeat++) {
+    conversions = 0;
+    authorizeFastGatewaySnapshot(held, input, 100_000);
+    assert.equal(conversions, 16, 'all eight caller/snapshot version comparisons remain dynamic');
+    conversions = 0;
+    authorizeFastGatewaySnapshot(unowned, input, 100_000);
+    assert.equal(conversions, 26, 'a frozen public object never receives the cache-owned static proof');
+  }
+});
+
+test('public shallow-frozen and accessor snapshots revalidate nested structural changes on every use', () => {
+  const { input, snapshot } = fixture();
+  Object.freeze(snapshot);
+  authorizeFastGatewaySnapshot(snapshot, input, 100_000);
+  Object.defineProperty(snapshot.candidates[0].credential.account, 'tenantId', { value: 'tenant-b' });
+  assert.throws(() => authorizeFastGatewaySnapshot(snapshot, input, 100_000), errorCode('SNAPSHOT_DENIED'));
+
+  const withAccessor = fixture().snapshot;
+  let candidateVersion = 1;
+  Object.defineProperty(withAccessor.candidates[0].authority, 'credentialVersion', { get: () => candidateVersion });
+  Object.freeze(withAccessor);
+  authorizeFastGatewaySnapshot(withAccessor, input, 100_000);
+  candidateVersion = 2;
+  assert.throws(() => authorizeFastGatewaySnapshot(withAccessor, input, 100_000), errorCode('SNAPSHOT_DENIED'));
+});
+
+test('cache-owned proof does not cache caller identity, revocation, expiry, scope or authorization versions', async () => {
+  const { input, snapshot } = fixture();
+  const cache = new CachedFastGatewaySnapshots(
+    {
+      async resolve() {
+        return snapshot;
+      },
+    },
+    { wallNow: () => 100_000, monotonicNow: () => 0 },
+  );
+  const held = await cache.resolve(input);
+  assert.ok(held);
+  for (const [metadataField, authorizationField, value] of [
+    ['id', 'keyId', 'key-b'],
+    ['tenantId', 'tenantId', 'tenant-b'],
+    ['projectId', 'projectId', 'project-b'],
+    ['executionPrincipalId', 'principalId', 'user-b'],
+    ['entitlementId', 'entitlementId', 'entitlement-b'],
+    ['supplyProfileId', 'supplyProfileId', 'profile-b'],
+    ['supplyMode', 'supplyMode', 'platform'],
+  ] as const) {
+    const changed = structuredClone(input);
+    Object.defineProperty(changed.authenticatedCaller.metadata, metadataField, { value });
+    Object.defineProperty(changed.authenticatedCaller.authorization, authorizationField, { value });
+    assert.throws(() => authorizeFastGatewaySnapshot(held, changed, 100_000), errorCode('SNAPSHOT_DENIED'));
+  }
+  for (const field of ['authzVersion', 'modelScopeVersion', 'entitlementAuthzVersion', 'supplyProfileAuthzVersion']) {
+    const changed = structuredClone(input);
+    Object.defineProperty(changed.authenticatedCaller.metadata, field, { value: 2 });
+    assert.throws(() => authorizeFastGatewaySnapshot(held, changed, 100_000), errorCode('SNAPSHOT_DENIED'));
+    Object.defineProperty(changed.authenticatedCaller.authorization, field, { value: 2 });
+    assert.throws(() => authorizeFastGatewaySnapshot(held, changed, 100_000), errorCode('SNAPSHOT_DENIED'));
+  }
+  for (const [field, value] of [
+    ['revokedAt', new Date(99_999).toISOString()],
+    ['expiresAt', new Date(100_000).toISOString()],
+    ['status', 'inactive'],
+    ['modelScopes', ['model-b']],
+  ] as const) {
+    const changed = structuredClone(input);
+    Object.defineProperty(changed.authenticatedCaller.metadata, field, { value });
+    assert.throws(() => authorizeFastGatewaySnapshot(held, changed, 100_000), errorCode('SNAPSHOT_DENIED'));
+  }
+  const changed = structuredClone(input);
+  Object.defineProperty(changed.authenticatedCaller.metadata, 'modelScopes', { value: ['model-b'] });
+  Object.defineProperty(changed.authenticatedCaller.authorization, 'modelScopes', { value: ['model-b'] });
+  assert.throws(() => authorizeFastGatewaySnapshot(held, changed, 100_000), errorCode('SNAPSHOT_DENIED'));
+  authorizeFastGatewaySnapshot(held, input, 100_000);
+});
+
+test('cache-owned proof retains all candidate time checks and monotonic wall-clock anchoring', async (t) => {
+  const { input, snapshot } = fastExecutorFixture('tenant-a', 99_000, true);
+  const clock = clocks();
+  const first = snapshot.candidates[0];
+  assert.ok(first.customerPrice);
+  assert.ok(first.supplierCost);
+  const candidate = {
+    ...first,
+    credential: {
+      ...first.credential,
+      version: { ...first.credential.version, expiresAt: new Date(105_000).toISOString() },
+    },
+    customerPrice: {
+      ...first.customerPrice,
+      effectiveAt: new Date(99_000).toISOString(),
+      expiresAt: new Date(105_000).toISOString(),
+    },
+    supplierCost: {
+      ...first.supplierCost,
+      effectiveAt: new Date(99_000).toISOString(),
+      expiresAt: new Date(105_000).toISOString(),
+    },
+  };
+  const value = {
+    ...snapshot,
+    candidates: [
+      candidate,
+      {
+        ...candidate,
+        supplierCost: { ...candidate.supplierCost, effectiveAt: new Date(99_500).toISOString() },
+      },
+    ],
+  };
+  const cache = new CachedFastGatewaySnapshots(
+    {
+      async resolve() {
+        return value;
+      },
+    },
+    { wallNow: () => clock.wall, monotonicNow: () => clock.mono },
+  );
+  const held = await cache.resolve(input);
+  assert.ok(held);
+  const unowned = structuredClone(held);
+  const originalParse = Date.parse;
+  let parses = 0;
+  t.mock.method(Date, 'parse', (value: string) => {
+    parses++;
+    return originalParse(value);
+  });
+  authorizeFastGatewaySnapshot(held, input, clock.wall);
+  assert.equal(parses, 10, 'all three expiries and both effective times run for both candidates');
+  clock.wall = 99_250;
+  parses = 0;
+  authorizeFastGatewaySnapshot(held, input, clock.wall);
+  assert.equal(parses, 10, 'the cached lease keeps effective time anchored without skipping candidate checks');
+  assert.throws(() => authorizeFastGatewaySnapshot(unowned, input, clock.wall), errorCode('SNAPSHOT_DENIED'));
+  clock.wall = 100_000;
+  authorizeFastGatewaySnapshot(held, input, clock.wall);
+  clock.wall = 104_000;
+  assert.throws(() => authorizeFastGatewaySnapshot(held, input, clock.wall), errorCode('SNAPSHOT_UNAVAILABLE'));
+});
+
+test('invalid later candidates never acquire a static proof in L1 or encrypted L2', async () => {
+  const { input, snapshot } = fixture();
+  const first = snapshot.candidates[0];
+  const invalid = {
+    ...snapshot,
+    candidates: [first, { ...first, authority: { ...first.authority, credentialVersion: 2 } }],
+  };
+  const l2 = store();
+  const options = { store: l2, encryptionKey: randomBytes(32), wallNow: () => 100_000, monotonicNow: () => 0 };
+  const cache = new CachedFastGatewaySnapshots(
+    {
+      async resolve() {
+        return invalid;
+      },
+    },
+    options,
+  );
+  await assert.rejects(cache.resolve(input), errorCode('SNAPSHOT_DENIED'));
+  await assert.rejects(cache.resolve(input), errorCode('SNAPSHOT_DENIED'));
+  assert.equal(l2.writes, 1);
+  let loads = 0;
+  const fromL2 = new CachedFastGatewaySnapshots(
+    {
+      async resolve() {
+        loads++;
+        return snapshot;
+      },
+    },
+    options,
+  );
+  await assert.rejects(fromL2.resolve(input), errorCode('SNAPSHOT_DENIED'));
+  await assert.rejects(fromL2.resolve(input), errorCode('SNAPSHOT_DENIED'));
+  assert.equal(loads, 0, 'the invalid L2 object itself must be revalidated, not trusted or refreshed into success');
 });
 
 test('64 simultaneous cold requests share one bounded loader', async () => {

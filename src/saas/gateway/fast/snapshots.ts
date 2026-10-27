@@ -137,6 +137,11 @@ const HANDOFF_REFRESH_REQUIRED = Symbol('handoff-refresh-required');
 // Post-intent authorization can therefore recheck epoch/outage/monotonic expiry
 // without any database or Redis read. Weak keys do not retain evicted snapshots.
 const localSnapshotLeases = new WeakMap<FastGatewaySnapshot, () => number>();
+// Only makeEntry's owned clone can acquire a proof, and only after a complete
+// successful authorization. Object.freeze on an arbitrary caller object is not
+// provenance: nested objects or accessors could still change. Weak keys neither
+// retain evicted snapshots nor turn this structural proof into a renewed lease.
+const localSnapshotStaticProofs = new WeakMap<FastGatewaySnapshot, { readonly ipPolicy: Readonly<IpPolicy> }>();
 function fail(code: FastGatewaySnapshotErrorCode): never {
   throw new FastGatewaySnapshotError(code);
 }
@@ -214,6 +219,7 @@ export function authorizeFastGatewaySnapshot(
   try {
     const lease = localSnapshotLeases.get(snapshot);
     if (lease) now = Math.max(now, lease());
+    const staticProof = localSnapshotStaticProofs.get(snapshot);
     const a = input.authenticatedCaller.authorization;
     const m = input.authenticatedCaller.metadata;
     const c = snapshot.caller;
@@ -278,15 +284,16 @@ export function authorizeFastGatewaySnapshot(
     )
       fail('SNAPSHOT_DENIED');
     if (
-      e.tenantId !== c.tenantId ||
-      e.projectId !== c.projectId ||
-      e.proxyKeyId !== c.proxyKeyId ||
-      e.entitlementId !== c.entitlementId ||
-      e.supplyProfileId !== c.supplyProfileId ||
-      e.supplyMode !== c.supplyMode ||
-      !sameVersion(e.entitlementVersion, c.entitlementVersion) ||
-      !sameVersion(e.supplyProfileVersion, c.supplyProfileVersion) ||
-      !sameVersion(e.modelScopeVersion, c.modelScopeVersion) ||
+      (!staticProof &&
+        (e.tenantId !== c.tenantId ||
+          e.projectId !== c.projectId ||
+          e.proxyKeyId !== c.proxyKeyId ||
+          e.entitlementId !== c.entitlementId ||
+          e.supplyProfileId !== c.supplyProfileId ||
+          e.supplyMode !== c.supplyMode ||
+          !sameVersion(e.entitlementVersion, c.entitlementVersion) ||
+          !sameVersion(e.supplyProfileVersion, c.supplyProfileVersion) ||
+          !sameVersion(e.modelScopeVersion, c.modelScopeVersion))) ||
       !e.allowedModels.includes(input.publicModel) ||
       !c.modelScopes.includes(input.publicModel)
     )
@@ -313,38 +320,47 @@ export function authorizeFastGatewaySnapshot(
           input.inputByteLength > p.maxBodyBytes))
     )
       fail('SNAPSHOT_DENIED');
-    const ip = canonicalizeIpPolicy(p.ipPolicy);
+    const ip = staticProof?.ipPolicy ?? canonicalizeIpPolicy(p.ipPolicy);
     if (ip.mode === 'disabled' && ip.rules.length !== 0) fail('SNAPSHOT_UNAVAILABLE');
     if (
       ip.mode !== 'disabled' &&
       !isIpAllowed(input.clientAddress?.status === 'resolved' ? input.clientAddress.address : null, ip)
     )
       fail('SNAPSHOT_DENIED');
-    assertLimit(snapshot.limits.tenant);
-    assertLimit(snapshot.limits.project);
-    assertLimit(snapshot.limits.key);
-    if (
-      snapshot.limits.group &&
-      (!text(snapshot.limits.group.id) ||
-        p.groupStatus !== 'active' ||
-        (snapshot.limits.group.rpm !== null &&
-          (!Number.isSafeInteger(snapshot.limits.group.rpm) || snapshot.limits.group.rpm < 0)))
-    )
-      fail('SNAPSHOT_UNAVAILABLE');
-    if (!Array.isArray(snapshot.candidates) || snapshot.candidates.length === 0 || snapshot.candidates.length > 256)
-      fail('SNAPSHOT_UNAVAILABLE');
-    for (const candidate of snapshot.candidates) assertCandidate(candidate, snapshot, now);
+    if (!staticProof) {
+      assertLimit(snapshot.limits.tenant);
+      assertLimit(snapshot.limits.project);
+      assertLimit(snapshot.limits.key);
+      if (
+        snapshot.limits.group &&
+        (!text(snapshot.limits.group.id) ||
+          p.groupStatus !== 'active' ||
+          (snapshot.limits.group.rpm !== null &&
+            (!Number.isSafeInteger(snapshot.limits.group.rpm) || snapshot.limits.group.rpm < 0)))
+      )
+        fail('SNAPSHOT_UNAVAILABLE');
+      if (!Array.isArray(snapshot.candidates) || snapshot.candidates.length === 0 || snapshot.candidates.length > 256)
+        fail('SNAPSHOT_UNAVAILABLE');
+    }
+    for (const candidate of snapshot.candidates) assertCandidate(candidate, snapshot, now, staticProof !== undefined);
+    if (lease && !staticProof) localSnapshotStaticProofs.set(snapshot, { ipPolicy: freeze(ip) });
   } catch (error) {
     if (error instanceof FastGatewaySnapshotError) throw error;
     fail('SNAPSHOT_UNAVAILABLE');
   }
 }
-function assertCandidate(candidate: FastGatewayCandidate, snapshot: FastGatewaySnapshot, now: number): void {
+function assertCandidate(
+  candidate: FastGatewayCandidate,
+  snapshot: FastGatewaySnapshot,
+  now: number,
+  staticValidated: boolean,
+): void {
   const a = candidate.authority;
   const c = candidate.credential;
   const byok = snapshot.caller.supplyMode === 'byok';
   const tenant = byok ? snapshot.caller.tenantId : null;
-  if (snapshot.authority.route.targetMode !== (byok ? 'tenant_account' : 'platform_pool')) fail('SNAPSHOT_DENIED');
+  if (!staticValidated && snapshot.authority.route.targetMode !== (byok ? 'tenant_account' : 'platform_pool'))
+    fail('SNAPSHOT_DENIED');
   for (const timed of [c.version, candidate.customerPrice, candidate.supplierCost]) {
     if (timed?.expiresAt !== null && timed?.expiresAt !== undefined) {
       const expiry = Date.parse(timed.expiresAt);
@@ -354,6 +370,10 @@ function assertCandidate(candidate: FastGatewayCandidate, snapshot: FastGatewayS
   for (const price of [candidate.customerPrice, candidate.supplierCost]) {
     if (price && !(Date.parse(price.effectiveAt) <= now)) fail('SNAPSHOT_DENIED');
   }
+  // Time-sensitive checks above deliberately run on EVERY use, including every
+  // pre-dispatch fence. The proof covers only comparisons within the immutable
+  // snapshot; caller versions, scope and revocation are still checked above.
+  if (staticValidated) return;
   const owner = byok ? 'tenant' : 'platform';
   if (
     a.tenantId !== snapshot.caller.tenantId ||
