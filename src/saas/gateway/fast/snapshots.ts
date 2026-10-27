@@ -141,7 +141,25 @@ const localSnapshotLeases = new WeakMap<FastGatewaySnapshot, () => number>();
 // successful authorization. Object.freeze on an arbitrary caller object is not
 // provenance: nested objects or accessors could still change. Weak keys neither
 // retain evicted snapshots nor turn this structural proof into a renewed lease.
-const localSnapshotStaticProofs = new WeakMap<FastGatewaySnapshot, { readonly ipPolicy: Readonly<IpPolicy> }>();
+type CandidateTimeFacts = { readonly expiresAtMs: number; readonly effectiveAtMs: number };
+const localSnapshotStaticProofs = new WeakMap<
+  FastGatewaySnapshot,
+  {
+    readonly ipPolicy: Readonly<IpPolicy>;
+    readonly candidateTimes: readonly (CandidateTimeFacts | undefined)[];
+  }
+>();
+type VersionPrimitive = string | number | bigint;
+type RequestParseFacts = {
+  readonly versions: Map<VersionPrimitive, string>;
+  expiry?: { readonly source: string; readonly parsed: number };
+};
+// Parsing facts, never authorization decisions. Each expression still reads its
+// current raw value before consulting this request-local, bounded memo. Objects
+// (including stateful coercions/proxies) are deliberately never memoized. Weak
+// keys do not retain requests, callers, credentials or snapshots after use.
+const requestParseFacts = new WeakMap<FastGatewaySnapshotInput, RequestParseFacts>();
+const MAX_REQUEST_VERSION_FACTS = 16;
 function fail(code: FastGatewaySnapshotErrorCode): never {
   throw new FastGatewaySnapshotError(code);
 }
@@ -201,8 +219,24 @@ export function fastGatewaySnapshotCacheKey(
     )
     .digest('hex')}`;
 }
-function sameVersion(a: unknown, b: unknown): boolean {
-  return version(a) === version(b);
+function sameVersion(a: unknown, b: unknown, facts?: RequestParseFacts): boolean {
+  return facts ? requestVersion(a, facts) === requestVersion(b, facts) : version(a) === version(b);
+}
+function requestVersion(value: unknown, facts: RequestParseFacts): string {
+  if (typeof value !== 'string' && typeof value !== 'number' && typeof value !== 'bigint') return version(value);
+  const cached = facts.versions.get(value);
+  if (cached !== undefined) return cached;
+  const parsed = version(value);
+  if (facts.versions.size >= MAX_REQUEST_VERSION_FACTS) facts.versions.clear();
+  facts.versions.set(value, parsed);
+  return parsed;
+}
+function requestExpiry(value: string, facts: RequestParseFacts | undefined): number {
+  if (!facts || typeof value !== 'string') return Date.parse(value);
+  if (facts.expiry?.source === value) return facts.expiry.parsed;
+  const parsed = Date.parse(value);
+  facts.expiry = { source: value, parsed };
+  return parsed;
 }
 function sameSet(a: readonly string[], b: readonly string[]): boolean {
   return a.length === b.length && new Set(a).size === a.length && a.every((v) => b.includes(v));
@@ -220,6 +254,14 @@ export function authorizeFastGatewaySnapshot(
     const lease = localSnapshotLeases.get(snapshot);
     if (lease) now = Math.max(now, lease());
     const staticProof = localSnapshotStaticProofs.get(snapshot);
+    let parseFacts: RequestParseFacts | undefined;
+    if (lease) {
+      parseFacts = requestParseFacts.get(input);
+      if (!parseFacts) {
+        parseFacts = { versions: new Map() };
+        requestParseFacts.set(input, parseFacts);
+      }
+    }
     const a = input.authenticatedCaller.authorization;
     const m = input.authenticatedCaller.metadata;
     const c = snapshot.caller;
@@ -251,7 +293,7 @@ export function authorizeFastGatewaySnapshot(
       m.tenantId !== a.tenantId ||
       m.projectId !== a.projectId ||
       m.revokedAt !== null ||
-      (m.expiresAt !== null && !(Date.parse(m.expiresAt) > now))
+      (m.expiresAt !== null && !(requestExpiry(m.expiresAt, parseFacts) > now))
     )
       fail('SNAPSHOT_DENIED');
     if (
@@ -261,10 +303,10 @@ export function authorizeFastGatewaySnapshot(
       m.supplyProfileId !== a.supplyProfileId ||
       m.supplyMode !== a.supplyMode ||
       !sameSet(m.modelScopes, a.modelScopes) ||
-      !sameVersion(m.authzVersion, a.authzVersion) ||
-      !sameVersion(m.modelScopeVersion, a.modelScopeVersion) ||
-      !sameVersion(m.entitlementAuthzVersion, a.entitlementAuthzVersion) ||
-      !sameVersion(m.supplyProfileAuthzVersion, a.supplyProfileAuthzVersion)
+      !sameVersion(m.authzVersion, a.authzVersion, parseFacts) ||
+      !sameVersion(m.modelScopeVersion, a.modelScopeVersion, parseFacts) ||
+      !sameVersion(m.entitlementAuthzVersion, a.entitlementAuthzVersion, parseFacts) ||
+      !sameVersion(m.supplyProfileAuthzVersion, a.supplyProfileAuthzVersion, parseFacts)
     )
       fail('SNAPSHOT_DENIED');
     if (
@@ -277,10 +319,10 @@ export function authorizeFastGatewaySnapshot(
       c.supplyProfileId !== a.supplyProfileId ||
       c.supplyMode !== a.supplyMode ||
       !sameSet(c.modelScopes, a.modelScopes) ||
-      !sameVersion(c.authzVersion, a.authzVersion) ||
-      !sameVersion(c.modelScopeVersion, a.modelScopeVersion) ||
-      !sameVersion(c.entitlementVersion, a.entitlementAuthzVersion) ||
-      !sameVersion(c.supplyProfileVersion, a.supplyProfileAuthzVersion)
+      !sameVersion(c.authzVersion, a.authzVersion, parseFacts) ||
+      !sameVersion(c.modelScopeVersion, a.modelScopeVersion, parseFacts) ||
+      !sameVersion(c.entitlementVersion, a.entitlementAuthzVersion, parseFacts) ||
+      !sameVersion(c.supplyProfileVersion, a.supplyProfileAuthzVersion, parseFacts)
     )
       fail('SNAPSHOT_DENIED');
     if (
@@ -342,8 +384,20 @@ export function authorizeFastGatewaySnapshot(
       if (!Array.isArray(snapshot.candidates) || snapshot.candidates.length === 0 || snapshot.candidates.length > 256)
         fail('SNAPSHOT_UNAVAILABLE');
     }
-    for (const candidate of snapshot.candidates) assertCandidate(candidate, snapshot, now, staticProof !== undefined);
-    if (lease && !staticProof) localSnapshotStaticProofs.set(snapshot, { ipPolicy: freeze(ip) });
+    const candidateTimes: (CandidateTimeFacts | undefined)[] | undefined = lease && !staticProof ? [] : undefined;
+    let candidateIndex = 0;
+    for (const candidate of snapshot.candidates) {
+      const times = assertCandidate(
+        candidate,
+        snapshot,
+        now,
+        staticProof !== undefined,
+        staticProof?.candidateTimes[candidateIndex++],
+      );
+      candidateTimes?.push(times);
+    }
+    if (candidateTimes)
+      localSnapshotStaticProofs.set(snapshot, { ipPolicy: freeze(ip), candidateTimes: freeze(candidateTimes) });
   } catch (error) {
     if (error instanceof FastGatewaySnapshotError) throw error;
     fail('SNAPSHOT_UNAVAILABLE');
@@ -354,26 +408,52 @@ function assertCandidate(
   snapshot: FastGatewaySnapshot,
   now: number,
   staticValidated: boolean,
-): void {
+  timeFacts: CandidateTimeFacts | undefined,
+): CandidateTimeFacts | undefined {
   const a = candidate.authority;
   const c = candidate.credential;
   const byok = snapshot.caller.supplyMode === 'byok';
   const tenant = byok ? snapshot.caller.tenantId : null;
   if (!staticValidated && snapshot.authority.route.targetMode !== (byok ? 'tenant_account' : 'platform_pool'))
     fail('SNAPSHOT_DENIED');
-  for (const timed of [c.version, candidate.customerPrice, candidate.supplierCost]) {
-    if (timed?.expiresAt !== null && timed?.expiresAt !== undefined) {
-      const expiry = Date.parse(timed.expiresAt);
-      if (!Number.isFinite(expiry) || expiry <= now || snapshot.validUntilMs > expiry) fail('SNAPSHOT_DENIED');
+  if (!timeFacts) {
+    let expiresAtMs = Infinity;
+    let effectiveAtMs = -Infinity;
+    let primitiveTimes = true;
+    for (const timed of [c.version, candidate.customerPrice, candidate.supplierCost]) {
+      if (timed?.expiresAt !== null && timed?.expiresAt !== undefined) {
+        const source = timed.expiresAt;
+        const expiry = Date.parse(source);
+        if (!Number.isFinite(expiry) || expiry <= now || snapshot.validUntilMs > expiry) fail('SNAPSHOT_DENIED');
+        expiresAtMs = Math.min(expiresAtMs, expiry);
+        primitiveTimes &&= typeof source === 'string';
+      }
     }
+    for (const price of [candidate.customerPrice, candidate.supplierCost]) {
+      if (price) {
+        const source = price.effectiveAt;
+        const effective = Date.parse(source);
+        if (!(effective <= now)) fail('SNAPSHOT_DENIED');
+        effectiveAtMs = Math.max(effectiveAtMs, effective);
+        primitiveTimes &&= typeof source === 'string';
+      }
+    }
+    // Frozen Date instances still have mutable internal slots. Retain the old
+    // per-use parsing path for any runtime non-string instead of trusting the
+    // TypeScript annotation or object freezing to make its coercion immutable.
+    if (primitiveTimes) timeFacts = { expiresAtMs, effectiveAtMs };
+  } else {
+    // Only parsing is reused. These equivalent bounds cover every candidate's
+    // credential/price dates and are compared to live lease-anchored time at
+    // EVERY boundary, including pre-send and credential-unseal callbacks.
+    if (
+      timeFacts.expiresAtMs <= now ||
+      snapshot.validUntilMs > timeFacts.expiresAtMs ||
+      !(timeFacts.effectiveAtMs <= now)
+    )
+      fail('SNAPSHOT_DENIED');
   }
-  for (const price of [candidate.customerPrice, candidate.supplierCost]) {
-    if (price && !(Date.parse(price.effectiveAt) <= now)) fail('SNAPSHOT_DENIED');
-  }
-  // Time-sensitive checks above deliberately run on EVERY use, including every
-  // pre-dispatch fence. The proof covers only comparisons within the immutable
-  // snapshot; caller versions, scope and revocation are still checked above.
-  if (staticValidated) return;
+  if (staticValidated) return timeFacts;
   const owner = byok ? 'tenant' : 'platform';
   if (
     a.tenantId !== snapshot.caller.tenantId ||
@@ -443,6 +523,7 @@ function assertCandidate(
       : candidate.customerPrice === null || candidate.supplierCost === null
   )
     fail('SNAPSHOT_DENIED');
+  return timeFacts;
 }
 function freeze<T>(value: T): T {
   if (value && typeof value === 'object' && !Object.isFrozen(value)) {
