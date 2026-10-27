@@ -13,6 +13,15 @@ const NUMBERS = [
 const COUNTERS = ['accepted', 'durable', 'completed', 'retries', 'reconciliationRetries', 'fallbacks', 'conflicts'];
 const PEAKS = ['pending', 'bytes', 'running', 'receiptRunning', 'reconciliationRunning', 'oldestAgeMs', 'undurable', 'oldestUndurableAgeMs'];
 const LAG_BOUNDS = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, Infinity];
+const PHASES = ['receiptQueueWait', 'receiptAwait', 'reconciliationQueueWait', 'reconciliationAwait', 'residence'];
+const PHASE_NUMBERS = PHASES.flatMap((phase) => ['Count', 'SumMs', 'LastMs', 'MaxMs'].map((suffix) => phase + suffix));
+
+function emptyPhases() {
+  return Object.fromEntries(PHASES.map((phase) => [phase, {
+    observedCount: 0, observedSumMs: 0, observedMaxMs: 0,
+    missedTransitions: 0, counterResets: 0, buckets: LAG_BOUNDS.map(() => 0),
+  }]));
+}
 
 function sanitize(input) {
   const safe = { accepting: input.accepting === true };
@@ -20,6 +29,19 @@ function sanitize(input) {
     const value = input[key];
     if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) throw new Error('ASYNC_RECEIPT_METRIC_INVALID');
     safe[key] = value;
+  }
+  // Older durable/queue controls remain readable, but absent phase telemetry
+  // is unknown rather than fabricated zero-duration work. Partial schemas fail.
+  safe.phaseMetricsAvailable = [...PHASE_NUMBERS, 'completedWithoutReconciliation'].some((key) => key in input);
+  if (safe.phaseMetricsAvailable) {
+    for (const key of [...PHASE_NUMBERS, 'completedWithoutReconciliation']) {
+      const value = input[key];
+      if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 ||
+          ((key.endsWith('Count') || key === 'completedWithoutReconciliation') && !Number.isSafeInteger(value))) {
+        throw new Error('ASYNC_RECEIPT_PHASE_METRIC_INVALID');
+      }
+      safe[key] = value;
+    }
   }
   safe.undurableLiabilityByCurrency = {};
   for (const [currency, amount] of Object.entries(input.undurableLiabilityByCurrency ?? {})) {
@@ -44,6 +66,7 @@ function createMetrics({ now = () => performance.now(), eventLimit = 0 } = {}) {
   let peaks = {};
   let currencyPeaks = {};
   let lag = { count: 0, sumMs: 0, maxMs: 0, missedDurableTransitions: 0, buckets: LAG_BOUNDS.map(() => 0) };
+  let phases = emptyPhases();
   function observe(raw) {
     try {
       const item = sanitize(raw);
@@ -60,6 +83,19 @@ function createMetrics({ now = () => performance.now(), eventLimit = 0 } = {}) {
         lag.maxMs = Math.max(lag.maxMs, item.lastDurableLagMs);
         lag.buckets[LAG_BOUNDS.findIndex((bound) => item.lastDurableLagMs <= bound)]++;
       } else if (durableDelta !== 0) lag.missedDurableTransitions += Math.abs(durableDelta);
+      if (item.phaseMetricsAvailable) {
+        for (const phase of PHASES) {
+          const delta = item[phase + 'Count'] - (previous?.[phase + 'Count'] ?? 0);
+          const stats = phases[phase];
+          if (delta === 1) {
+            const duration = item[phase + 'LastMs'];
+            stats.observedCount++; stats.observedSumMs += duration;
+            stats.observedMaxMs = Math.max(stats.observedMaxMs, duration);
+            stats.buckets[LAG_BOUNDS.findIndex((bound) => duration <= bound)]++;
+          } else if (delta > 1) stats.missedTransitions += delta;
+          else if (delta < 0) stats.counterResets++;
+        }
+      }
       if (eventLimit) {
         if (events.length < eventLimit) events.push({ monotonicMs: now(), ...item });
         else dropped++;
@@ -70,20 +106,37 @@ function createMetrics({ now = () => performance.now(), eventLimit = 0 } = {}) {
     epoch++; baseline = latest; observations = 0; invalidObservations = 0;
     events = []; dropped = 0; peaks = {}; currencyPeaks = {}; startedAtMs = now();
     lag = { count: 0, sumMs: 0, maxMs: 0, missedDurableTransitions: 0, buckets: LAG_BOUNDS.map(() => 0) };
+    phases = emptyPhases();
   }
   function snapshot() {
     return {
-      schemaVersion: 1, epoch, startedAtMs, observedAtMs: now(), observations,
+      schemaVersion: 2, epoch, startedAtMs, observedAtMs: now(), observations,
       invalidObservations, latest, baseline,
       counterDeltas: Object.fromEntries(COUNTERS.map((key) => [key, latest ? latest[key] - (baseline?.[key] ?? 0) : 0])),
       observedPeaks: peaks, undurableLiabilityPeaksByCurrency: currencyPeaks,
       receiptAckLag: { ...lag, upperBoundsMs: LAG_BOUNDS.map((value) => Number.isFinite(value) ? value : 'overflow') },
+      phaseMetrics: {
+        available: latest?.phaseMetricsAvailable === true,
+        completedWithoutReconciliationDelta: latest?.phaseMetricsAvailable
+          ? latest.completedWithoutReconciliation - (baseline?.completedWithoutReconciliation ?? 0) : null,
+        groups: latest?.phaseMetricsAvailable ? Object.fromEntries(PHASES.map((phase) => [phase, {
+          ...phases[phase], buckets: [...phases[phase].buckets],
+          counterCountDelta: latest[phase + 'Count'] - (baseline?.[phase + 'Count'] ?? 0),
+          counterSumMsDelta: latest[phase + 'SumMs'] - (baseline?.[phase + 'SumMs'] ?? 0),
+          preWindowLifetimeMaxMs: baseline?.[phase + 'MaxMs'] ?? null,
+          postWindowLifetimeMaxMs: latest[phase + 'MaxMs'],
+          upperBoundsMs: LAG_BOUNDS.map((value) => Number.isFinite(value) ? value : 'overflow'),
+        }])) : {},
+      },
       eventLimit, dropped, events,
       qualifications: {
         source: 'supported synchronous fastReceiptQueueObserver option',
         occupancy: 'peaks at observed production notification transitions, not a periodic sampler',
         age: 'maximum age seen at notification; not a continuous-time upper bound',
         lag: 'queue acceptance to appendReceipt successful resolution; bucketed, not exact percentile samples',
+        phases: 'settled attempt durations only, including failed attempts; hanging work has no duration sample; count/sum deltas are independent of observed histograms',
+        phaseWait: 'queue waits include retry backoff; reconciliation wait starts at durable ACK; residence samples completed removals only',
+        phaseMax: 'observedMaxMs resets with warm boundary; production lifetime maxima are separately labeled and never used as window maxima',
         clientCompletion: 'not measured here; use external client EOF and separately durable financial drain',
         absentQueue: 'zero observations may mean durable mode; never infer a drained async queue from absence',
       },
