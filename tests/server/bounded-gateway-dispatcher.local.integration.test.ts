@@ -13,6 +13,67 @@ import { BOUNDED_GATEWAY_TICKET_HEADER } from '../../src/server/bounded-gateway-
 import { BoundedGatewayWorkerTickets } from '../../src/server/bounded-gateway-worker-tickets.js';
 
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
+function streamingFixtureCompletion(
+  response: Pick<ServerResponse, 'destroyed' | 'writableEnded'> & { end(body: string): unknown },
+  complete: () => void,
+): () => void {
+  let completed = false;
+  return () => {
+    if (completed) return;
+    completed = true;
+    try {
+      if (!response.destroyed && !response.writableEnded) response.end('data: last\n\n');
+    } finally {
+      complete();
+    }
+  };
+}
+
+test('streaming fixture completion ends only a live response and releases ownership exactly once', () => {
+  for (const [destroyed, writableEnded] of [
+    [false, false],
+    [true, false],
+    [false, true],
+    [true, true],
+  ]) {
+    let writes = 0;
+    let completions = 0;
+    const finish = streamingFixtureCompletion(
+      {
+        destroyed,
+        writableEnded,
+        end() {
+          writes++;
+        },
+      },
+      () => {
+        completions++;
+      },
+    );
+    finish();
+    finish();
+    assert.equal(writes, destroyed || writableEnded ? 0 : 1);
+    assert.equal(completions, 1);
+  }
+  let completions = 0;
+  const failure = new Error('fixture write failure');
+  const finish = streamingFixtureCompletion(
+    {
+      destroyed: false,
+      writableEnded: false,
+      end() {
+        throw failure;
+      },
+    },
+    () => {
+      completions++;
+    },
+  );
+  assert.throws(finish, (error) => error === failure, 'a genuine write error must still surface');
+  finish();
+  assert.equal(completions, 1, 'write failure cannot skip or duplicate handler completion');
+});
+
 async function fixture(
   handle: (request: IncomingMessage, response: ServerResponse, slot: BoundedGatewaySlot, complete: () => void) => void,
   reserveWait?: () => Promise<void>,
@@ -212,14 +273,15 @@ test('abort before reserve ACK cancels the one-use capability without backend di
 
 test('SSE is streamed before completion and client abort retains handler ownership', { timeout: 5000 }, async () => {
   let finish!: () => void;
+  let completionCalls = 0;
   const value = await fixture((req, res, _slot, complete) => {
     req.resume();
     res.writeHead(200, { 'content-type': 'text/event-stream' });
     res.write('data: first\n\n');
-    finish = () => {
-      res.end('data: last\n\n');
+    finish = streamingFixtureCompletion(res, () => {
+      completionCalls++;
       complete();
-    };
+    });
   });
   try {
     const stream = await new Promise<{ req: http.ClientRequest; res: IncomingMessage; first: string }>(
@@ -247,7 +309,10 @@ test('SSE is streamed before completion and client abort retains handler ownersh
       value.permits.snapshot().reduce((sum, slot) => sum + slot.inFlight, 0),
       1,
     );
+    assert.equal(completionCalls, 0, 'client abort must not complete the original handler');
     finish();
+    finish(); // The finally cleanup below is allowed to invoke the same completion again.
+    assert.equal(completionCalls, 1);
     assert.equal(
       value.permits.snapshot().reduce((sum, slot) => sum + slot.inFlight, 0),
       0,
