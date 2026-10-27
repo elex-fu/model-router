@@ -288,3 +288,197 @@ test('pending liabilities remain separated by currency and metadata cannot overr
   ack.resolve();
   await queue.close();
 });
+
+test('phase counters separate slot waits, port awaits and total residence with exact monotonic durations', async () => {
+  let now = 0;
+  const receipts = [deferred(), deferred()];
+  const reconciles = [deferred(), deferred()];
+  let calls = 0;
+  const observed: ReturnType<FastReceiptQueue['snapshot']>[] = [];
+  const queue = new FastReceiptQueue({
+    workers: 1,
+    now: () => now,
+    observe: (snapshot) => observed.push(snapshot),
+    journal: { appendReceipt: async () => receipts[calls++].promise },
+  });
+  queue.tryEnqueue(receipt('first'), {
+    ...completion,
+    actualTokenUnits: 15,
+    reconcileDurableUsage: async () => reconciles[0].promise,
+  });
+  now = 5;
+  queue.tryEnqueue(receipt('second'), {
+    ...completion,
+    actualTokenUnits: 15,
+    reconcileDurableUsage: async () => reconciles[1].promise,
+  });
+  assert.equal(queue.snapshot().receiptAwaitCount, 0, 'a pending attempt is not a completed duration sample');
+  now = 10;
+  receipts[0].resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+  now = 20;
+  receipts[1].resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+  now = 30;
+  reconciles[0].resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+  now = 40;
+  reconciles[1].resolve();
+  await queue.close();
+  const result = queue.snapshot();
+  for (const [prefix, count, sum, last, max] of [
+    ['receiptQueueWait', 2, 5, 5, 5],
+    ['receiptAwait', 2, 20, 10, 10],
+    ['reconciliationQueueWait', 2, 10, 10, 10],
+    ['reconciliationAwait', 2, 30, 10, 20],
+    ['residence', 2, 65, 35, 35],
+  ] as const) {
+    assert.equal(result[`${prefix}Count`], count, prefix);
+    assert.equal(result[`${prefix}SumMs`], sum, prefix);
+    assert.equal(result[`${prefix}LastMs`], last, prefix);
+    assert.equal(result[`${prefix}MaxMs`], max, prefix);
+    let priorCount = 0,
+      sampledSum = 0;
+    for (const snapshot of observed) {
+      const delta = snapshot[`${prefix}Count`] - priorCount;
+      assert.ok(delta === 0 || delta === 1, 'every completion remains separately observable');
+      if (delta === 1) sampledSum += snapshot[`${prefix}LastMs`];
+      priorCount = snapshot[`${prefix}Count`];
+    }
+    assert.equal(sampledSum, sum, 'count deltas recover fixed-size adapter histogram samples');
+  }
+  assert.equal(result.completedWithoutReconciliation, 0);
+});
+
+test('retry phase samples include backoff wait but distinguish failed attempts from success', async () => {
+  let now = 0;
+  const firstAttempt = deferred();
+  const secondAttempt = deferred();
+  const retryObserved = deferred();
+  const secondStarted = deferred();
+  let calls = 0;
+  const queue = new FastReceiptQueue({
+    now: () => now,
+    retryBaseMs: 1,
+    retryMaxMs: 1,
+    observe: (snapshot) => {
+      if (snapshot.retries === 1) retryObserved.resolve();
+    },
+    journal: {
+      appendReceipt: async () => {
+        if (++calls === 1) {
+          await firstAttempt.promise;
+          throw new Error('lost ACK');
+        }
+        secondStarted.resolve();
+        await secondAttempt.promise;
+      },
+    },
+  });
+  queue.tryEnqueue(receipt(), completion);
+  now = 4;
+  firstAttempt.resolve();
+  await retryObserved.promise;
+  assert.equal(queue.snapshot().receiptAwaitCount, 1);
+  assert.equal(queue.snapshot().receiptAwaitSumMs, 4);
+  assert.equal(queue.snapshot().durable, 0);
+  now = 9;
+  // A pending drain owns the otherwise unref'ed bounded retry timer.
+  const drain = queue.close();
+  await secondStarted.promise;
+  now = 14;
+  secondAttempt.resolve();
+  await drain;
+  const result = queue.snapshot();
+  assert.equal(result.retries, 1);
+  assert.equal(result.durable, 1);
+  assert.equal(result.receiptQueueWaitCount, 2);
+  assert.equal(result.receiptQueueWaitSumMs, 5);
+  assert.equal(result.receiptAwaitCount, 2);
+  assert.equal(result.receiptAwaitSumMs, 9);
+  assert.equal(result.residenceSumMs, 14);
+  assert.equal(result.completedWithoutReconciliation, 1);
+  assert.equal(result.reconciliationQueueWaitCount, 0);
+  assert.equal(result.reconciliationAwaitCount, 0);
+});
+
+test('phase counters work without an observer and never fabricate durations for hung or undefined TPM work', async () => {
+  let now = 100;
+  const ack = deferred();
+  const queue = new FastReceiptQueue({ now: () => now, journal: { appendReceipt: async () => ack.promise } });
+  queue.tryEnqueue(receipt(), completion);
+  now = 105;
+  assert.equal(queue.snapshot().receiptAwaitCount, 0);
+  assert.equal(queue.snapshot().residenceCount, 0);
+  ack.resolve();
+  await queue.close();
+  const result = queue.snapshot();
+  assert.equal(result.receiptAwaitSumMs, 5);
+  assert.equal(result.residenceSumMs, 5);
+  assert.equal(result.completedWithoutReconciliation, 1);
+  assert.equal(result.reconciliationAwaitCount, 0);
+  assert.equal(result.reconciliationAwaitSumMs, 0);
+  assert.doesNotMatch(JSON.stringify(result), /intent-a|tenant-a|request-/);
+});
+
+test('reconciliation retry timing never re-counts receipt ACK or completes residence early', async () => {
+  let now = 0;
+  const ack = deferred(),
+    first = deferred(),
+    second = deferred(),
+    retryObserved = deferred(),
+    restarted = deferred();
+  let calls = 0;
+  const observed: ReturnType<FastReceiptQueue['snapshot']>[] = [];
+  const queue = new FastReceiptQueue({
+    now: () => now,
+    retryBaseMs: 1,
+    retryMaxMs: 1,
+    journal: { appendReceipt: async () => ack.promise },
+    observe: (snapshot) => {
+      observed.push(snapshot);
+      if (snapshot.reconciliationRetries === 1) retryObserved.resolve();
+    },
+  });
+  queue.tryEnqueue(receipt(), {
+    ...completion,
+    actualTokenUnits: 15,
+    reconcileDurableUsage: async () => {
+      if (++calls === 1) {
+        await first.promise;
+        throw new Error('Redis ACK unavailable');
+      }
+      restarted.resolve();
+      await second.promise;
+    },
+  });
+  now = 5;
+  ack.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+  now = 8;
+  first.resolve();
+  await retryObserved.promise;
+  assert.equal(queue.snapshot().residenceCount, 0);
+  now = 14;
+  const drain = queue.close();
+  await restarted.promise;
+  now = 20;
+  second.resolve();
+  await drain;
+  const result = queue.snapshot();
+  assert.equal(result.receiptAwaitCount, 1);
+  assert.equal(result.receiptAwaitSumMs, 5);
+  assert.equal(result.reconciliationAwaitCount, 2);
+  assert.equal(result.reconciliationAwaitSumMs, 9);
+  assert.equal(result.reconciliationQueueWaitSumMs, 6);
+  assert.equal(result.reconciliationRetries, 1);
+  assert.equal(result.residenceSumMs, 20);
+  for (const snapshot of observed) {
+    assert.equal(snapshot.receiptAwaitCount, snapshot.durable + snapshot.retries + snapshot.conflicts);
+    assert.equal(
+      snapshot.reconciliationAwaitCount,
+      snapshot.completed - snapshot.completedWithoutReconciliation + snapshot.reconciliationRetries,
+    );
+    assert.equal(snapshot.residenceCount, snapshot.completed);
+  }
+});
