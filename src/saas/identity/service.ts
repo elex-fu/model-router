@@ -4,6 +4,7 @@ import {
   SAAS_PLATFORM_AUTHORIZATION_WRITER_TIMEOUTS_SQL,
 } from '../db/advisory-lock-keys.js';
 import type { SaasDatabase, SqlExecutor } from '../db/index.js';
+import { recordAuthorityInvalidation } from '../gateway/authority-invalidation-events.js';
 import {
   assertCustomerKeyMutationWrite,
   CUSTOMER_KEY_MUTATION_CURRENT_SQL,
@@ -1483,6 +1484,11 @@ export class SaasIdentityService {
          WHERE tenant_id = $1 AND user_id = $2 AND status <> 'revoked'`,
         [tenantId, targetUserId, now],
       );
+      // §12.2 Phase A2b (D2): the membership revocation and its invalidation
+      // event commit atomically; the revoked principal's cached key
+      // authentications would otherwise keep serving stale caller tuples
+      // until their TTL expires.
+      await recordAuthorityInvalidation(tx, { tenantId, kind: 'membership.revoked' });
       await this.appendTenantMembershipAudit(tx, tenantId, actorUserId, 'tenant_member.removed', targetUserId, now);
       return { userId: targetUserId, displayName: target.displayName, role: target.role, status: 'revoked' };
     });

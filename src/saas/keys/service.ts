@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { saasAdvisoryKey, sortAndDedupeAdvisoryKeys } from '../db/advisory-lock-keys.js';
 import type { SaasDatabase, SqlExecutor, SqlResult } from '../db/index.js';
+import { recordAuthorityInvalidation } from '../gateway/authority-invalidation-events.js';
 import type { SupplyMode } from '../gateway/contracts.js';
 import {
   CustomerKeyMutationSessionError,
@@ -1374,6 +1375,10 @@ export class KeyService {
       );
       const revoked = updated.rows[0];
       if (!revoked) fail(404, 'KEY_NOT_FOUND', 'The API key was not found');
+      // §12.2 Phase A2b (D2): the revocation and its invalidation event commit
+      // atomically; gateways with the broadcast enabled flush their local
+      // caches within one poll (~500ms) instead of waiting out the cache TTL.
+      await recordAuthorityInvalidation(tx, { tenantId: context.tenantId, kind: 'api_key.revoked' });
       await this.audit(tx, context, 'api_key.revoked', keyId, now);
       return metadata(revoked);
     });

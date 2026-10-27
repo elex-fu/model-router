@@ -2425,7 +2425,8 @@ test('production builder binds the real database transaction and does not alloca
         assert.equal(input.protocol, authority().route.protocol);
         assert.equal(input.clientKey, 'client-retry-key');
         assert.ok([REQUEST_A_ID, REQUEST_B_ID].includes(input.requestId));
-        if (authorizationDenied) return rejectRequestPreparation('entitlement_denied', 'Fixture authority is no longer active.');
+        if (authorizationDenied)
+          return rejectRequestPreparation('entitlement_denied', 'Fixture authority is no longer active.');
         return allowRequestPreparation(input.entitlement);
       },
       authorizeAndReserve: async (input) => {
@@ -2891,13 +2892,20 @@ test('production builder binds the real database transaction and does not alloca
   const beforeLateDenial = structuredClone([...persisted.entries()]);
   const eventsBeforeLateDenial = admissionEvents.length;
   denyAfterExistingRead = true;
-  const lateDenied = await dependencies.admission.authorizeAndReserve(wrappedAdmissionInput(REQUEST_B_ID, 'attempt-after-existing-read'), {
-    executor: claimExecutor,
-  });
+  const lateDenied = await dependencies.admission.authorizeAndReserve(
+    wrappedAdmissionInput(REQUEST_B_ID, 'attempt-after-existing-read'),
+    {
+      executor: claimExecutor,
+    },
+  );
   assert.equal(lateDenied.decision, 'reject');
   if (lateDenied.decision === 'reject') {
     assert.equal(lateDenied.code, 'entitlement_denied');
-    assert.equal(lateDenied.canonicalRequest, undefined, 'a post-wait authorization refusal cannot expose a canonical request');
+    assert.equal(
+      lateDenied.canonicalRequest,
+      undefined,
+      'a post-wait authorization refusal cannot expose a canonical request',
+    );
   }
   assert.deepEqual(admissionEvents.slice(eventsBeforeLateDenial), ['revalidate', 'claim', 'lookup', 'revalidate']);
   assert.equal(downstreamAdmissionInputs.length, 1, 'a late authorization refusal never reaches financial admission');
@@ -3017,4 +3025,268 @@ test('standard composition mounts its own WS executor and repeats proxy-key auth
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
   assert.equal(closed, 1);
+});
+
+/*
+ * §12.2 Phase A2b (D2): the authority/entitlement invalidation broadcast
+ * wiring in the production builder. The broadcast is an availability
+ * optimization only — default OFF, gated by
+ * MODEL_ROUTER_PREPARATION_INVALIDATION_BROADCAST — and the SQL trace is the
+ * observable surface: off means the events table is never read; on means the
+ * poller initializes its cursor at the table head and tails new events until
+ * the lifecycle close stops it.
+ */
+
+interface InvalidationTrace {
+  sql: string;
+  values: readonly unknown[];
+}
+
+const BROADCAST_TENANT_ID = '3f6f8ec7-1a2b-4c5d-9e0f-a1b2c3d4e5f6';
+
+const EVENTS_HEAD = 'COALESCE(MAX(id)';
+const EVENTS_TAIL = 'FROM saas_authority_invalidation_events WHERE id >';
+
+function invalidationTraceDatabase(rows: Array<Record<string, unknown>>) {
+  const trace: InvalidationTrace[] = [];
+  const database = {
+    query: async <Row>(sql: string, values: readonly unknown[] = []) => {
+      trace.push({ sql, values });
+      if (sql.includes(EVENTS_HEAD)) {
+        const highest = rows.reduce<bigint>((max, row) => {
+          try {
+            const id = BigInt(String(row.id));
+            return id > max ? id : max;
+          } catch {
+            return max;
+          }
+        }, 0n);
+        return { rows: [{ max_id: highest.toString(10) }] as Row[], rowCount: 1 };
+      }
+      if (sql.includes(EVENTS_TAIL)) {
+        const after = rows.filter((row) => {
+          try {
+            return BigInt(String(row.id)) > BigInt(String(values[0]));
+          } catch {
+            return true;
+          }
+        });
+        return { rows: after.slice(0, Number(values[1])) as Row[], rowCount: after.length };
+      }
+      return { rows: [] as Row[], rowCount: 0 };
+    },
+    transaction: async <T>(work: (executor: SqlExecutor) => Promise<T>) =>
+      work({ query: async () => ({ rows: [], rowCount: 0 }) }),
+    migrate: async () => {},
+    verifySchema: async () => {},
+    ping: async () => {},
+    close: async () => {},
+  } as unknown as SaasDatabase;
+  return { database, trace };
+}
+
+async function waitForTrace(
+  trace: InvalidationTrace[],
+  predicate: (entry: InvalidationTrace) => boolean,
+): Promise<void> {
+  const deadline = Date.now() + 3_000;
+  for (;;) {
+    if (trace.some(predicate)) return;
+    if (Date.now() > deadline) {
+      assert.fail(`timed out waiting for a traced query; saw: ${trace.map((entry) => entry.sql).join(' | ')}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
+
+function withEnv(updates: Record<string, string | undefined>, run: () => Promise<void>): Promise<void>;
+function withEnv(updates: Record<string, string | undefined>, run: () => void): void;
+function withEnv(updates: Record<string, string | undefined>, run: () => void | Promise<void>): void | Promise<void> {
+  const previous = new Map<string, string | undefined>();
+  for (const key of Object.keys(updates)) previous.set(key, process.env[key]);
+  const restore = () => {
+    for (const [key, value] of previous) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  };
+  for (const [key, value] of Object.entries(updates)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  const outcome = run();
+  if (outcome && typeof (outcome as Promise<void>).then === 'function') {
+    return (outcome as Promise<void>).finally(restore);
+  }
+  restore();
+}
+
+function broadcastProductionOptions(
+  overrides: Partial<ManagedSaasGatewayProductionOptions> = {},
+): ManagedSaasGatewayProductionOptions {
+  const endpointPolicy = { allowedHosts: ['provider.example'], allowedPorts: [443] } as const;
+  return {
+    caller: { validate: async () => allowRequestPreparation(caller()) },
+    entitlement: { resolve: async () => allowRequestPreparation(entitlement()) },
+    schedulerAffinity: { resolve: async () => ({ decision: 'allow' as const, accountId: null }) },
+    admission: {
+      revalidateAuthorization: async (input) => allowRequestPreparation(input.entitlement),
+      authorizeAndReserve: async (input) => allowRequestPreparation(admission(input)),
+    },
+    attempt: { persist: async (input) => allowRequestPreparation(attemptRecord(input)) },
+    compensation: {
+      releasePreDispatch: async (input) =>
+        allowRequestPreparation({
+          requestId: input.requestId,
+          attemptId: input.attemptId,
+          disposition: 'released',
+          quotaReservation: 'released',
+          rateReservation: 'released',
+          holdReservation: 'not_applicable',
+          manualReconciliationRequired: false,
+        }),
+    },
+    providerPreparationRoute: async () => ({
+      clientProtocol: 'openai',
+      providerProtocol: 'openai',
+      clientOperation: 'chat.completions',
+      providerOperation: 'chat.completions',
+      modelResolution: MODEL_RESOLUTION,
+    }),
+    providerPayload: {
+      estimator: {
+        version: 'test-estimator-v1',
+        estimate: async () => ({
+          inputTotalUpperBound: 1,
+          inputUncachedUpperBound: 1,
+          cacheReadUpperBound: 0,
+          cacheWriteUpperBound: 0,
+          cacheWrite5mUpperBound: 0,
+          cacheWrite1hUpperBound: 0,
+          outputTotalUpperBound: 1,
+          reasoningOutputUpperBound: 0,
+          feasibleInputBuckets: ['input'],
+        }),
+      },
+      modelCompatibility: async () => true,
+      maxPayloadBytes: 1024,
+      compilerVersion: 'test-compiler-v1',
+    },
+    evidenceSigner: {
+      verifierKeyId: 'verifier-a',
+      sign: (input: PreparedRequestEvidenceInput) => ({ ...input, signatureBase64: 'c2lnbmF0dXJl' }),
+    } as RequestPreparationSigner,
+    evidenceVerifierKeyId: 'verifier-a',
+    idFactory: {
+      requestId: () => 'broadcast-request',
+      attemptId: () => 'broadcast-attempt',
+      evidenceId: () => 'broadcast-evidence',
+    },
+    trustedVerifierPublicKeys: new Map([['verifier-a', 'unused-test-key']]),
+    providerTargetResolver: {
+      resolve: () => ({ url: 'https://provider.example/v1', method: 'POST', endpointPolicy }),
+    },
+    providerTargetRoute: async () => ({
+      productId: 'product-a',
+      providerProtocol: 'openai',
+      providerOperation: 'chat.completions',
+    }),
+    providerCredentialUnsealingKms: {
+      decryptDataKey: async () => new Uint8Array(32),
+      checkReady: async () => {},
+      close: async () => {},
+    },
+    credentialContext: { deployment: 'test', environment: 'test' },
+    resolveAuthenticationHeader: async () => 'authorization',
+    fetch: async () => new Response('{}', { status: 200 }),
+    endpointPolicy,
+    timeoutMs: 1000,
+    maxConcurrency: 1,
+    leaseTtlMs: 1000,
+    idempotencyHmacKey: new Uint8Array(32).fill(0x5a),
+    maxBodyBytes: 1024,
+    entryPoint: 'invalidation-broadcast-test',
+    ...overrides,
+  };
+}
+
+const BROADCAST_ENV = {
+  MODEL_ROUTER_PREPARATION_INVALIDATION_BROADCAST: undefined,
+  MODEL_ROUTER_PREPARATION_AUTHORITY_CACHE: undefined,
+  MODEL_ROUTER_PREPARATION_ENTITLEMENT_CACHE: undefined,
+  MODEL_ROUTER_SCHEDULER_STATIC_CACHE: undefined,
+} as const;
+
+test('production composition keeps the invalidation broadcast off by default', { timeout: 15_000 }, async () => {
+  await withEnv({ ...BROADCAST_ENV, MODEL_ROUTER_PREPARATION_INVALIDATION_BROADCAST: undefined }, async () => {
+    const rows: Array<Record<string, unknown>> = [
+      { id: '9', tenant_id: BROADCAST_TENANT_ID, kind: 'api_key.revoked', reason: null },
+    ];
+    const { database, trace } = invalidationTraceDatabase(rows);
+    const composition = createManagedSaasGatewayProductionComposition(database, broadcastProductionOptions());
+    try {
+      // Longer than the 500ms poll cadence: an accidentally-enabled broadcast
+      // would have issued at least one events-table query by now.
+      await new Promise((resolve) => setTimeout(resolve, 1_200));
+      assert.equal(
+        trace.some((entry) => entry.sql.includes('saas_authority_invalidation_events')),
+        false,
+        'the off-by-default broadcast must never read the events table',
+      );
+    } finally {
+      await composition.close();
+    }
+  });
+});
+
+test('production composition polls and stops the invalidation broadcast behind the flag', {
+  timeout: 15_000,
+}, async () => {
+  await withEnv({ ...BROADCAST_ENV, MODEL_ROUTER_PREPARATION_INVALIDATION_BROADCAST: '1' }, async () => {
+    const rows: Array<Record<string, unknown>> = [];
+    const { database, trace } = invalidationTraceDatabase(rows);
+    const composition = createManagedSaasGatewayProductionComposition(database, broadcastProductionOptions());
+    try {
+      // Start initializes the cursor at the table head (empty table → 0).
+      await waitForTrace(trace, (entry) => entry.sql.includes(EVENTS_HEAD));
+      // A revocation-class event lands; the next tick tails it past the cursor.
+      rows.push({ id: '41', tenant_id: BROADCAST_TENANT_ID, kind: 'api_key.revoked', reason: 'rotated' });
+      await waitForTrace(trace, (entry) => entry.sql.includes(EVENTS_TAIL) && BigInt(String(entry.values[0])) === 0n);
+      // Close drains the broadcast: no further poll cycle after this point.
+      trace.length = 0;
+    } finally {
+      await composition.close();
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1_200));
+    assert.equal(
+      trace.some((entry) => entry.sql.includes('saas_authority_invalidation_events')),
+      false,
+      'the lifecycle close must stop the broadcast poll cycle',
+    );
+  });
+});
+
+test('production composition keeps broadcasting when every bounded cache kill switch is off', {
+  timeout: 15_000,
+}, async () => {
+  await withEnv(
+    {
+      MODEL_ROUTER_PREPARATION_INVALIDATION_BROADCAST: '1',
+      MODEL_ROUTER_PREPARATION_AUTHORITY_CACHE: '0',
+      MODEL_ROUTER_PREPARATION_ENTITLEMENT_CACHE: '0',
+      MODEL_ROUTER_SCHEDULER_STATIC_CACHE: '0',
+    },
+    async () => {
+      const rows: Array<Record<string, unknown>> = [];
+      const { database, trace } = invalidationTraceDatabase(rows);
+      const composition = createManagedSaasGatewayProductionComposition(database, broadcastProductionOptions());
+      try {
+        await waitForTrace(trace, (entry) => entry.sql.includes(EVENTS_HEAD));
+        rows.push({ id: '42', tenant_id: BROADCAST_TENANT_ID, kind: 'membership.revoked', reason: null });
+        await waitForTrace(trace, (entry) => entry.sql.includes(EVENTS_TAIL));
+      } finally {
+        await composition.close();
+      }
+    },
+  );
 });

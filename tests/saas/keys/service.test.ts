@@ -117,6 +117,7 @@ class FakeKeyDatabase implements SaasDatabase {
   readonly ipPolicies: StoredIpPolicy[] = [];
   readonly budgetPolicies: StoredBudgetPolicy[] = [];
   readonly budgetCounters: StoredBudgetCounter[] = [];
+  readonly authorityInvalidations: Array<{ tenantId: string; kind: string; reason: string | null }> = [];
   walletCurrency: string | null = 'USD';
   readonly statements: string[] = [];
   readonly advisoryFenceKeys: string[] = [];
@@ -558,6 +559,14 @@ class FakeKeyDatabase implements SaasDatabase {
         tenantId: String(b),
         actorUserId: String(c),
       });
+      return result<Row>();
+    }
+
+    // §12.2 Phase A2b (D2): the revocation-class mutations append an authority
+    // invalidation event inside the same transaction so cache-flushing
+    // gateways observe the revocation; the fake only records it.
+    if (statement.startsWith('insert into saas_authority_invalidation_events')) {
+      this.authorityInvalidations.push({ tenantId: String(a), kind: String(b), reason: c === null ? null : String(c) });
       return result<Row>();
     }
 

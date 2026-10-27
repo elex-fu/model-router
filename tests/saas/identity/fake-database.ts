@@ -36,6 +36,7 @@ function uniqueError(): Error & { code: string } {
 
 export class FakeSaasDatabase {
   readonly queryLog: QueryTrace[] = [];
+  readonly authorityInvalidations: Array<{ tenantId: string; kind: string; reason: string | null }> = [];
   authorizationFenceHook: ((sql: string, values: readonly unknown[]) => void) | undefined;
   state: FakeState = {
     platformState: { initialized: false, initialized_at: null },
@@ -639,6 +640,10 @@ export class FakeSaasDatabase {
       return result<Row>();
     }
     if (statement.startsWith('insert into saas_audit_events')) {
+      return result<Row>();
+    }
+    if (statement.startsWith('insert into saas_authority_invalidation_events')) {
+      this.authorityInvalidations.push({ tenantId: String(a), kind: String(b), reason: c === null ? null : String(c) });
       return result<Row>();
     }
 

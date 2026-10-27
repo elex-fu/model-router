@@ -4,6 +4,7 @@ import { SaasBillingGroupsService } from '../saas/billing/groups/service.js';
 import { createBillingGroupSpendResolution } from '../saas/billing/groups/spend-resolution.js';
 import { SaasCatalogService } from '../saas/catalog/service.js';
 import type { SaasDatabase } from '../saas/db/index.js';
+import { AuthorityInvalidationPoller } from '../saas/gateway/authority-invalidation-events.js';
 import { BEDROCK_ENDPOINT } from '../saas/gateway/bedrock/catalog-identity.js';
 import { CachedRequestPreparationAuthority } from '../saas/gateway/cached-request-preparation-authority.js';
 import { CachedRequestPreparationEntitlement } from '../saas/gateway/cached-request-preparation-entitlement.js';
@@ -96,10 +97,6 @@ import {
 } from '../saas/gateway/preparation-failure-observer.js';
 import type { PreparedEvidenceDispatchObserver } from '../saas/gateway/prepared-evidence-dispatch-observer.js';
 import {
-  RequestDiagnosticTrace,
-  withRequestDiagnosticTrace,
-} from '../saas/gateway/request-diagnostic-trace.js';
-import {
   type PreparedEvidenceLeaseProvider,
   type PreparedEvidenceMeteringPort,
   type PreparedEvidenceTransport,
@@ -147,6 +144,7 @@ import {
   createRedisStickyProviderAccountAffinity,
   type RedisStickyAffinityOptions,
 } from '../saas/gateway/redis-sticky-provider-account-affinity.js';
+import { RequestDiagnosticTrace, withRequestDiagnosticTrace } from '../saas/gateway/request-diagnostic-trace.js';
 import {
   type GatewayRequestIdempotencyClaimResult,
   GatewayRequestIdempotencyStore,
@@ -172,10 +170,10 @@ import {
   SaasRequestPreparationService,
 } from '../saas/gateway/request-preparation-service.js';
 import { createNativeResponsesCompactRoutingTransport } from '../saas/gateway/responses-compact-transport.js';
+import type { PersistentResponsesContinuationResolver } from '../saas/gateway/responses-continuation-resolver.js';
 import { createResponsesWsServer } from '../saas/gateway/responses-ws-connection.js';
 import { ResponsesWsEngine } from '../saas/gateway/responses-ws-engine.js';
 import { createResponsesWsRoundExecutor, responsesWsProxyKey } from '../saas/gateway/responses-ws-executor.js';
-import type { PersistentResponsesContinuationResolver } from '../saas/gateway/responses-continuation-resolver.js';
 import { SaasRouteConfigService } from '../saas/gateway/route-config-service.js';
 import { VERTEX_ENDPOINT } from '../saas/gateway/vertex/catalog-identity.js';
 import { GrokVideoUpstreamForwarder } from '../saas/gateway/videos/grok-video-upstream.js';
@@ -190,9 +188,9 @@ import {
   SaasGatewayVideosQueryPort,
 } from '../saas/gateway/videos/videos-query-port.js';
 import { createKeyBudgetResolution } from '../saas/keys/budget-resolution.js';
+import { CachedKeyAuthenticator } from '../saas/keys/cached-authenticator.js';
 import { PostgresSupplyProfileResolver } from '../saas/keys/resolver.js';
 import { KeyService } from '../saas/keys/service.js';
-import { CachedKeyAuthenticator } from '../saas/keys/cached-authenticator.js';
 import type { AuthenticatedApiKey } from '../saas/keys/types.js';
 import {
   DurableConditionalSettlementPort,
@@ -332,7 +330,10 @@ export interface ManagedSaasGatewayCompositionDependencies {
   /** Opt-in diagnostic sampling. Observer must enqueue without blocking or awaiting persistence. */
   readonly requestDiagnostics?: {
     readonly select: (requestId: string) => boolean;
-    readonly observe: (sample: { readonly requestId: string; readonly trace: ReturnType<RequestDiagnosticTrace['snapshot']> }) => void;
+    readonly observe: (sample: {
+      readonly requestId: string;
+      readonly trace: ReturnType<RequestDiagnosticTrace['snapshot']>;
+    }) => void;
   };
   /**
    * Override the built-in per-connection Responses round executor. The
@@ -733,15 +734,23 @@ export function createManagedSaasGatewayComposition(
   const requestIdContext = new AsyncLocalStorage<string>();
   const runWithDiagnostics = <T>(id: string, work: () => Promise<T>): Promise<T> => {
     let selected = false;
-    try { selected = dependencies.requestDiagnostics?.select(id) === true; } catch { /* Diagnostic only. */ }
+    try {
+      selected = dependencies.requestDiagnostics?.select(id) === true;
+    } catch {
+      /* Diagnostic only. */
+    }
     if (!selected) return work();
     const trace = new RequestDiagnosticTrace();
     return withRequestDiagnosticTrace(trace, async () => {
-      try { return await work(); }
-      finally {
+      try {
+        return await work();
+      } finally {
         // No await, queue flush, or persistent write in the request path.
-        try { dependencies.requestDiagnostics?.observe({ requestId: id, trace: trace.snapshot() }); }
-        catch { /* Diagnostic failure cannot change a financial outcome. */ }
+        try {
+          dependencies.requestDiagnostics?.observe({ requestId: id, trace: trace.snapshot() });
+        } catch {
+          /* Diagnostic failure cannot change a financial outcome. */
+        }
       }
     });
   };
@@ -817,7 +826,9 @@ export function createManagedSaasGatewayComposition(
         executor:
           dependencies.responsesWsRoundExecutor ??
           createResponsesWsRoundExecutor({
-            ...(dependencies.continuationHistoryResolver ? { continuationHistoryResolver: dependencies.continuationHistoryResolver } : {}),
+            ...(dependencies.continuationHistoryResolver
+              ? { continuationHistoryResolver: dependencies.continuationHistoryResolver }
+              : {}),
             request: upgradeRequest,
             authenticator: dependencies.authenticator,
             preparation,
@@ -828,13 +839,15 @@ export function createManagedSaasGatewayComposition(
             trustedProxyCidrs: dependencies.trustedProxyCidrs,
             contentModeration: dependencies.contentModeration,
             runWithRequestId: (roundRequestId, work) =>
-              requestIdContext.run(roundRequestId, () => runWithDiagnostics(roundRequestId, async () => {
-                try {
-                  return await work();
-                } finally {
-                  await dependencies.capacityCompletion?.(roundRequestId).catch(() => {});
-                }
-              })),
+              requestIdContext.run(roundRequestId, () =>
+                runWithDiagnostics(roundRequestId, async () => {
+                  try {
+                    return await work();
+                  } finally {
+                    await dependencies.capacityCompletion?.(roundRequestId).catch(() => {});
+                  }
+                }),
+              ),
           }),
         send: () => {},
         close: () => {},
@@ -843,7 +856,9 @@ export function createManagedSaasGatewayComposition(
     ...(dependencies.responsesWsLimits ? { limits: dependencies.responsesWsLimits } : {}),
   });
   const httpHandler = createSaasGatewayHandler({
-    ...(dependencies.continuationHistoryResolver ? { continuationHistoryResolver: dependencies.continuationHistoryResolver } : {}),
+    ...(dependencies.continuationHistoryResolver
+      ? { continuationHistoryResolver: dependencies.continuationHistoryResolver }
+      : {}),
     authenticator: dependencies.authenticator,
     preparation,
     dispatch,
@@ -908,7 +923,9 @@ export function createManagedSaasGatewayComposition(
     let pending: Promise<boolean>;
     try {
       pending = requestIdContext
-        .run(currentRequestId, () => runWithDiagnostics(currentRequestId, () => httpHandler(req, res, { requestId: currentRequestId })))
+        .run(currentRequestId, () =>
+          runWithDiagnostics(currentRequestId, () => httpHandler(req, res, { requestId: currentRequestId })),
+        )
         .finally(async () => {
           await dependencies.capacityCompletion?.(currentRequestId).catch(() => {});
         });
@@ -1384,10 +1401,14 @@ function createProductionIdempotencyAdmission(
       const authorized = await admission.revalidateAuthorization(input, sqlOptions);
       if (authorized.decision !== 'allow') return authorized;
       try {
-        return allowRequestPreparation(await store.readCanonicalCompilation(sqlOptions.executor, {
-          tenantId: input.caller.tenantId, projectId: input.caller.projectId, proxyKeyId: input.caller.proxyKeyId,
-          clientKey: input.clientKey,
-        }));
+        return allowRequestPreparation(
+          await store.readCanonicalCompilation(sqlOptions.executor, {
+            tenantId: input.caller.tenantId,
+            projectId: input.caller.projectId,
+            proxyKeyId: input.caller.proxyKeyId,
+            clientKey: input.clientKey,
+          }),
+        );
       } catch {
         return blockRequestPreparation('storage_failure', 'The canonical compilation identity is unavailable.');
       }
@@ -1400,16 +1421,27 @@ function createProductionIdempotencyAdmission(
       if (authorized.decision !== 'allow') return authorized;
       try {
         const existing = await store.lookupExisting(sqlOptions.executor, {
-          tenantId: input.caller.tenantId, projectId: input.caller.projectId, proxyKeyId: input.caller.proxyKeyId,
-          clientKey: input.clientKey, requestId: input.requestId,
-          requestFingerprint: input.requestFingerprint, requestFingerprintVersion: input.requestFingerprintVersion,
+          tenantId: input.caller.tenantId,
+          projectId: input.caller.projectId,
+          proxyKeyId: input.caller.proxyKeyId,
+          clientKey: input.clientKey,
+          requestId: input.requestId,
+          requestFingerprint: input.requestFingerprint,
+          requestFingerprintVersion: input.requestFingerprintVersion,
         });
-        if (existing.kind === 'missing') return blockRequestPreparation('storage_failure', 'The canonical idempotency binding disappeared.');
+        if (existing.kind === 'missing')
+          return blockRequestPreparation('storage_failure', 'The canonical idempotency binding disappeared.');
         if (existing.kind === 'fingerprint_conflict') {
-          return rejectRequestPreparation('idempotency_conflict', 'The idempotency key is already bound to a different request fingerprint.');
+          return rejectRequestPreparation(
+            'idempotency_conflict',
+            'The idempotency key is already bound to a different request fingerprint.',
+          );
         }
-        return rejectRequestPreparation('idempotency_replay', 'The existing canonical request is returned without replaying its response.',
-          { requestId: existing.canonicalRequestId, status: existing.canonicalRequestStatus });
+        return rejectRequestPreparation(
+          'idempotency_replay',
+          'The existing canonical request is returned without replaying its response.',
+          { requestId: existing.canonicalRequestId, status: existing.canonicalRequestStatus },
+        );
       } catch {
         return blockRequestPreparation('storage_failure', 'The canonical idempotency binding is unavailable.');
       }
@@ -1423,11 +1455,23 @@ function createProductionIdempotencyAdmission(
         );
       }
       if (!admission.revalidateAuthorization) {
-        return blockRequestPreparation('capability_unavailable', 'Transactional admission authorization is unavailable.');
+        return blockRequestPreparation(
+          'capability_unavailable',
+          'Transactional admission authorization is unavailable.',
+        );
       }
-      const authorized = await admission.revalidateAuthorization({ caller: input.caller, entitlement: input.entitlement,
-        publicModel: input.authority.route.publicModel, protocol: input.authority.route.protocol,
-        clientAddress: input.clientAddress, clientKey: input.idempotencyKey, requestId: input.requestId }, { executor });
+      const authorized = await admission.revalidateAuthorization(
+        {
+          caller: input.caller,
+          entitlement: input.entitlement,
+          publicModel: input.authority.route.publicModel,
+          protocol: input.authority.route.protocol,
+          clientAddress: input.clientAddress,
+          clientKey: input.idempotencyKey,
+          requestId: input.requestId,
+        },
+        { executor },
+      );
       if (authorized.decision !== 'allow') return authorized;
       let claim: GatewayRequestIdempotencyClaimResult;
       try {
@@ -1450,9 +1494,18 @@ function createProductionIdempotencyAdmission(
         );
       }
       if (claim.kind === 'existing') {
-        const freshAuthorization = await admission.revalidateAuthorization({ caller: input.caller, entitlement: input.entitlement,
-          publicModel: input.authority.route.publicModel, protocol: input.authority.route.protocol,
-          clientAddress: input.clientAddress, clientKey: input.idempotencyKey, requestId: input.requestId }, { executor });
+        const freshAuthorization = await admission.revalidateAuthorization(
+          {
+            caller: input.caller,
+            entitlement: input.entitlement,
+            publicModel: input.authority.route.publicModel,
+            protocol: input.authority.route.protocol,
+            clientAddress: input.clientAddress,
+            clientKey: input.idempotencyKey,
+            requestId: input.requestId,
+          },
+          { executor },
+        );
         if (freshAuthorization.decision !== 'allow') return freshAuthorization;
         return rejectRequestPreparation(
           'idempotency_replay',
@@ -1463,14 +1516,17 @@ function createProductionIdempotencyAdmission(
       if (claim.canonicalRequestId !== input.requestId) {
         return rejectRequestPreparation('binding_mismatch', 'SaaS request admission could not be authorized.');
       }
-      const admitted = await admission.authorizeAndReserve({
-        ...input,
-        idempotencyClaim: claim,
-        // revalidateAuthorization above already ran on this executor in this
-        // transaction (fence before claim); pass its fresh result so admission
-        // skips the redundant entry revalidation.
-        prevalidatedAuthorization: authorized.value,
-      }, sqlOptions);
+      const admitted = await admission.authorizeAndReserve(
+        {
+          ...input,
+          idempotencyClaim: claim,
+          // revalidateAuthorization above already ran on this executor in this
+          // transaction (fence before claim); pass its fresh result so admission
+          // skips the redundant entry revalidation.
+          prevalidatedAuthorization: authorized.value,
+        },
+        sqlOptions,
+      );
       if (admitted.decision !== 'allow') return admitted;
       const binding = admitted.value.idempotencyBinding;
       if (
@@ -1639,6 +1695,22 @@ function preparationEntitlementCacheDisabled(): boolean {
 function schedulerStaticCacheDisabled(): boolean {
   const setting = process.env.MODEL_ROUTER_SCHEDULER_STATIC_CACHE;
   return setting === '0' || setting === 'false';
+}
+
+/**
+ * §12.2 Phase A2b (D2): the authority/entitlement invalidation broadcast is
+ * OFF by default (an availability optimization, never a safety mechanism —
+ * the admission guard stays the fail-closed final defense line). Enabling
+ * ('1' / 'true') polls saas_authority_invalidation_events (~500ms cadence;
+ * revocation-class control-plane mutations append rows in-transaction) and
+ * flushes the local caches — key authentication, preparation authority,
+ * preparation entitlement, scheduler static eligibility — shortening the
+ * bounded (<= TTL) window in which requests carry stale caller versions
+ * into AUTHORITY_MISMATCH guard rejections.
+ */
+function preparationInvalidationBroadcastEnabled(): boolean {
+  const setting = process.env.MODEL_ROUTER_PREPARATION_INVALIDATION_BROADCAST;
+  return setting === '1' || setting === 'true';
 }
 
 /**
@@ -2178,21 +2250,24 @@ export function createManagedSaasGatewayProductionComposition(
     options.opencodeGoProtocolRouting,
     DEFAULT_OPENCODE_GO_PROTOCOL_RULES,
   );
+  // C0 §29.65: version-keyed, allow-only cache around the PostgreSQL
+  // authority adapter. The key is the complete caller/entitlement version
+  // tuple; the admission guard still re-reads and revalidates every
+  // authority fact inside the admission transaction (fail-closed), so the
+  // cache can never bypass the final defense line. The pure in-memory
+  // protocol-routing decorators stay outside the cache and run per request.
+  // Disable with MODEL_ROUTER_PREPARATION_AUTHORITY_CACHE=0. §12.2 Phase A2b
+  // (D2): the cache instance is retained for invalidation-broadcast
+  // registration below when the broadcast is enabled.
+  const authorityCache: CachedRequestPreparationAuthority | undefined = preparationAuthorityCacheDisabled()
+    ? undefined
+    : new CachedRequestPreparationAuthority(new PostgresRequestPreparationAuthorityAdapter(authorityDependencies));
   const authority: RequestPreparationAuthorityPort = createOpenCodeGoProtocolRoutingAuthority(
     // Batch-3: CN-provider adaptive routing wraps OUTSIDE the OpenCode Go
     // decorator (the provider sets are disjoint, so the two decorators
     // commute; non-CN-provider decisions pass through unchanged).
     createCnProvidersProtocolRoutingAuthority(
-      // C0 §29.65: version-keyed, allow-only cache around the PostgreSQL
-      // authority adapter. The key is the complete caller/entitlement
-      // version tuple; the admission guard still re-reads and revalidates
-      // every authority fact inside the admission transaction (fail-closed),
-      // so the cache can never bypass the final defense line. The pure
-      // in-memory protocol-routing decorators stay outside the cache and run
-      // per request. Disable with MODEL_ROUTER_PREPARATION_AUTHORITY_CACHE=0.
-      preparationAuthorityCacheDisabled()
-        ? new PostgresRequestPreparationAuthorityAdapter(authorityDependencies)
-        : new CachedRequestPreparationAuthority(new PostgresRequestPreparationAuthorityAdapter(authorityDependencies)),
+      authorityCache ?? new PostgresRequestPreparationAuthorityAdapter(authorityDependencies),
       options.cnProvidersProtocolRouting,
     ),
     openCodeGoProtocolRules,
@@ -2589,10 +2664,55 @@ export function createManagedSaasGatewayProductionComposition(
     ...(options.modelPlazaSessionAuth ? { sessionAuth: options.modelPlazaSessionAuth } : {}),
   });
 
+  // §12.2 Phase A2a (D2): the version-keyed, allow-only key authentication
+  // cache. Hoisted so the invalidation-broadcast poller can register it (see
+  // AUTHORITY_INVALIDATION_BROADCAST below).
+  const keyAuthenticationCache = new CachedKeyAuthenticator(keyService);
+  // §12.2 Phase A2a (D2): the version-keyed, allow-only entitlement cache
+  // around the pre-dispatch entitlement resolution (the outermost DB-facing
+  // layer, including the BYOK plan overlay). Hoisted for the same reason.
+  const preparationEntitlementCache: CachedRequestPreparationEntitlement | undefined =
+    preparationEntitlementCacheDisabled()
+      ? undefined
+      : new CachedRequestPreparationEntitlement(
+          new PostgresRequestPreparationEntitlementAdapter(options.entitlement, byokEntitlements),
+        );
+  // §12.2 Phase A2b (D2): the authority/entitlement invalidation broadcast —
+  // OFF by default (an availability optimization, never a safety mechanism:
+  // the admission guard stays the fail-closed final defense line). When
+  // enabled, a poller tails saas_authority_invalidation_events and flushes
+  // every version-keyed local cache so a revocation lands in ~500ms instead
+  // of after the bounded (<= TTL) stale window. Each registered target is
+  // undefined-or-registered per its own kill switch, so disabling an
+  // individual cache never disables the broadcast for the others.
+  const authorityInvalidationBroadcast = preparationInvalidationBroadcastEnabled()
+    ? new AuthorityInvalidationPoller(database)
+    : undefined;
+  if (authorityInvalidationBroadcast) {
+    authorityInvalidationBroadcast.register(keyAuthenticationCache);
+    if (preparationEntitlementCache) authorityInvalidationBroadcast.register(preparationEntitlementCache);
+    if (authorityCache) authorityInvalidationBroadcast.register(authorityCache);
+    const schedulerStaticCache = scheduler.staticEligibilityCache;
+    if (schedulerStaticCache) authorityInvalidationBroadcast.register(schedulerStaticCache);
+    // Start fire-and-forget (the media recovery-loop precedent): the start
+    // query initializes the cursor at the table head, and a failed start is
+    // logged loudly through the poller's fixed error line. A dead broadcast
+    // degrades to exactly the broadcast-off posture — TTL-bounded staleness
+    // that the admission guard already fails closed on — so it never
+    // warrants refusing to compose.
+    void authorityInvalidationBroadcast.start().catch(() => {
+      // The poller's own fixed error line; a failed start never throws into
+      // the (synchronous) composition builder.
+      console.error('model-router authority invalidation poll failed');
+    });
+  }
+
   return createManagedSaasGatewayComposition({
-    ...(options.continuationHistoryResolver ? { continuationHistoryResolver: options.continuationHistoryResolver } : {}),
+    ...(options.continuationHistoryResolver
+      ? { continuationHistoryResolver: options.continuationHistoryResolver }
+      : {}),
     ...(options.requestDiagnostics ? { requestDiagnostics: options.requestDiagnostics } : {}),
-    authenticator: new CachedKeyAuthenticator(keyService),
+    authenticator: keyAuthenticationCache,
     ...(options.capacityCompletion ? { capacityCompletion: options.capacityCompletion } : {}),
     capabilityReadiness,
     ...(options.preparationFailureObserver ? { preparationFailureObserver: options.preparationFailureObserver } : {}),
@@ -2609,11 +2729,9 @@ export function createManagedSaasGatewayProductionComposition(
       // executor-carrying (in-transaction) resolves bypass the cache
       // entirely inside the decorator. Disable with
       // MODEL_ROUTER_PREPARATION_ENTITLEMENT_CACHE=0.
-      entitlement: preparationEntitlementCacheDisabled()
-        ? new PostgresRequestPreparationEntitlementAdapter(options.entitlement, byokEntitlements)
-        : new CachedRequestPreparationEntitlement(
-            new PostgresRequestPreparationEntitlementAdapter(options.entitlement, byokEntitlements),
-          ),
+      entitlement:
+        preparationEntitlementCache ??
+        new PostgresRequestPreparationEntitlementAdapter(options.entitlement, byokEntitlements),
       authority,
       scheduler,
       payload,
@@ -2646,6 +2764,10 @@ export function createManagedSaasGatewayProductionComposition(
         // leases expire on their own; an in-flight cycle finishes first).
         await videoRecoveryHandle?.stop();
         await imageStuckSweeper?.stop();
+        // §12.2 Phase A2b (D2): stop the invalidation broadcast (waits for
+        // any in-flight poll tick) before the KMS; the unref'd timer never
+        // holds the process open on its own.
+        await authorityInvalidationBroadcast?.stop();
         await options.providerCredentialUnsealingKms.close();
       },
     },

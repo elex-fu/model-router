@@ -3,6 +3,7 @@ import type { SaasDatabase } from '../db/index.js';
 import { createPreparedSqlStatement, queryPreparedOrAnonymous } from '../db/prepared-statements.js';
 import type { RedisConcurrencySlots } from '../runtime/redis-concurrency-slots.js';
 import {
+  CachedProviderAccountEligibility,
   type CachedProviderAccountEligibilityOptions,
   wrapProviderAccountEligibilityCache,
 } from './cached-provider-account-eligibility.js';
@@ -2113,6 +2114,18 @@ export class PostgresProviderAccountScheduler implements ProviderAccountSchedule
   private readonly leaseConcurrencyLimit: number | undefined;
   /** F2/R6b: configured only when the Redis slot pre-check is enabled. */
   private readonly redisSlots: RedisConcurrencySlots | undefined;
+  /** §12.2 Phase A2b (D2): the static eligibility cache, when constructed. */
+  private readonly staticEligibilityCacheInstance: CachedProviderAccountEligibility | undefined;
+
+  /**
+   * §12.2 Phase A2b (D2): the version-keyed static eligibility cache when the
+   * composition enabled it (undefined when MODEL_ROUTER_SCHEDULER_STATIC_CACHE
+   * is off), so the gateway can register it on the authority invalidation
+   * broadcast poller.
+   */
+  get staticEligibilityCache(): CachedProviderAccountEligibility | undefined {
+    return this.staticEligibilityCacheInstance;
+  }
   private readonly redisSlotMaxSlots: number | undefined;
   private readonly redisSlotWindowMs: number | undefined;
   /** requestId → { scope, accounts } for slots acquired during one selection. */
@@ -2163,6 +2176,11 @@ export class PostgresProviderAccountScheduler implements ProviderAccountSchedule
       }),
       options.staticEligibilityCache,
     );
+    // §12.2 Phase A2b (D2): expose the cache instance (when constructed) so
+    // the gateway composition can register it on the authority invalidation
+    // broadcast poller.
+    this.staticEligibilityCacheInstance =
+      eligibility instanceof CachedProviderAccountEligibility ? eligibility : undefined;
     this.scheduler = new ProviderAccountScheduler(
       {
         eligibility,

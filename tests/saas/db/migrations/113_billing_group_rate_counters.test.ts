@@ -12,8 +12,8 @@ test('113 registers as the applied head after the 112 snapshot freeze', () => {
   assert.equal(migration.name, 'billing_group_rate_counters');
   assert.deepEqual(Object.keys(migration).sort(), ['name', 'sql', 'version']);
   const registered = SAAS_MIGRATIONS.map(({ version }) => version);
-  assert.deepEqual(registered.slice(-5), [138, 139, 140, 141, 142]);
-  assert.equal(registered.at(-1), 142);
+  assert.deepEqual(registered.slice(-5), [139, 140, 141, 142, 143]);
+  assert.equal(registered.at(-1), 143);
   assert.equal(registered.includes(migration.version), true);
 });
 

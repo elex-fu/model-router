@@ -71,6 +71,13 @@ export class CachedRequestPreparationEntitlement implements RequestPreparationEn
   private readonly now: () => number;
   private readonly entries = new Map<string, { until: number; value: RequestPreparationEntitlement }>();
   private readonly pending = new Map<string, Promise<EntitlementDecision>>();
+  /**
+   * §12.2 Phase A2b (D2): bumped by invalidateAll(). A resolution that
+   * started before an invalidation must not store its (now potentially
+   * stale) allow decision afterwards — the generation guard drops that
+   * store, keeping invalidation effective even against in-flight resolves.
+   */
+  private generation = 0;
 
   /** The wrapped entitlement port; public read-only like the protocol decorators. */
   readonly underlyingEntitlement: RequestPreparationEntitlementPort;
@@ -105,15 +112,31 @@ export class CachedRequestPreparationEntitlement implements RequestPreparationEn
       return this.underlyingEntitlement.resolve(input);
     }
     const observedAt = this.now();
+    const generation = this.generation;
     const operation = this.underlyingEntitlement
       .resolve(input)
       .then((decision) => {
-        if (decision.decision === 'allow') this.store(key, observedAt + this.ttlMs, decision.value);
+        if (decision.decision === 'allow' && generation === this.generation) {
+          this.store(key, observedAt + this.ttlMs, decision.value);
+        }
         return decision;
       })
       .finally(() => this.pending.delete(key));
     this.pending.set(key, operation);
     return structuredClone(await operation);
+  }
+
+  /**
+   * §12.2 Phase A2b (D2) invalidation broadcast hook: drop every cached
+   * allow immediately (control-plane revocation class changes). In-flight
+   * single-flight resolutions keep serving their awaiting caller but never
+   * store across an invalidation (the generation guard above). Pure
+   * availability optimization: the admission guard remains the fail-closed
+   * final defense line.
+   */
+  invalidateAll(): void {
+    this.generation += 1;
+    this.entries.clear();
   }
 
   private store(key: string, until: number, value: RequestPreparationEntitlement): void {
