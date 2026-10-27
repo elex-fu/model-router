@@ -4,6 +4,7 @@ import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { FastReceiptInput } from '../../../../src/saas/gateway/fast/executor.js';
 import { fastJournalCanonicalJson } from '../../../../src/saas/gateway/fast/journal.js';
+import { getPreparedFastReceipt, prepareFastReceipt } from '../../../../src/saas/gateway/fast/prepared-receipt.js';
 import { FastReceiptQueue } from '../../../../src/saas/gateway/fast/receipt-queue.js';
 import { priceFixture } from './journal-fixture.js';
 
@@ -603,4 +604,277 @@ test('reconciliation retry timing never re-counts receipt ACK or completes resid
     );
     assert.equal(snapshot.residenceCount, snapshot.completed);
   }
+});
+
+test('ACK compaction preserves full-proof duplicate identity and all original capacity reservations', async (t) => {
+  for (const pressure of ['entries', 'bytes', 'tenant'] as const) {
+    await t.test(pressure, async () => {
+      const redis = deferred();
+      const original = receipt();
+      const reservedBytes = Buffer.byteLength(fastJournalCanonicalJson(original)) * 2 + 256;
+      let calls = 0;
+      const queue = new FastReceiptQueue({
+        maxEntries: pressure === 'entries' ? 1 : 2,
+        maxBytes: pressure === 'bytes' ? reservedBytes : reservedBytes * 2,
+        maxPerTenant: pressure === 'tenant' ? 1 : 2,
+        journal: {
+          appendReceipt: async () => {
+            calls++;
+          },
+        },
+      });
+      const completed = { ...completion, actualTokenUnits: 15, reconcileDurableUsage: async () => redis.promise };
+      try {
+        assert.equal(queue.tryEnqueue(original, completed), true);
+        await new Promise((resolve) => setImmediate(resolve));
+        const compact = queue.snapshot();
+        assert.equal(compact.durable, 1);
+        assert.equal(compact.undurable, 0);
+        assert.deepEqual(compact.undurableLiabilityByCurrency, {});
+        assert.equal(compact.pending, 1);
+        assert.equal(compact.reconciliationRunning, 1);
+        assert.equal(compact.bytes, reservedBytes, 'physical compaction does not free admission budget');
+        assert.equal(queue.tryEnqueue(original, completed), true);
+        const changedProof = JSON.parse(fastJournalCanonicalJson(original)) as FastReceiptInput;
+        assert.ok(changedProof.verification);
+        Object.assign(changedProof.verification.priceSnapshot.customerPrice, { version: 2 });
+        assert.throws(
+          () => queue.tryEnqueue(changedProof, completed),
+          /CONFLICT/,
+          'proof is absent from journal v1 digest',
+        );
+        assert.throws(() => queue.tryEnqueue({ ...original, usageDigest: 'b'.repeat(64) }, completed), /CONFLICT/);
+        assert.throws(() => queue.tryEnqueue({ ...original, httpStatus: 201 }, completed), /CONFLICT/);
+        assert.throws(
+          () => queue.tryEnqueue(original, { ...completed, retainedLiabilityMinorUnits: '145' }),
+          /CONFLICT/,
+        );
+        assert.throws(
+          () => queue.tryEnqueue(original, completion),
+          /CONFLICT/,
+          'completion token identity is preserved',
+        );
+        assert.equal(queue.tryEnqueue(receipt('next'), completion), false);
+        assert.equal(calls, 1, 'neither duplicate nor conflicting/rejected work starts SQL');
+        assert.equal(queue.snapshot().bytes, reservedBytes);
+        assert.equal(queue.snapshot().fallbacks, 1);
+      } finally {
+        redis.resolve();
+        await queue.close();
+      }
+      assert.equal(queue.snapshot().bytes, 0);
+      assert.equal(queue.snapshot().pending, 0);
+    });
+  }
+});
+
+test('compacted running and retry-held reconciliation remain drain-owned after stop and timeout', async () => {
+  const first = deferred(),
+    second = deferred(),
+    retried = deferred();
+  let calls = 0;
+  const queue = new FastReceiptQueue({
+    drainTimeoutMs: 10,
+    retryBaseMs: 1,
+    retryMaxMs: 1,
+    observe: () => {},
+    journal: { appendReceipt: async () => {} },
+  });
+  queue.tryEnqueue(receipt(), {
+    ...completion,
+    actualTokenUnits: 15,
+    reconcileDurableUsage: async () => {
+      if (++calls === 1) {
+        await first.promise;
+        throw new Error('lost Redis ACK');
+      }
+      retried.resolve();
+      await second.promise;
+    },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  const bytes = queue.snapshot().bytes;
+  await assert.rejects(queue.close(), /DRAIN_TIMEOUT/);
+  assert.equal(queue.snapshot().pending, 1);
+  assert.equal(queue.snapshot().bytes, bytes);
+  assert.equal(queue.snapshot().undurable, 0);
+  assert.equal(queue.canAdmit(), false);
+  first.resolve();
+  // A referenced timeout keeps this test alive while the retry timer is unref'ed.
+  const keepAlive = setTimeout(() => {}, 1000);
+  try {
+    await retried.promise;
+    assert.equal(queue.snapshot().reconciliationRetries, 1);
+    assert.equal(queue.snapshot().receiptAwaitCount, 1);
+    assert.equal(queue.snapshot().pending, 1);
+    assert.equal(queue.snapshot().bytes, bytes);
+    second.resolve();
+    await queue.close();
+  } finally {
+    clearTimeout(keepAlive);
+    second.resolve();
+  }
+  assert.equal(queue.snapshot().completed, 1);
+  assert.equal(queue.snapshot().pending, 0);
+  assert.equal(queue.snapshot().bytes, 0);
+});
+
+test('out-of-order ACKs and compaction preserve oldest ages and incremental currency ownership', async () => {
+  let now = 0;
+  const ack = [deferred(), deferred(), deferred()];
+  const redis = deferred();
+  let calls = 0;
+  const queue = new FastReceiptQueue({
+    workers: 3,
+    maxAgeMs: 20,
+    now: () => now,
+    journal: { appendReceipt: async () => ack[calls++].promise },
+  });
+  queue.tryEnqueue(receipt('oldest'), {
+    ...completion,
+    actualTokenUnits: 15,
+    reconcileDurableUsage: async () => redis.promise,
+  });
+  now = 5;
+  const yen = receipt('yen');
+  assert.ok(yen.verification);
+  Object.assign(yen.verification.priceSnapshot.customerPrice, { currency: 'JPY' });
+  queue.tryEnqueue(yen, { ...completion, currency: 'JPY' });
+  now = 10;
+  queue.tryEnqueue(receipt('newest'), completion);
+  now = 15;
+  ack[1].resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(queue.snapshot().undurableLiabilityByCurrency, { USD: '288' });
+  assert.equal(queue.snapshot().oldestUndurableAgeMs, 15);
+  now = 20;
+  assert.equal(queue.canAdmit(), false);
+  ack[0].resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(queue.snapshot().oldestAgeMs, 20, 'oldest total task is now compacted');
+  assert.equal(queue.snapshot().oldestUndurableAgeMs, 10);
+  assert.deepEqual(queue.snapshot().undurableLiabilityByCurrency, { USD: '144' });
+  assert.equal(queue.canAdmit(), true);
+  now = 30;
+  assert.equal(queue.canAdmit(), false, 'remaining undurable evidence owns the age bound');
+  ack[2].resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(queue.snapshot().oldestUndurableAgeMs, 0);
+  assert.equal(queue.snapshot().oldestAgeMs, 30);
+  assert.equal(queue.canAdmit(), true);
+  assert.deepEqual(queue.snapshot().undurableLiabilityByCurrency, {});
+  redis.resolve();
+  await queue.close();
+  assert.equal(queue.snapshot().oldestAgeMs, 0);
+});
+
+test('same-turn completions coalesce one bounded pump without coalescing attempt observations', async (t) => {
+  const ack = deferred(),
+    tail = deferred();
+  let calls = 0;
+  const observed: number[] = [];
+  const queue = new FastReceiptQueue({
+    workers: 2,
+    observe: (snapshot) => observed.push(snapshot.receiptAwaitCount),
+    journal: { appendReceipt: async () => (++calls <= 2 ? ack.promise : tail.promise) },
+  });
+  for (let index = 0; index < 4; index++) queue.tryEnqueue(receipt(String(index)), completion);
+  assert.equal(calls, 2);
+  const schedule = t.mock.method(globalThis, 'queueMicrotask');
+  ack.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(schedule.mock.callCount(), 1, 'two settled attempts request only one scheduler callback');
+  schedule.mock.restore();
+  assert.equal(calls, 4);
+  assert.ok(observed.includes(1), 'the first settled attempt remains individually observable');
+  assert.ok(observed.includes(2));
+  tail.resolve();
+  await queue.close();
+  assert.equal(queue.snapshot().completed, 4);
+});
+
+test('readiness and snapshot do not scan pending tasks to compute age or liabilities', async (t) => {
+  const ack = deferred();
+  const queue = new FastReceiptQueue({ journal: { appendReceipt: async () => ack.promise } });
+  for (let index = 0; index < 32; index++) queue.tryEnqueue(receipt(String(index)), completion);
+  const original = Map.prototype.values;
+  let nextCalls = 0;
+  const values = t.mock.method(Map.prototype, 'values', function <K, V>(this: Map<K, V>) {
+    const iterator = original.call(this) as MapIterator<V>;
+    const next = iterator.next.bind(iterator);
+    iterator.next = () => {
+      nextCalls++;
+      return next();
+    };
+    return iterator;
+  });
+  try {
+    assert.equal(queue.canAdmit(), true);
+    assert.equal(queue.snapshot().undurable, 32);
+    assert.equal(nextCalls, 3, 'one oldest-undurable read plus two oldest snapshot reads');
+  } finally {
+    values.mock.restore();
+    ack.resolve();
+    await queue.close();
+  }
+});
+
+test('ACK releases owned receipt, price and prepared metadata while compact reconciliation remains live', {
+  skip: typeof global.gc !== 'function' ? 'run with --expose-gc for ownership verification' : false,
+}, async () => {
+  const redis = deferred();
+  const queue = new FastReceiptQueue({ journal: { appendReceipt: async () => {} } });
+  const references = (() => {
+    const original = receipt();
+    assert.ok(original.verification);
+    const owned = prepareFastReceipt({
+      intentId: original.intentId,
+      requestId: original.requestId,
+      tenantId: original.tenantId,
+      httpStatus: 200,
+      usage: original.usage,
+      priceSnapshot: original.verification.priceSnapshot,
+      maxCostMinorUnits: completion.retainedLiabilityMinorUnits,
+    });
+    queue.tryEnqueue(owned, { ...completion, actualTokenUnits: 15, reconcileDurableUsage: async () => redis.promise });
+    const prepared = getPreparedFastReceipt(owned);
+    assert.ok(prepared);
+    assert.ok(owned.verification);
+    return [new WeakRef(owned), new WeakRef(prepared), new WeakRef(owned.verification.priceSnapshot)];
+  })();
+  try {
+    for (let attempt = 0; attempt < 20; attempt++) {
+      await new Promise((resolve) => setImmediate(resolve));
+      global.gc?.();
+      if (references.every((reference) => reference.deref() === undefined)) break;
+    }
+    assert.equal(queue.snapshot().durable, 1);
+    assert.equal(queue.snapshot().pending, 1);
+    assert.equal(queue.snapshot().reconciliationRunning, 1);
+    assert.ok(
+      references.every((reference) => reference.deref() === undefined),
+      'no queue/worker closure may retain rich evidence after ACK',
+    );
+    assert.ok(queue.snapshot().bytes > 0, 'budget reservation survives physical reclamation');
+  } finally {
+    redis.resolve();
+    await queue.close();
+  }
+});
+
+test('zero-valued currency aggregates retain their entry count until the last ACK', async () => {
+  const ack = [deferred(), deferred()];
+  let calls = 0;
+  const queue = new FastReceiptQueue({ workers: 2, journal: { appendReceipt: async () => ack[calls++].promise } });
+  for (const id of ['zero-a', 'zero-b']) {
+    const input = { ...receipt(id), outcome: 'failed' as const, chargeMinorUnits: '0', verification: undefined };
+    queue.tryEnqueue(input, { retainedLiabilityMinorUnits: '0', currency: 'USD' });
+  }
+  assert.deepEqual(queue.snapshot().undurableLiabilityByCurrency, { USD: '0' });
+  ack[1].resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(queue.snapshot().undurableLiabilityByCurrency, { USD: '0' });
+  ack[0].resolve();
+  await queue.close();
+  assert.deepEqual(queue.snapshot().undurableLiabilityByCurrency, {});
 });
