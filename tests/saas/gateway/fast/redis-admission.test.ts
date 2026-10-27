@@ -71,7 +71,7 @@ test('late acquire ACK cannot produce a dispatch-valid lease', async () => {
     eval: async (_script, options) => {
       const parameters = JSON.parse(options.arguments[0] ?? '{}');
       await new Promise<void>((resolve) => setTimeout(resolve, 25));
-      return JSON.stringify({ ok: true, token: parameters.token, renewInMs: 10 });
+      return JSON.stringify({ ok: true, token: parameters.token, incarnation: parameters.incarnation, renewInMs: 10 });
     },
   });
   assert.deepEqual(await admission.acquire(request()), { allowed: false, reason: 'unavailable' });
@@ -104,7 +104,7 @@ test('renewal failure invalidates locally without sending an implicit release', 
       calls++;
       if (calls > 1) throw new Error('Redis unavailable');
       const parameters = JSON.parse(options.arguments[0] ?? '{}');
-      return JSON.stringify({ ok: true, token: parameters.token, renewInMs: 150 });
+      return JSON.stringify({ ok: true, token: parameters.token, incarnation: parameters.incarnation, renewInMs: 150 });
     },
   });
   const result = await admission.acquire(request());
@@ -121,7 +121,7 @@ test('actual-token feedback is bounded by the original lease and successful rece
     eval: async (_script, options) => {
       calls++;
       const p = JSON.parse(options.arguments[0]);
-      return JSON.stringify({ ok: true, token: p.token, renewInMs: 100 });
+      return JSON.stringify({ ok: true, token: p.token, incarnation: p.incarnation, renewInMs: 100 });
     },
   });
   const admitted = await service.acquire(request());
@@ -140,4 +140,99 @@ test('actual-token feedback is bounded by the original lease and successful rece
   assert.equal(calls, 1);
   await admitted.lease.release({ outcome: 'success', actualTokenUnits: 2 });
   assert.equal(calls, 2);
+});
+
+test('split lifecycle validates durable usage and keeps independent idempotent operations', async () => {
+  const calls: { operation?: string; token: string; incarnation: string; tokenUnits: number }[] = [];
+  const service = create({
+    eval: async (_script, options) => {
+      const p = JSON.parse(options.arguments[0]);
+      calls.push(p);
+      return JSON.stringify({ ok: true, token: p.token, incarnation: p.incarnation, renewInMs: 100 });
+    },
+  });
+  const source = request();
+  const admitted = await service.acquire(source);
+  assert.ok(admitted.allowed);
+  const lease = admitted.lease;
+  assert.ok(lease.releaseConcurrency && lease.reconcileDurableUsage);
+  for (const actual of [-1, 6, 0.5, Number.NaN, Number.POSITIVE_INFINITY])
+    await assert.rejects(lease.reconcileDurableUsage(actual), /Invalid fast admission durable usage/);
+  await assert.rejects(
+    lease.releaseConcurrency({ outcome: 'success', actualTokenUnits: 2 }),
+    /Invalid fast admission feedback/,
+  );
+  assert.equal(calls.length, 1);
+  // A caller mutating its source object cannot increase the original allowance.
+  Object.assign(source, { tokenUnits: 1000 });
+  await assert.rejects(lease.reconcileDurableUsage(6), /Invalid fast admission durable usage/);
+  const reconciliation = lease.reconcileDurableUsage(2);
+  assert.equal(lease.reconcileDurableUsage(2), reconciliation);
+  await reconciliation;
+  assert.equal(await lease.assertValid(), true, 'durable usage alone must not stop the live lease');
+  await assert.rejects(lease.reconcileDurableUsage(1), /Invalid fast admission durable usage/);
+  const release = lease.releaseConcurrency({ outcome: 'success' });
+  assert.equal(lease.releaseConcurrency(), release);
+  await release;
+  assert.equal(await lease.assertValid(), false);
+  await assert.rejects(lease.renew(), /lease lost/);
+  assert.deepEqual(
+    calls.map((call) => call.operation),
+    [undefined, 'usage', 'concurrency'],
+  );
+  assert.equal(new Set(calls.map((call) => call.incarnation)).size, 1);
+  assert.equal(new Set(calls.map((call) => call.tokenUnits)).size, 1);
+});
+
+test('uncertain split operation ACKs can retry independently with the same immutable usage', async () => {
+  const seen: string[] = [];
+  const failures = new Set(['usage', 'concurrency']);
+  const service = create({
+    eval: async (_script, options) => {
+      const p = JSON.parse(options.arguments[0]);
+      if (p.operation) {
+        seen.push(p.operation);
+        if (failures.delete(p.operation)) throw new Error('private remote fault');
+      }
+      return JSON.stringify({ ok: true, token: p.token, incarnation: p.incarnation, renewInMs: 100 });
+    },
+  });
+  const result = await service.acquire(request());
+  assert.ok(result.allowed);
+  const lease = result.lease;
+  assert.ok(lease.releaseConcurrency && lease.reconcileDurableUsage);
+  await assert.rejects(lease.releaseConcurrency(), /release unavailable/);
+  await assert.rejects(lease.reconcileDurableUsage(2), /reconciliation unavailable/);
+  await assert.rejects(lease.reconcileDurableUsage(1), /Invalid fast admission durable usage/);
+  await lease.reconcileDurableUsage(2);
+  await lease.releaseConcurrency();
+  await lease.reconcileDurableUsage(2);
+  await lease.releaseConcurrency();
+  assert.deepEqual(seen, ['concurrency', 'usage', 'usage', 'concurrency']);
+});
+
+test('acquire requires an incarnation and renewal cannot acknowledge a different incarnation', async () => {
+  const missing = create({
+    eval: async (_script, options) => {
+      const p = JSON.parse(options.arguments[0]);
+      return JSON.stringify({ ok: true, token: p.token, renewInMs: 100 });
+    },
+  });
+  assert.deepEqual(await missing.acquire(request()), { allowed: false, reason: 'unavailable' });
+  let calls = 0;
+  const changed = create({
+    eval: async (_script, options) => {
+      const p = JSON.parse(options.arguments[0]);
+      return JSON.stringify({
+        ok: true,
+        token: p.token,
+        incarnation: calls++ === 0 ? p.incarnation : 'wrong-incarnation',
+        renewInMs: 100,
+      });
+    },
+  });
+  const acquired = await changed.acquire(request());
+  assert.ok(acquired.allowed);
+  await assert.rejects(acquired.lease.renew(), /lease lost/);
+  assert.equal(await acquired.lease.assertValid(), false);
 });
