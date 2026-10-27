@@ -6,6 +6,7 @@ observer wrapper. A metrics-only SIGHUP avoids the fixture's SQL diagnostics.
 import argparse
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import signal
@@ -24,6 +25,49 @@ def distribution(values):
         for key, quantile in [("p50", .5), ("p95", .95), ("p99", .99), ("p999", .999), ("max", 1)]}}
 
 
+def scene_plan(name):
+    if name == "phase-workers2-30s":
+        return [("phase-c32-workers2", "memory-queue", 1000000, 32, False, 30)]
+    if name != "pilot-six":
+        raise ValueError("ASYNC_PILOT_UNKNOWN_PLAN")
+    return [("serial-json", "durable", 1000, 1, False, 0),
+            ("serial-json", "memory-queue", 1000, 1, False, 0),
+            ("serial-sse", "memory-queue", 1000, 1, True, 0),
+            ("serial-sse", "durable", 1000, 1, True, 0),
+            ("sustained-c32", "durable", 1000000, 32, False, 60),
+            ("sustained-c32", "memory-queue", 1000000, 32, False, 60)]
+
+
+def receipt_append_calls(rows):
+    # PGSS may discard the source comment. Do not apply retroactively to GEN18
+    # summaries: its additive qualification sidecar preserves that parser miss.
+    return sum(row["calls"] for row in rows if
+        "fast-journal:append-receipt" in row["query"] or
+        (row["query"].lstrip().startswith("WITH receipt AS (") and
+         "INSERT INTO saas_fast_gateway_receipts" in row["query"]))
+
+
+def verify_phase_metrics(telemetry):
+    phases = telemetry["phaseMetrics"]
+    assert phases["available"], "ASYNC_PHASE_METRICS_REQUIRED"
+    counters = telemetry["counterDeltas"]
+    receipt_attempts = counters["durable"] + counters["retries"] + counters["conflicts"]
+    reconciliation_attempts = (counters["completed"] - phases["completedWithoutReconciliationDelta"]
+                               + counters["reconciliationRetries"])
+    expected = {"receiptQueueWait": receipt_attempts, "receiptAwait": receipt_attempts,
+                "reconciliationQueueWait": reconciliation_attempts,
+                "reconciliationAwait": reconciliation_attempts, "residence": counters["completed"]}
+    for phase, count in expected.items():
+        group = phases["groups"][phase]
+        assert group["counterCountDelta"] == group["observedCount"] == sum(group["buckets"]) == count
+        assert group["missedTransitions"] == group["counterResets"] == 0
+        assert math.isclose(group["counterSumMsDelta"], group["observedSumMs"], rel_tol=1e-9, abs_tol=1e-6)
+    return {"verified": True, "settled_receipt_attempts": receipt_attempts,
+            "settled_reconciliation_attempts": reconciliation_attempts,
+            "completed_residences": counters["completed"],
+            "scope": "built-in scalar phase metrics; await includes pool/driver/ACK wait, not pure database or Redis execution"}
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--execute", action="store_true")
@@ -33,6 +77,7 @@ def main():
     parser.add_argument("--label", required=True)
     parser.add_argument("--generation", type=int, required=True)
     parser.add_argument("--client", type=Path, required=True)
+    parser.add_argument("--plan", choices=["pilot-six", "phase-workers2-30s"], default="pilot-six")
     args = parser.parse_args()
     if not args.execute: parser.error("--execute requires root quiet-window GO")
     assert args.label.startswith("async-receipt-pilot-")
@@ -103,18 +148,16 @@ def main():
             return json.loads((A / "results" / f"{self.label}-{name}.json").read_text())
 
     fixture = Pilot(args)
-    planned = [("serial-json", "durable", 1000, 1, False, 0),
-               ("serial-json", "memory-queue", 1000, 1, False, 0),
-               ("serial-sse", "memory-queue", 1000, 1, True, 0),
-               ("serial-sse", "durable", 1000, 1, True, 0),
-               ("sustained-c32", "durable", 1000000, 32, False, 60),
-               ("sustained-c32", "memory-queue", 1000000, 32, False, 60)]
+    planned = scene_plan(args.plan)
+    phase_required = args.plan == "phase-workers2-30s"
     results = []
     owned_gateway_identities = []
     try:
         wait_active(fixture)
         fixture.save("manifest", {"source_commit": args.expected_source, "generation": args.generation,
-            "planned": planned, "pilot_only": True, "not_full_performance_acceptance": True,
+            "planned": planned, "plan": args.plan, "pilot_only": True, "not_full_performance_acceptance": True,
+            "built_in_queue_phase_metrics_required": phase_required,
+            "diagnostic_only": phase_required,
             "queue_telemetry_factory_wrapper": True, "fault_preload": False, "phase_profiler": False,
             "extra_SQL_periodic_sampler": False, "quiet_guard_file_sampler_seconds": 1,
             "client_change": "GEN17 transport/body/workload unchanged; post-loop wall-clock endpoints added",
@@ -174,7 +217,7 @@ def main():
             sql_rows = json.loads((A / "results" / f"{fixture.label}-{name}-sql.json").read_text())
             reserve_calls = sum(row["calls"] for row in sql_rows if "fast-journal:reserve-intent" in row["query"] or row["query"].startswith("WITH current_owner AS MATERIALIZED"))
             lookup_calls = sum(row["calls"] for row in sql_rows if row["query"].startswith("SELECT i.request_id, i.intent_digest, COALESCE("))
-            receipt_calls = sum(row["calls"] for row in sql_rows if "fast-journal:append-receipt" in row["query"])
+            receipt_calls = receipt_append_calls(sql_rows)
             mock_after = fixture.metrics()
             client_start = int(raw["started_at_unix_ns"]); client_end = int(raw["completed_at_unix_ns"])
             clock_error_ns = abs((client_end - client_start) - round(raw["duration_s"] * 1e9))
@@ -188,6 +231,7 @@ def main():
                 cpu_ms = ((cpu_after["user_ticks"] + cpu_after["system_ticks"]) - (cpu_before["user_ticks"] + cpu_before["system_ticks"])) * 1000 / cpu_after["ticks_per_second"]
                 resource.update(cpu_total_ms=cpu_ms, cpu_ms_per_success=cpu_ms / raw["success"] if raw["success"] else None)
             summary = {"scene": name, "mode": mode, "source_commit": args.expected_source,
+                "plan": args.plan, "diagnostic_only": phase_required,
                 "pilot_only": True, "client": {key: value for key, value in raw.items() if key != "samples"},
                 "client_completion_success_rps": raw["throughput_success_rps"],
                 "client_plus_durable_drain_seconds": full_duration,
@@ -226,6 +270,9 @@ def main():
             if mode == "memory-queue":
                 assert telemetry["counterDeltas"]["accepted"] == telemetry["counterDeltas"]["durable"] == telemetry["counterDeltas"]["completed"]
                 assert telemetry["receiptAckLag"]["missedDurableTransitions"] == 0
+                assert telemetry["counterDeltas"]["accepted"] + telemetry["counterDeltas"]["fallbacks"] == raw["success"]
+            if phase_required:
+                fixture.save(name + "-phase-verification", verify_phase_metrics(telemetry))
             fixture.stop(fixture.gateway)
             cleanup = json.loads((fixture.out / "async-gateway-cleanup.json").read_text())
             fixture.save(name + "-gateway-cleanup", cleanup)
