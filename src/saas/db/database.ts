@@ -47,6 +47,20 @@ export const DEFAULT_SAAS_DATABASE_POOL_IDLE_TIMEOUT_MILLIS = 30_000;
 const MAX_POOL_UPPER_BOUND = 10_000;
 const ACQUISITION_TIMEOUT_UPPER_BOUND_MILLIS = 3_600_000;
 
+const ownedNativePools = new Set<{ readonly maximum: number; readonly applicationName: string }>();
+let ownedNativePoolBudget: { readonly maximum: number; readonly applicationName: string } | undefined;
+
+/** Private supervisor startup capability. No default-mode policy or per-query interception. */
+export function configureSaasNativePoolBudget(maximum: number, applicationName: string): void {
+  if (!Number.isSafeInteger(maximum) || maximum < 1 || !/^[a-zA-Z0-9:_-]{1,63}$/.test(applicationName) ||
+    ownedNativePoolBudget || ownedNativePools.size) throw new Error('BOUNDED_GATEWAY_NATIVE_POOL_BUDGET_CONFLICT');
+  ownedNativePoolBudget = Object.freeze({ maximum, applicationName });
+}
+
+export function ownedSaasNativePoolSnapshot(): readonly { readonly maximum: number; readonly applicationName: string }[] {
+  return [...ownedNativePools].map((entry) => Object.freeze({ ...entry }));
+}
+
 export interface SaasDatabasePoolSettings {
   readonly max: number;
   readonly idleTimeoutMillis: number;
@@ -239,9 +253,16 @@ class NodePostgresClient implements SaasDatabaseClient {
 
 class NodePostgresPool implements SaasDatabasePool {
   private readonly pool: Pool;
+  private readonly budgetEntry: { readonly maximum: number; readonly applicationName: string };
 
   constructor(config: PoolConfig) {
+    this.budgetEntry = Object.freeze({ maximum: config.max ?? 10, applicationName: config.application_name ?? '' });
+    if (ownedNativePoolBudget && (this.budgetEntry.applicationName !== ownedNativePoolBudget.applicationName ||
+      [...ownedNativePools].reduce((sum, entry) => sum + entry.maximum, this.budgetEntry.maximum) > ownedNativePoolBudget.maximum)) {
+      throw new Error('BOUNDED_GATEWAY_NATIVE_POOL_BUDGET_EXHAUSTED');
+    }
     this.pool = new Pool(config);
+    ownedNativePools.add(this.budgetEntry);
     this.pool.on('error', () => {
       // pg-pool already removed the failed idle client before emitting this event.
       // Keep the process alive; explicit operations still reject normally. Neither
@@ -296,6 +317,7 @@ class NodePostgresPool implements SaasDatabasePool {
 
   async end(): Promise<void> {
     await this.pool.end();
+    ownedNativePools.delete(this.budgetEntry);
   }
 }
 
@@ -313,6 +335,11 @@ function scopedExecutor(underlying: SqlExecutor, preparedStatements: 'off' | 'na
 
 export function createSaasDatabase(options: SaasDatabaseOptions): SaasDatabase {
   validateOptions(options);
+  if (ownedNativePoolBudget && options.pool) throw new Error('BOUNDED_GATEWAY_UNACCOUNTED_POOL_FORBIDDEN');
+  const applicationName = (options.env ?? process.env).MODEL_ROUTER_SAAS_DB_APPLICATION_NAME;
+  if (applicationName !== undefined && !/^[a-zA-Z0-9:_-]{1,63}$/.test(applicationName)) {
+    throw new Error('INVALID_DATABASE_APPLICATION_NAME');
+  }
   const preparedStatements = resolveSaasDatabasePreparedStatements(options, options.env ?? process.env);
   // Pool settings (and their environment overrides) are only resolved when
   // this call owns the pool; an injected pool keeps its caller's sizing.
@@ -320,6 +347,7 @@ export function createSaasDatabase(options: SaasDatabaseOptions): SaasDatabase {
     options.pool ??
     new NodePostgresPool({
       connectionString: options.connectionString,
+      ...(applicationName === undefined ? {} : { application_name: applicationName }),
       ...resolveSaasDatabasePoolSettings(options, options.env ?? process.env),
     });
   let closePromise: Promise<void> | undefined;

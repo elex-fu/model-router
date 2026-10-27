@@ -9340,6 +9340,11 @@ export const MANIFEST_CONTROL_PLANE_TABLE_SQL_ROWS: readonly SaasControlPlaneTab
 ];
 
 export const MANIFEST_GATEWAY_READ_TABLES: readonly SaasGatewayReadTableTsEntry[] = [
+  { table: 'saas_fast_gateway_deployments' },
+  { table: 'saas_fast_gateway_owner_slots' },
+  { table: 'saas_fast_gateway_owner_activations' },
+  { table: 'saas_fast_gateway_credit_budgets' },
+
   { table: 'saas_fast_receipt_liability_releases' },
   { table: 'saas_fast_gateway_resolutions' },
   { table: 'saas_fast_gateway_owners' },
@@ -9632,6 +9637,7 @@ export const MANIFEST_GATEWAY_READ_TABLES: readonly SaasGatewayReadTableTsEntry[
 ];
 
 export const MANIFEST_GATEWAY_READ_SQL_ROWS: readonly SaasGatewayReadSqlRow[] = [
+  { tables: ['saas_fast_gateway_deployments', 'saas_fast_gateway_owner_slots', 'saas_fast_gateway_owner_activations', 'saas_fast_gateway_credit_budgets'] },
   { tables: ['saas_fast_receipt_liability_releases'] },
   { tables: ['saas_fast_gateway_resolutions'] },
   { tables: ['saas_fast_gateway_owners', 'saas_fast_credit_allocations', 'saas_fast_gateway_intents', 'saas_fast_gateway_receipts', 'saas_fast_billing_jobs'] },
@@ -9824,6 +9830,12 @@ const REDIS_QUOTA_GATEWAY_COLUMNS = [
 ] as const;
 
 export const MANIFEST_GATEWAY_COLUMN_GROUPS: readonly SaasGatewayColumnTsGroup[] = [
+  { table: 'saas_fast_gateway_owner_activations', privilege: 'INSERT', columns: ['owner', 'epoch'], tsStyle: 'inline' },
+  { table: 'saas_fast_gateway_deployments', privilege: 'INSERT', columns: ['deployment_id', 'policy_digest', 'credit_cap_minor_units'], tsStyle: 'inline' },
+  { table: 'saas_fast_gateway_owner_slots', privilege: 'INSERT', columns: ['owner', 'deployment_id', 'slot', 'epoch', 'active', 'retired_epoch'], tsStyle: 'inline' },
+  { table: 'saas_fast_gateway_owner_slots', privilege: 'UPDATE', columns: ['epoch', 'active', 'retired_epoch'], tsStyle: 'inline' },
+  { table: 'saas_fast_gateway_credit_budgets', privilege: 'INSERT', columns: ['tenant_id', 'currency', 'deployment_id', 'credit_cap_minor_units', 'allocated_minor_units'], tsStyle: 'inline' },
+
   { table: 'saas_fast_receipt_liability_releases', privilege: 'INSERT', columns: ['intent_id', 'tenant_id', 'request_id', 'allocation_id', 'allocation_epoch', 'currency', 'released_minor_units', 'retained_minor_units', 'receipt_digest', 'protocol_version'], tsStyle: 'inline' },
   { table: 'saas_fast_gateway_owners', privilege: 'INSERT', columns: ['owner', 'epoch'], tsStyle: 'inline' },
   { table: 'saas_fast_credit_allocations', privilege: 'INSERT', columns: ['id', 'tenant_id', 'wallet_id', 'currency', 'owner', 'epoch', 'stripe', 'state', 'backing_minor_units', 'available_minor_units', 'created_at'], tsStyle: 'inline' },
@@ -10998,6 +11010,26 @@ export const MANIFEST_GATEWAY_COLUMN_GROUPS: readonly SaasGatewayColumnTsGroup[]
 ];
 
 export const MANIFEST_GATEWAY_COLUMN_SQL_ENTRIES: readonly SaasGatewayColumnSqlEntry[] = [
+  { table: 'saas_fast_gateway_owner_activations', column: 'owner', privilege: 'INSERT' },
+  { table: 'saas_fast_gateway_owner_activations', column: 'epoch', privilege: 'INSERT' },
+  { table: 'saas_fast_gateway_deployments', column: 'deployment_id', privilege: 'INSERT' },
+  { table: 'saas_fast_gateway_deployments', column: 'policy_digest', privilege: 'INSERT' },
+  { table: 'saas_fast_gateway_deployments', column: 'credit_cap_minor_units', privilege: 'INSERT' },
+  { table: 'saas_fast_gateway_owner_slots', column: 'owner', privilege: 'INSERT' },
+  { table: 'saas_fast_gateway_owner_slots', column: 'deployment_id', privilege: 'INSERT' },
+  { table: 'saas_fast_gateway_owner_slots', column: 'slot', privilege: 'INSERT' },
+  { table: 'saas_fast_gateway_owner_slots', column: 'epoch', privilege: 'INSERT' },
+  { table: 'saas_fast_gateway_owner_slots', column: 'active', privilege: 'INSERT' },
+  { table: 'saas_fast_gateway_owner_slots', column: 'retired_epoch', privilege: 'INSERT' },
+  { table: 'saas_fast_gateway_owner_slots', column: 'epoch', privilege: 'UPDATE' },
+  { table: 'saas_fast_gateway_owner_slots', column: 'active', privilege: 'UPDATE' },
+  { table: 'saas_fast_gateway_owner_slots', column: 'retired_epoch', privilege: 'UPDATE' },
+  { table: 'saas_fast_gateway_credit_budgets', column: 'tenant_id', privilege: 'INSERT' },
+  { table: 'saas_fast_gateway_credit_budgets', column: 'currency', privilege: 'INSERT' },
+  { table: 'saas_fast_gateway_credit_budgets', column: 'deployment_id', privilege: 'INSERT' },
+  { table: 'saas_fast_gateway_credit_budgets', column: 'credit_cap_minor_units', privilege: 'INSERT' },
+  { table: 'saas_fast_gateway_credit_budgets', column: 'allocated_minor_units', privilege: 'INSERT' },
+
   { table: 'saas_fast_gateway_owners', column: 'owner', privilege: 'INSERT' },
   { table: 'saas_fast_gateway_owners', column: 'epoch', privilege: 'INSERT' },
   { table: 'saas_fast_credit_allocations', column: 'id', privilege: 'INSERT' },

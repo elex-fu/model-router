@@ -429,6 +429,7 @@ import type { WebhookSigningSecretProtector } from '../saas/webhooks/signing-sec
 import { CustomerWebhookTenantPolicyService } from '../saas/webhooks/tenant-policy-service.js';
 import {
   createManagedSaasGatewayProductionComposition,
+  resolveManagedSaasFastGatewayConfiguration,
   type ManagedSaasGatewayComposition,
   type ManagedSaasGatewayProductionOptions,
 } from './managed-saas-gateway.js';
@@ -711,6 +712,16 @@ export interface ManagedSaasStartOptions {
   paymentHandler?: SaasPaymentHttpHandler;
   /** Injectable listener seam for deterministic bind and cleanup tests. */
   createListener?: (name: ListenerName, handler: RequestListener) => Server;
+  /** Trusted embedded boundary for the opt-in private two-worker transport; never configured by HTTP. */
+  privateGatewayBoundary?: {
+    readonly socketPath: string;
+    readonly maximumConnections: number;
+    accept(request: IncomingMessage, response: ServerResponse): boolean;
+    completed(request: IncomingMessage): void;
+  };
+  /** Runs after native schema/privilege gates and before any runtime/journal is constructed. */
+  onGatewayDatabaseReady?: (database: ManagedSaasDatabase) => Promise<void>;
+  boundedGatewayOwner?: import('../saas/gateway/fast/bounded-deployment-budget.js').BoundedOwnerActivation;
   /** SDK lifecycle seams; production defaults fit the systemd stop deadline. */
   shutdownGraceMs?: number;
   shutdownCleanupMs?: number;
@@ -2204,6 +2215,10 @@ export async function startManagedSaasServer(
         throw new Error('Managed SaaS PostgreSQL runtime privilege verification failed');
       }
     }
+    if (options.privateGatewayBoundary && deployment.workloadRole !== 'gateway') {
+      throw new Error('PRIVATE_GATEWAY_BOUNDARY_ROLE_FORBIDDEN');
+    }
+    if (deployment.workloadRole === 'gateway') await options.onGatewayDatabaseReady?.(database);
     if (options.customerWebhooks?.enabled) {
       try {
         await verifyCustomerWebhookSchema(database);
@@ -2397,6 +2412,11 @@ export async function startManagedSaasServer(
       gateway = createManagedSaasGatewayProductionComposition(database, {
         riskControl: { emailSender: riskControlEmailSender },
         ...runtimeGatewayOptions,
+        ...(options.boundedGatewayOwner ? {
+          boundedGatewayOwner: options.boundedGatewayOwner,
+          // The private supervisor, not the runtime module, owns these budget-bearing settings.
+          fastGateway: resolveManagedSaasFastGatewayConfiguration({}, environment),
+        } : {}),
         ...(requestDiagnostics ? { requestDiagnostics } : {}),
         ...(responsesHistoryDeployment ? { continuationHistoryResolver: responsesHistoryDeployment.resolver } : {}),
         ...(maxHttpInFlight === undefined ? {} : { maxHttpInFlight }),
@@ -3520,14 +3540,22 @@ export async function startManagedSaasServer(
       const handler = handlers[name];
       if (!handler) throw new Error(`Managed SaaS ${name} handler is not configured for this workload`);
       const listener = createListener(name, (request, response) => {
+        if (name === 'gateway' && options.privateGatewayBoundary && !options.privateGatewayBoundary.accept(request, response)) return;
         if (draining) {
           response.writeHead(503, { connection: 'close', 'content-type': 'text/plain' });
           response.end('Service unavailable');
+          options.privateGatewayBoundary?.completed(request);
           return;
         }
-        originalHandlers.track(handler(request, response));
+        const pending = handler(request, response);
+        originalHandlers.track(pending);
+        if (name === 'gateway' && options.privateGatewayBoundary) {
+          const completed = () => options.privateGatewayBoundary?.completed(request);
+          void pending.then(completed, completed);
+        }
       });
       listeners.set(name, listener);
+      if (name === 'gateway' && options.privateGatewayBoundary) listener.maxConnections = options.privateGatewayBoundary.maximumConnections;
       listener.on('connection', (socket: Socket) => {
         ownedSockets.add(socket);
         socket.once('close', () => ownedSockets.delete(socket));
@@ -3535,6 +3563,7 @@ export async function startManagedSaasServer(
       if (name === 'gateway' && gateway) {
         const gatewayComposition = gateway;
         listener.on('upgrade', (request, socket, head) => {
+          if (options.privateGatewayBoundary) { socket.destroy(); return; }
           if (draining) { socket.destroy(); return; }
           try {
             if (!gatewayComposition.handleUpgrade(request, socket, head)) socket.destroy();
@@ -3549,7 +3578,14 @@ export async function startManagedSaasServer(
       const listener = listeners.get(name);
       if (!listener) throw new Error(`Managed SaaS ${name} listener was not created`);
       const listenerConfig = deploymentListener(deployment, name);
-      await bindListener(listener, listenerConfig);
+      if (name === 'gateway' && options.privateGatewayBoundary) {
+        await new Promise<void>((resolve, reject) => {
+          listener.once('error', reject);
+          listener.listen({ path: options.privateGatewayBoundary!.socketPath,
+            backlog: Math.min(options.privateGatewayBoundary!.maximumConnections, 128), exclusive: true },
+          () => { listener.off('error', reject); resolve(); });
+        });
+      } else await bindListener(listener, listenerConfig);
       console.log(`model-router managed ${name} listening on ${listenerAddress(listenerConfig)}`);
     }
 

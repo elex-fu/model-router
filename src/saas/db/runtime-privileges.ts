@@ -4536,6 +4536,10 @@ SELECT
  * new columns remain inaccessible until the template is reconciled again.
  */
 export const SAAS_GATEWAY_RUNTIME_READ_TABLES = [
+  'saas_fast_gateway_deployments',
+  'saas_fast_gateway_owner_slots',
+  'saas_fast_gateway_owner_activations',
+  'saas_fast_gateway_credit_budgets',
   'saas_fast_receipt_liability_releases',
   'saas_fast_gateway_resolutions',
   'saas_fast_gateway_owners',
@@ -4663,6 +4667,25 @@ export type SaasGatewayColumnGrant = readonly [
 
 /** Column DML used by gateway request preparation, compensation, evidence and settlement. */
 export const SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS: readonly SaasGatewayColumnGrant[] = [
+  ['saas_fast_gateway_owner_activations', 'owner', 'INSERT'],
+  ['saas_fast_gateway_owner_activations', 'epoch', 'INSERT'],
+  ['saas_fast_gateway_deployments', 'deployment_id', 'INSERT'],
+  ['saas_fast_gateway_deployments', 'policy_digest', 'INSERT'],
+  ['saas_fast_gateway_deployments', 'credit_cap_minor_units', 'INSERT'],
+  ['saas_fast_gateway_owner_slots', 'owner', 'INSERT'],
+  ['saas_fast_gateway_owner_slots', 'deployment_id', 'INSERT'],
+  ['saas_fast_gateway_owner_slots', 'slot', 'INSERT'],
+  ['saas_fast_gateway_owner_slots', 'epoch', 'INSERT'],
+  ['saas_fast_gateway_owner_slots', 'active', 'INSERT'],
+  ['saas_fast_gateway_owner_slots', 'retired_epoch', 'INSERT'],
+  ['saas_fast_gateway_owner_slots', 'epoch', 'UPDATE'],
+  ['saas_fast_gateway_owner_slots', 'active', 'UPDATE'],
+  ['saas_fast_gateway_owner_slots', 'retired_epoch', 'UPDATE'],
+  ['saas_fast_gateway_credit_budgets', 'tenant_id', 'INSERT'],
+  ['saas_fast_gateway_credit_budgets', 'currency', 'INSERT'],
+  ['saas_fast_gateway_credit_budgets', 'deployment_id', 'INSERT'],
+  ['saas_fast_gateway_credit_budgets', 'credit_cap_minor_units', 'INSERT'],
+  ['saas_fast_gateway_credit_budgets', 'allocated_minor_units', 'INSERT'],
   ['saas_fast_receipt_liability_releases', 'intent_id', 'INSERT'],
   ['saas_fast_receipt_liability_releases', 'tenant_id', 'INSERT'],
   ['saas_fast_receipt_liability_releases', 'request_id', 'INSERT'],

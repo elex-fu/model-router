@@ -8,18 +8,18 @@ import { CUSTOMER_WEBHOOK_MAINTENANCE_PAYLOAD_REWRITE_SAAS_MIGRATION } from '../
 const migration = CUSTOMER_WEBHOOK_MAINTENANCE_PAYLOAD_REWRITE_SAAS_MIGRATION;
 const commands = migration.sql.replace(/\/\*[\s\S]*?\*\//g, '').replace(/--[^\n]*/g, '');
 
-test('096 registers after 095 with the documented gaps; 146 is the current head', () => {
+test('096 registers after 095 with the documented gaps; 147 is the current head', () => {
   assert.equal(migration.version, 96);
   assert.equal(migration.name, 'customer_webhook_maintenance_payload_rewrite');
   assert.deepEqual(Object.keys(migration).sort(), ['name', 'sql', 'version']);
   const registered = SAAS_MIGRATIONS.map(({ version }) => version);
-  assert.deepEqual(registered.slice(-6), [141, 142, 143, 144, 145, 146]);
+  assert.deepEqual(registered.slice(-7), [141, 142, 143, 144, 145, 146, 147]);
   for (let skipped = 64; skipped <= 79; skipped += 1) {
     assert.equal(registered.includes(skipped), false);
   }
   // Later forwards retain their order through 143 journal, 144 audited
-  // resolution and the current 146 receipt-liability head.
-  assert.equal(registered.at(-1), 146);
+  // resolution and the current 147 bounded-budget head.
+  assert.equal(registered.at(-1), 147);
   assert.equal(SAAS_MIGRATIONS[76], migration);
 });
 

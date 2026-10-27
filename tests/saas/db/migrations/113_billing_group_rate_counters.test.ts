@@ -12,8 +12,8 @@ test('113 remains registered after the 112 snapshot freeze', () => {
   assert.equal(migration.name, 'billing_group_rate_counters');
   assert.deepEqual(Object.keys(migration).sort(), ['name', 'sql', 'version']);
   const registered = SAAS_MIGRATIONS.map(({ version }) => version);
-  assert.deepEqual(registered.slice(-6), [141, 142, 143, 144, 145, 146]);
-  assert.equal(registered.at(-1), 146);
+  assert.deepEqual(registered.slice(-7), [141, 142, 143, 144, 145, 146, 147]);
+  assert.equal(registered.at(-1), 147);
   assert.equal(registered.includes(migration.version), true);
 });
 

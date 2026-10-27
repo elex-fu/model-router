@@ -4,6 +4,11 @@ import { MAX_MINOR_UNITS, normalizeCurrency, parseMinorUnits } from '../../billi
 import { saasAdvisoryKey, WALLET_FENCE_SQL } from '../../db/advisory-lock-keys.js';
 import type { SaasDatabase, SqlExecutor } from '../../db/types.js';
 import { calculateConservativePriceHold, INPUT_BILLING_BUCKETS } from '../hold-calculator.js';
+import {
+  type BoundedOwnerActivation,
+  ensureBoundedCreditBudget,
+  verifyBoundedOwner,
+} from './bounded-deployment-budget.js';
 import { type FastCreditWaitResult, waitForFastCreditDelay, waitForFastCreditWork } from './credit-wait.js';
 import { getPreparedFastReceipt } from './prepared-receipt.js';
 import {
@@ -97,6 +102,8 @@ export interface FastGatewayJournal {
 }
 export interface FastJournalOptions {
   readonly allocationOwner: string;
+  /** Explicitly activated two-worker slot; omitted preserves legacy single-process behavior. */
+  readonly boundedDeployment?: BoundedOwnerActivation;
   /** Present: fixed hard escrow cap. Absent: auto 2*M*trusted concurrency, wallet-backed. */
   readonly allocationTrancheMinorUnits?: string;
   /** Total tranche is shared by these stripes, never multiplied. Default 8. */
@@ -255,7 +262,8 @@ interface FastBatchProgress {
 }
 
 export class PostgresFastGatewayJournal implements FastGatewayJournal {
-  private readonly epoch = randomUUID();
+  private readonly epoch: string;
+  private readonly boundedDeployment?: BoundedOwnerActivation;
   private readonly tranche: bigint | null;
   private readonly stripes: number;
   private readonly observedMaximum = new Map<
@@ -288,20 +296,54 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
     private readonly options: FastJournalOptions,
   ) {
     if (!options.allocationOwner.trim()) throw new Error('FAST_JOURNAL_INVALID_OWNER');
+    if (options.boundedDeployment && options.boundedDeployment.owner !== options.allocationOwner)
+      throw new Error('BOUNDED_DEPLOYMENT_OWNER_CONFLICT');
+    this.boundedDeployment = options.boundedDeployment ? Object.freeze({ ...options.boundedDeployment }) : undefined;
+    this.epoch = this.boundedDeployment?.epoch ?? randomUUID();
     this.tranche =
       options.allocationTrancheMinorUnits === undefined ? null : parseMinorUnits(options.allocationTrancheMinorUnits);
     this.stripes = options.allocationStripes ?? 8;
     if (!Number.isSafeInteger(this.stripes) || this.stripes < 1 || this.stripes > 8)
       throw new Error('FAST_JOURNAL_INVALID_STRIPES');
-    this.ready = database
-      .query(
-        `INSERT INTO saas_fast_gateway_owners(owner, epoch) VALUES ($1, $2)
+    this.ready = this.boundedDeployment
+      ? this.prepareBoundedOwner(this.boundedDeployment)
+      : database
+          .query(
+            `INSERT INTO saas_fast_gateway_owners(owner, epoch) VALUES ($1, $2)
        ON CONFLICT (owner) DO UPDATE SET epoch = EXCLUDED.epoch`,
-        [options.allocationOwner, this.epoch],
-      )
-      .then(() => undefined);
+            [options.allocationOwner, this.epoch],
+          )
+          .then(() => undefined);
     // A failed startup cannot become an unhandled rejection before the first call.
     void this.ready.catch(() => this.reportBackgroundError('FAST_JOURNAL_STARTUP_FAILED'));
+  }
+
+  /** Startup only, after externally proven old-process closure and explicit activation.
+   * Retire unused old-epoch funds even if this slot receives no subsequent traffic.
+   * Outstanding intents/receipts retain their original backing and identity. */
+  private async prepareBoundedOwner(activation: BoundedOwnerActivation): Promise<void> {
+    await verifyBoundedOwner(this.database, activation);
+    const wallets = await this.database.query<{ tenant_id: string; currency: string }>(
+      "SELECT DISTINCT tenant_id,currency FROM saas_fast_credit_allocations WHERE owner=$1 AND epoch<>$2 AND state='active' ORDER BY tenant_id,currency",
+      [activation.owner, activation.epoch],
+    );
+    for (const wallet of wallets.rows) {
+      await this.database.transaction(async (tx) => {
+        const owner = await tx.query<{ epoch: string }>(
+          'SELECT epoch FROM saas_fast_gateway_owners WHERE owner=$1 FOR SHARE',
+          [activation.owner],
+        );
+        if (owner.rows[0]?.epoch !== activation.epoch) throw new Error('FAST_JOURNAL_FENCED_OWNER');
+        await tx.query(WALLET_FENCE_SQL, [saasAdvisoryKey.walletFence(wallet.tenant_id, wallet.currency)]);
+        await ensureBoundedCreditBudget(tx, activation, wallet.tenant_id, wallet.currency);
+        await tx.query(
+          `UPDATE saas_fast_credit_allocations SET backing_minor_units=backing_minor_units-available_minor_units,
+           available_minor_units=0,state='retired'
+           WHERE tenant_id=$1 AND currency=$2 AND owner=$3 AND epoch<>$4 AND state='active'`,
+          [wallet.tenant_id, wallet.currency, activation.owner, activation.epoch],
+        );
+      });
+    }
   }
 
   async checkReady(): Promise<void> {
@@ -829,6 +871,7 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
       );
       if (owner.rows[0]?.epoch !== this.epoch) throw new Error('FAST_JOURNAL_FENCED_OWNER');
       await tx.query(WALLET_FENCE_SQL, [saasAdvisoryKey.walletFence(tenantId, currency)]);
+      if (this.boundedDeployment) await ensureBoundedCreditBudget(tx, this.boundedDeployment, tenantId, currency);
       // Explicit generation takeover, NOT time expiry. Unresolved money stays
       // backed; stale-generation CAS fails once these rows are retired.
       await tx.query(
@@ -860,7 +903,11 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
       preparedTarget = this.tranche ?? this.observedMaximum.get(`${tenantId}:${currency}`)?.target ?? 0n;
       const needed = preparedTarget - BigInt(wallet.own_backing);
       const free = BigInt(wallet.available);
-      const additional = needed > 0n && free > 0n ? (free < needed ? free : needed) : 0n;
+      let additional = needed > 0n && free > 0n ? (free < needed ? free : needed) : 0n;
+      if (this.boundedDeployment) {
+        const globalRemaining = await ensureBoundedCreditBudget(tx, this.boundedDeployment, tenantId, currency);
+        if (additional > globalRemaining) additional = globalRemaining;
+      }
       const available = allocations.rows.reduce((sum, row) => sum + BigInt(row.available_minor_units), additional);
       if (available === 0n) return;
       const maximum = this.observedMaximum.get(`${tenantId}:${currency}`)?.maximum ?? 0n;

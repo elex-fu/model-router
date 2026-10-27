@@ -9,7 +9,8 @@ const nativeScenarioMatrix = `\${{ matrix.native-scenario }}`;
 const journal = 'tests/saas/gateway/fast/journal.postgres.integration.test.ts';
 const upgrade = 'tests/saas/gateway/fast/populated-upgrade.postgres.integration.test.ts';
 const resolution = 'tests/saas/gateway/fast/resolution.postgres.integration.test.ts';
-const journalCommand = `node --import tsx --test --test-concurrency=1 ${journal} ${resolution} ${upgrade}`;
+const boundedBudget = 'tests/saas/gateway/fast/bounded-deployment-budget.postgres.integration.test.ts';
+const journalCommand = `node --import tsx --test --test-concurrency=1 ${journal} ${resolution} ${upgrade} ${boundedBudget}`;
 const redis = 'tests/saas/gateway/fast/redis-admission.local.integration.test.ts';
 const redisTransport = 'tests/saas/gateway/fast/redis-script-transport.test.ts';
 const redisCommand = `node --import tsx --test ${redis} ${redisTransport}`;
@@ -25,6 +26,13 @@ const receiptUnits = [
   'tests/saas/gateway/fast/failure-diagnostic.test.ts',
   'tests/server/managed-saas-gateway-composition.test.ts',
   'tests/server/managed-saas-shutdown.test.ts',
+  'tests/saas/gateway/fast/bounded-deployment-budget.test.ts',
+  'tests/saas/db/migrations/147_bounded_fast_gateway_budget.test.ts',
+  'tests/server/bounded-gateway-budgets.test.ts',
+  'tests/server/bounded-gateway-boundary.test.ts',
+  'tests/server/bounded-gateway-state.test.ts',
+  'tests/server/bounded-gateway-dispatcher.local.integration.test.ts',
+  'tests/server/bounded-gateway-supervisor.local.integration.test.ts',
 ];
 const receiptUnitCommand = `node --import tsx --test ${receiptUnits.join(' ')}`;
 const provision = 'bash tests/saas/db/managed-postgres-runtime-privileges.integration.sh';
@@ -34,6 +42,8 @@ const strictRoots = [
   'configuration.test.ts',
   'readiness.test.ts',
   'journal.test.ts',
+  'bounded-deployment-budget.test.ts',
+  'bounded-deployment-budget.postgres.integration.test.ts',
   'journal.postgres.integration.test.ts',
   'populated-upgrade.postgres.integration.test.ts',
   'journal-crash-child.ts',
@@ -48,10 +58,19 @@ const strictRoots = [
   'ticket-transport.test.ts',
   'resolution.postgres.integration.test.ts',
   'resolution-http.test.ts',
+  'native-http-bounded-fixture.ts',
   'native-http-runtime-fixture.ts',
   'native-http-seed-fixture.ts',
   'native-http.postgres.integration.test.ts',
 ].map((name) => `tests/saas/gateway/fast/${name}`);
+strictRoots.push(
+  'tests/saas/db/migrations/147_bounded_fast_gateway_budget.test.ts',
+  'tests/server/bounded-gateway-budgets.test.ts',
+  'tests/server/bounded-gateway-boundary.test.ts',
+  'tests/server/bounded-gateway-state.test.ts',
+  'tests/server/bounded-gateway-dispatcher.local.integration.test.ts',
+  'tests/server/bounded-gateway-supervisor.local.integration.test.ts',
+);
 const roleEnv = {
   NODE_ENV: 'test',
   MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED: '1',
@@ -82,7 +101,7 @@ function validate(source: string): void {
   assert.match(executable, /postgres-version: \["15", "18"\]/);
   assert.match(
     executable,
-    /native-scenario: \["builtin-default", "fixed4096-control", "builtin-explicit1m-pressure"\]/,
+    /native-scenario: \["builtin-default", "fixed4096-control", "builtin-explicit1m-pressure", "bounded-two"\]/,
   );
   assert.match(executable, /image: postgres:\$\{\{ matrix\.postgres-version \}\}/);
   assert.match(executable, /image: redis:7\.4-alpine/);
@@ -94,11 +113,12 @@ function validate(source: string): void {
     /\b(?:if|continue-on-error|needs|paths|paths-ignore):|\|\|\s*true|upload-artifact|\bFLUSHALL\b|pg_stat_statements|run-current-r9|managed-postgres-commercial-gateway/,
   );
   const actual = steps(source);
-  assert.equal(actual.length, 10, 'no hidden bootstrap, preseed, or secret-artifact steps');
+  assert.equal(actual.length, 11, 'no hidden bootstrap, preseed, or secret-artifact steps');
   assert.equal(actual[0]?.block.split('\n')[0], 'uses: actions/checkout@v4');
   assert.equal(actual[2]?.run, 'npm ci');
-  assert.equal(actual[3]?.run, 'node --import tsx --test tests/ci/fast-gateway-required-gates.test.ts');
-  const strict = actual[4];
+  assert.equal(actual[3]?.run, 'npm run build:server');
+  assert.equal(actual[4]?.run, 'node --import tsx --test tests/ci/fast-gateway-required-gates.test.ts');
+  const strict = actual[5];
   assert.ok(strict);
   const command = strict.block
     .split('        run: >-\n')[1]
@@ -117,16 +137,16 @@ function validate(source: string): void {
       'tests/ci/fast-gateway-required-gates.test.ts',
     ].join(' '),
   );
-  assert.equal(actual[5]?.run, provision);
-  assert.equal(actual[9]?.run, receiptUnitCommand, 'queue and lifecycle assertions must execute, not just compile');
+  assert.equal(actual[6]?.run, provision);
+  assert.equal(actual[10]?.run, receiptUnitCommand, 'queue and lifecycle assertions must execute, not just compile');
   for (const [index, command, env] of [
     [
-      6,
+      7,
       journalCommand,
       { ...roleEnv, SAAS_TEST_DATABASE_ADMIN_URL: 'postgresql://postgres@postgres:5432/model_router_saas_ci' },
     ],
     [
-      7,
+      8,
       redisCommand,
       {
         NODE_ENV: 'test',
@@ -135,13 +155,14 @@ function validate(source: string): void {
       },
     ],
     [
-      8,
+      9,
       `node --import tsx --test ${native}`,
       {
         ...roleEnv,
         MODEL_ROUTER_NATIVE_FAST_HTTP_REQUIRED: '1',
         MODEL_ROUTER_NATIVE_FAST_HTTP_SCENARIO: nativeScenarioMatrix,
         MODEL_ROUTER_NATIVE_FAST_HTTP_REDIS_URL: 'redis://redis:6379',
+        SAAS_TEST_DATABASE_ADMIN_URL: 'postgresql://postgres@postgres:5432/model_router_saas_ci',
       },
     ],
   ] as const) {
@@ -153,10 +174,11 @@ function validate(source: string): void {
 test('native fast PG15/18 and Redis gates are unconditional, isolated and strictly typed', () => validate(workflow));
 test('required fast wiring rejects disabled roots, altered roles, missing tools and swallowed failures', () => {
   for (const [original, replacement] of [
+    ['run: npm run build:server', 'run: echo skipped build'],
     ['postgres-version: ["15", "18"]', 'postgres-version: ["18"]'],
     ['image: redis:7.4-alpine', 'image: redis:latest'],
     [
-      'native-scenario: ["builtin-default", "fixed4096-control", "builtin-explicit1m-pressure"]',
+      'native-scenario: ["builtin-default", "fixed4096-control", "builtin-explicit1m-pressure", "bounded-two"]',
       'native-scenario: ["fixed4096-control"]',
     ],
     [
@@ -173,6 +195,8 @@ test('required fast wiring rejects disabled roots, altered roles, missing tools 
     [`          ${seed}\n`, ''],
     [`          ${resolution}\n`, ''],
     [`          ${upgrade}\n`, ''],
+    [`          ${boundedBudget}\n`, ''],
+    [journalCommand, `node --import tsx --test --test-concurrency=1 ${journal} ${resolution} ${upgrade}`],
     [journalCommand, `node --import tsx --test --test-concurrency=1 ${journal} ${resolution}`],
     ['          SAAS_TEST_DATABASE_ADMIN_URL: postgresql://postgres@postgres:5432/model_router_saas_ci\n', ''],
     [journalCommand, `node --import tsx --test ${journal}`],
@@ -248,7 +272,7 @@ test('default native gate uses actual built-in M and omitted automatic/pool sett
 
 test('default native gate requires actual TPM reconciliation without erasing RPM or changing limits', () => {
   const source = read(native);
-  const defaultDrain = source.slice(source.lastIndexOf("if (scenario === 'builtin-default')"));
+  const defaultDrain = source.slice(source.lastIndexOf("if (scenario === 'builtin-default' || bounded)"));
   assert.match(source, /rpm: '600000', tpm: '600000000', concurrency: '64'/);
   assert.match(defaultDrain, /readRateLimits\(\),\s*initialRateLimits/);
   assert.match(defaultDrain, /liveSlots, 0/);
@@ -313,4 +337,49 @@ test('required populated145 upgrade gate uses real migration history and restric
   assert.match(source, /unknown outcome keeps its full M/);
   assert.doesNotMatch(source, /\bt(?:est)?\.(?:skip|todo)\s*\(/);
   assert.doesNotMatch(source, /INSERT INTO saas_schema_migrations|DISABLE TRIGGER|session_replication_role/);
+});
+
+test('required bounded budget gate retains real restricted-role restart, legacy liability and counter proofs', () => {
+  validate(workflow);
+  const source = read(boundedBudget);
+  assert.match(source, /process\.env\[REQUIRED_FLAG\] === '1' \|\| anyRoleConfigured/);
+  assert.match(source, /const urls = roleUrls\(\)/);
+  for (const proof of [
+    'initial global policy counts unrelated legacy retired liabilities, never adopts their identity',
+    'restart cannot refill over old uncertainty; settlement reopens only proved headroom',
+    'old writers cannot bypass the cap, direct counter mutation is forbidden and rebalance is atomic',
+    'over-cap opt-in and wrong policy roll back; active epochs cannot be silently overwritten or reused',
+  ])
+    assert.ok(source.includes(proof), `missing bounded native proof: ${proof}`);
+  assert.doesNotMatch(source, /\bt(?:est)?\.(?:skip|todo)\s*\(/);
+  assert.doesNotMatch(source, /INSERT INTO saas_schema_migrations|DISABLE TRIGGER|session_replication_role/);
+});
+
+test('bounded native gate uses compiled CLI, native pools, keepalive distribution, rolling and explicit crash recovery', () => {
+  validate(workflow);
+  const source = read(native).replace(/\s+/g, ' ');
+  const fixture = read('tests/saas/gateway/fast/native-http-bounded-fixture.ts').replace(/\s+/g, ' ');
+  assert.match(source, /scenario === 'bounded-two'/);
+  assert.match(source, /NativeBoundedGatewayFixture.create/);
+  assert.match(source, /clientSockets.size,\s*1/);
+  assert.match(source, /owners.rows\[0\]\?\.owners, 2/);
+  assert.match(source, /await boundedFixture.roll\(\)/);
+  assert.match(source, /await observeBoundedUsage\(round \+ 1\)/);
+  assert.match(source, /await boundedFixture.stopGracefully\(\)/);
+  assert.match(source, /stopped.backing, '0'/);
+  assert.match(source, /crashedGeneration = boundedFixture.killOwner/);
+  assert.match(source, /await boundedFixture.recover\(crashedGeneration\)/);
+  assert.match(fixture, /resolve\('dist\/cli\/index.js'\)/);
+  assert.match(fixture, /'saas:bounded-gateway'/);
+  assert.match(fixture, /fixture.environment.NODE_ENV = 'production'/);
+  assert.match(fixture, /MODEL_ROUTER_SAAS_SOFTWARE_KMS_ALLOW_PILOT = 'true'/);
+  assert.match(fixture, /'recover' : 'start'/);
+  assert.match(fixture, /'--expected-generation'/);
+  assert.match(fixture, /ALTER ROLE model_router_saas_gateway CONNECTION LIMIT 16/);
+  assert.match(fixture, /adminUrl.host, target.host/);
+  assert.match(fixture, /delete fixture.environment.MODEL_ROUTER_FAST_REDIS_DRAINED/);
+  assert.match(fixture, /old.rows\[0\]\?\.remaining, 0/);
+  assert.match(fixture, /row.allocated, row.backing/);
+  assert.match(fixture, /live.length <= 2/);
+  assert.doesNotMatch(fixture, /--import|--require|drained: true|execArgv:/);
 });

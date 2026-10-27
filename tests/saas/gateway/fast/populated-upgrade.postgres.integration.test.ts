@@ -365,15 +365,15 @@ test('populated schema145 upgrades through the real migrator without rewriting m
   assert.equal(unknownJob.state, 'blocked');
   assert.equal(await job(missing.intent.id), undefined);
 
-  await runSaasMigrations(pool); // Actual checksum/advisory-lock/transactional runner appends146.
+  await runSaasMigrations(pool); // Actual checksum/advisory-lock/transactional runner appends146 and147.
   await verifySaasMigrations(pool);
   const afterHistory = await history();
   assert.deepEqual(
     afterHistory.filter(({ version }) => version <= 145),
     beforeHistory,
   );
-  assert.equal(afterHistory.length, 127);
-  assert.equal(afterHistory.at(-1)?.version, 146);
+  assert.equal(afterHistory.length, 128);
+  assert.equal(afterHistory.at(-1)?.version, 147);
   assert.deepEqual(await dataSnapshot(), beforeData, 'upgrade changes no existing business row');
   assert.equal((await migrator.query('SELECT * FROM saas_fast_receipt_liability_releases')).rowCount, 0);
   await runSaasMigrations(pool); // Re-running the real migration path is a no-op.

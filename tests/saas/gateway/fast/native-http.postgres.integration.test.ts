@@ -14,6 +14,7 @@ import { saasAdvisoryKey, WALLET_FENCE_SQL } from '../../../../src/saas/db/advis
 import { createSaasDatabase } from '../../../../src/saas/db/index.js';
 import type { SqlExecutor } from '../../../../src/saas/db/types.js';
 import { anyRoleConfigured, roleUrls } from '../../metering/normal-success-postgres-fixture.js';
+import { NativeBoundedGatewayFixture } from './native-http-bounded-fixture.js';
 import type { NativeFastHttpConfig } from './native-http-runtime-fixture.js';
 import { seedNativeFastHttpInventory } from './native-http-seed-fixture.js';
 
@@ -22,9 +23,10 @@ const redisUrl = process.env.MODEL_ROUTER_NATIVE_FAST_HTTP_REDIS_URL;
 const offline = process.env[REQUIRED_FLAG] !== '1' && !anyRoleConfigured && !redisUrl;
 const scenario = process.env.MODEL_ROUTER_NATIVE_FAST_HTTP_SCENARIO ?? 'builtin-default';
 assert.ok(
-  ['builtin-default', 'fixed4096-control', 'builtin-explicit1m-pressure'].includes(scenario),
+  ['builtin-default', 'fixed4096-control', 'builtin-explicit1m-pressure', 'bounded-two'].includes(scenario),
   'known required native scenario',
 );
+const bounded = scenario === 'bounded-two';
 const pressure = scenario === 'builtin-explicit1m-pressure';
 const fixedControl = scenario === 'fixed4096-control';
 const expected = pressure
@@ -72,7 +74,7 @@ async function stop(child: ChildProcess): Promise<void> {
 // The actual source CLI builds all native fast components from opt-in env settings.
 test(`required native fast HTTP ${scenario}: first funded send and exact durable financial drain`, {
   skip: offline ? 'set MODEL_ROUTER_NATIVE_FAST_HTTP_REQUIRED=1 and disposable PostgreSQL/Redis URLs' : false,
-  timeout: 120_000,
+  timeout: bounded ? 360_000 : 120_000,
 }, async (t) => {
   const urls = roleUrls();
   const redis = createClient({ url: checkedRedisUrl(), socket: { reconnectStrategy: false } });
@@ -145,7 +147,7 @@ test(`required native fast HTTP ${scenario}: first funded send and exact durable
         [seeded.tenantId, seeded.projectId, seeded.keyId],
       )
     ).rows;
-  const initialRateLimits = scenario === 'builtin-default' ? await readRateLimits() : undefined;
+  const initialRateLimits = scenario === 'builtin-default' || bounded ? await readRateLimits() : undefined;
   if (initialRateLimits) {
     assert.deepEqual(
       initialRateLimits,
@@ -286,13 +288,25 @@ test(`required native fast HTTP ${scenario}: first funded send and exact durable
       assert.equal(Object.hasOwn(childEnvironment, name), false, `${name} must be omitted, not set to a tuned value`);
     }
   }
-  const child = spawn(process.execPath, ['--import', 'tsx', 'src/cli/index.ts', 'start', '--role', 'gateway'], {
-    cwd: process.cwd(),
-    env: childEnvironment,
-    // Never publish gateway logs, config, private keys, or environment as CI artifacts.
-    stdio: 'ignore',
-  });
-  t.after(() => stop(child));
+  // The isolated inspector must not consume any of the declared PG16 business budget.
+  if (bounded) await inspector.close();
+  const boundedFixture = bounded
+    ? await NativeBoundedGatewayFixture.create(childEnvironment, migrator, automaticTarget.toString())
+    : undefined;
+  if (boundedFixture) {
+    t.after(() => boundedFixture.close());
+    boundedFixture.start();
+    await boundedFixture.ready();
+  }
+  const child =
+    boundedFixture?.child ??
+    spawn(process.execPath, ['--import', 'tsx', 'src/cli/index.ts', 'start', '--role', 'gateway'], {
+      cwd: process.cwd(),
+      env: childEnvironment,
+      // Never publish gateway logs, config, private keys, or environment as CI artifacts.
+      stdio: 'ignore',
+    });
+  if (!boundedFixture) t.after(() => stop(child));
   let childError = false;
   child.once('error', () => {
     childError = true;
@@ -314,19 +328,23 @@ test(`required native fast HTTP ${scenario}: first funded send and exact durable
   }
   assert.ok(ready, 'actual native gateway must become ready');
 
-  const request = (stream: boolean) =>
-    fetch(`${origin}/v1/chat/completions`, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${seeded.key}`, 'content-type': 'application/json' },
-      body: JSON.stringify({
-        model: route.publicModel,
-        messages: [{ role: 'user', content: 'Hello' }],
-        max_tokens: 64,
-        stream,
-        ...(stream ? { stream_options: { include_usage: true } } : {}),
-      }),
-      signal: AbortSignal.timeout(10_000),
+  const request = (stream: boolean) => {
+    const body = JSON.stringify({
+      model: route.publicModel,
+      messages: [{ role: 'user', content: 'Hello' }],
+      max_tokens: 64,
+      stream,
+      ...(stream ? { stream_options: { include_usage: true } } : {}),
     });
+    return boundedFixture
+      ? boundedFixture.request(`${origin}/v1/chat/completions`, `Bearer ${seeded.key}`, body)
+      : fetch(`${origin}/v1/chat/completions`, {
+          method: 'POST',
+          headers: { authorization: `Bearer ${seeded.key}`, 'content-type': 'application/json' },
+          body,
+          signal: AbortSignal.timeout(10_000),
+        });
+  };
   const assertSuccess = async (response: Response, stream: boolean) => {
     const body = await response.text();
     assert.equal(response.status, 200, 'FIRST funded attempt and every serial request must succeed; no cold 429 retry');
@@ -404,7 +422,50 @@ test(`required native fast HTTP ${scenario}: first funded send and exact durable
     assert.equal(facts.blocked, '0');
     return facts;
   };
-  for (const stream of pressure ? [false, true] : [false, true, false, true]) {
+  const observeBoundedUsage = async (count: number) => {
+    const deadline = Date.now() + 5000;
+    let settled = false;
+    do {
+      const keys = await redis.keys(`${prefix}:lease:*`);
+      if (keys.length === count) {
+        const records = await redis.mGet(keys);
+        settled = records.every((raw) => {
+          if (!raw) return false;
+          const lease = JSON.parse(raw) as {
+            state: string;
+            usageState: string;
+            actualTokenUnits: number;
+            tokenUnits: number;
+          };
+          assert.equal(lease.tokenUnits, 262208, 'frozen reservation remains unchanged');
+          return lease.state === 'released' && lease.usageState === 'settled' && lease.actualTokenUnits === 15;
+        });
+      }
+      if (settled) break;
+      await delay(10);
+    } while (Date.now() < deadline);
+    assert.ok(settled, 'observe actual Redis TPM feedback15 ACK before killing the receipted worker');
+  };
+  const rounds = pressure ? [false, true] : [false, true, false, true];
+  for (const [round, stream] of rounds.entries()) {
+    if (boundedFixture && round === 2) {
+      assert.equal(
+        boundedFixture.clientSockets.size,
+        1,
+        'one HTTP keepalive socket distributes requests across both business workers',
+      );
+      const owners = await migrator.query<{ owners: number }>(
+        'SELECT count(DISTINCT a.owner)::integer AS owners FROM saas_fast_gateway_intents i JOIN saas_fast_credit_allocations a ON a.id=i.allocation_id WHERE i.tenant_id=$1',
+        [seeded.tenantId],
+      );
+      assert.equal(
+        owners.rows[0]?.owners,
+        2,
+        'request-aware dispatch uses both native owners despite a single client connection',
+      );
+      await boundedFixture.roll();
+    }
+    let crashedGeneration: string | undefined;
     let release = () => {};
     let entered = () => {};
     const reachedUpstream = new Promise<void>((resolve) => {
@@ -476,7 +537,16 @@ test(`required native fast HTTP ${scenario}: first funded send and exact durable
         assert.ok(BigInt(before.held) >= BigInt(maximum), 'unreceipted native intent retains the unchanged real M');
         release();
         await assertSuccess(await pending, stream);
-        const after = await readLiability(tx);
+        let after = await readLiability(tx);
+        if (boundedFixture) {
+          // HTTP completion may precede the bounded detached queue's durable ACK.
+          // Keep the wallet fence held while observing actual receipt persistence.
+          const receiptDeadline = Date.now() + 5000;
+          while (after.unreceipted !== '0' && Date.now() < receiptDeadline) {
+            await delay(10);
+            after = await readLiability(tx);
+          }
+        }
         assert.equal(after.unreceipted, '0');
         assert.equal(after.backing, before.backing, 'receipt release never changes wallet backing');
         assert.equal(after.wallet, before.wallet, 'receipt success does not prematurely debit the wallet');
@@ -508,9 +578,27 @@ test(`required native fast HTTP ${scenario}: first funded send and exact durable
         t.diagnostic(
           `${stream ? 'SSE' : 'JSON'} pre-ledger: M=${maximum} C=35 released=${released} B/wallet/postings unchanged; every stripe conserved`,
         );
+        if (boundedFixture) await observeBoundedUsage(round + 1);
+        if (boundedFixture && round === 2) {
+          const owner = await tx.query<{ owner: string }>(
+            `SELECT a.owner FROM saas_fast_gateway_intents i JOIN saas_fast_credit_allocations a ON a.id=i.allocation_id
+             JOIN saas_fast_billing_jobs j ON j.intent_id=i.id
+             WHERE i.tenant_id=$1 AND j.state='pending_v2' ORDER BY i.created_at DESC LIMIT 1`,
+            [seeded.tenantId],
+          );
+          assert.ok(owner.rows[0]);
+          // Kill only after the real receipt commits, while the actual wallet
+          // fence prevents its C=35 liability from being posted by any worker.
+          crashedGeneration = boundedFixture.killOwner(owner.rows[0].owner);
+          await boundedFixture.census();
+        }
       });
     } finally {
       release();
+    }
+    if (boundedFixture) {
+      if (crashedGeneration) await boundedFixture.recover(crashedGeneration);
+      await boundedFixture.census();
     }
     if (pressure) {
       // A distinct round starts only after this legitimate charge settles.
@@ -616,7 +704,7 @@ test(`required native fast HTTP ${scenario}: first funded send and exact durable
   assert.equal(BigInt(finalLiability.released), BigInt(expected.count) * (BigInt(maximum) - 35n));
   if (pressure)
     assert.ok(BigInt(facts.backing) <= 1_000_000n, 'completed pressure rounds retain the explicit hard cap');
-  if (scenario === 'builtin-default') {
+  if (scenario === 'builtin-default' || bounded) {
     assert.deepEqual(
       await readRateLimits(),
       initialRateLimits,
@@ -691,23 +779,50 @@ test(`required native fast HTTP ${scenario}: first funded send and exact durable
         `${scopes[index]?.[0]}: current-window RPM=${requests} TPM=${tokens} slots=0 limits=600000/600000000/64`,
       );
     }
-    assert.equal(automaticTarget, 67133440n, 'trusted C64 sets exact 2*M*C target');
-    assert.equal(
-      BigInt(facts.backing) + BigInt(facts.charge),
-      automaticTarget,
-      'default credit is exact wallet-backed auto capacity, not a fixture cap',
+    if (!bounded) {
+      assert.equal(automaticTarget, 67133440n, 'trusted C64 sets exact 2*M*C target');
+      assert.equal(
+        BigInt(facts.backing) + BigInt(facts.charge),
+        automaticTarget,
+        'default credit is exact wallet-backed auto capacity, not a fixture cap',
+      );
+      assert.equal(
+        (
+          await migrator.query<{ count: string }>(
+            "SELECT count(*)::text AS count FROM saas_fast_credit_allocations WHERE tenant_id=$1 AND state='active'",
+            [seeded.tenantId],
+          )
+        ).rows[0]?.count,
+        '8',
+        'the default stripe count is exercised without an override',
+      );
+      assert.equal(tlsConnections, 1, 'default pooled transport reuses one real TLS connection for serial JSON/SSE');
+    }
+  }
+  if (boundedFixture) {
+    await boundedFixture.census();
+    const history = await migrator.query<{ epochs: number }>(
+      'SELECT count(*)::integer AS epochs FROM saas_fast_gateway_owner_activations a JOIN saas_fast_gateway_owner_slots s ON s.owner=a.owner WHERE s.deployment_id=$1',
+      [childEnvironment.MODEL_ROUTER_SAAS_DEPLOYMENT_ID],
     );
     assert.equal(
-      (
-        await migrator.query<{ count: string }>(
-          "SELECT count(*)::text AS count FROM saas_fast_credit_allocations WHERE tenant_id=$1 AND state='active'",
-          [seeded.tenantId],
-        )
-      ).rows[0]?.count,
-      '8',
-      'the default stripe count is exercised without an override',
+      history.rows[0]?.epochs,
+      6,
+      'initial2 + sequential rolling2 + explicit recovery2 are distinct durable activations',
     );
-    assert.equal(tlsConnections, 1, 'default pooled transport reuses one real TLS connection for serial JSON/SSE');
+    await boundedFixture.stopGracefully();
+    const stopped = (await migrator.query<Record<string, string>>(financeSql, [seeded.tenantId])).rows[0];
+    assert.ok(stopped);
+    assert.equal(stopped.backing, '0', 'graceful shutdown retires all unused backing across every historical owner');
+    assert.equal(stopped.available, '0');
+    assert.equal(stopped.completed, expected.count);
+    assert.equal(stopped.unresolved, '0');
+    assert.equal(stopped.charge, expected.charge);
+    assert.equal(stopped.wallet, expected.wallet);
+    const stoppedLiability = await readLiability(migrator);
+    assert.equal(stoppedLiability.held, '0');
+    assert.equal(stoppedLiability.pending_v2, '0');
+    assert.equal(stoppedLiability.unreceipted, '0');
   }
   t.diagnostic(
     `${scenario}: first-funded=200 M=${maximum} completed=${expected.count} charge=${expected.charge} unresolved=0 receipt-v2=${finalLiability.releases} released=${finalLiability.released} H=0 TLS-connections=${tlsConnections}`,

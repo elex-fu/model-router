@@ -1266,6 +1266,7 @@ BEGIN
   FOR v_table IN
     SELECT read_relation.table_name
     FROM (VALUES
+      ('saas_fast_gateway_deployments'), ('saas_fast_gateway_owner_slots'), ('saas_fast_gateway_owner_activations'), ('saas_fast_gateway_credit_budgets'),
       ('saas_fast_receipt_liability_releases'),
       ('saas_fast_gateway_resolutions'),
       ('saas_fast_gateway_owners'), ('saas_fast_credit_allocations'), ('saas_fast_gateway_intents'), ('saas_fast_gateway_receipts'), ('saas_fast_billing_jobs'),
@@ -1358,6 +1359,25 @@ BEGIN
     SELECT manifest.table_name, manifest.privilege_type,
            pg_catalog.array_agg(manifest.column_name ORDER BY manifest.column_name) AS column_names
     FROM (VALUES
+      ('saas_fast_gateway_owner_activations', 'owner', 'INSERT'),
+      ('saas_fast_gateway_owner_activations', 'epoch', 'INSERT'),
+      ('saas_fast_gateway_deployments', 'deployment_id', 'INSERT'),
+      ('saas_fast_gateway_deployments', 'policy_digest', 'INSERT'),
+      ('saas_fast_gateway_deployments', 'credit_cap_minor_units', 'INSERT'),
+      ('saas_fast_gateway_owner_slots', 'owner', 'INSERT'),
+      ('saas_fast_gateway_owner_slots', 'deployment_id', 'INSERT'),
+      ('saas_fast_gateway_owner_slots', 'slot', 'INSERT'),
+      ('saas_fast_gateway_owner_slots', 'epoch', 'INSERT'),
+      ('saas_fast_gateway_owner_slots', 'active', 'INSERT'),
+      ('saas_fast_gateway_owner_slots', 'retired_epoch', 'INSERT'),
+      ('saas_fast_gateway_owner_slots', 'epoch', 'UPDATE'),
+      ('saas_fast_gateway_owner_slots', 'active', 'UPDATE'),
+      ('saas_fast_gateway_owner_slots', 'retired_epoch', 'UPDATE'),
+      ('saas_fast_gateway_credit_budgets', 'tenant_id', 'INSERT'),
+      ('saas_fast_gateway_credit_budgets', 'currency', 'INSERT'),
+      ('saas_fast_gateway_credit_budgets', 'deployment_id', 'INSERT'),
+      ('saas_fast_gateway_credit_budgets', 'credit_cap_minor_units', 'INSERT'),
+      ('saas_fast_gateway_credit_budgets', 'allocated_minor_units', 'INSERT'),
       ('saas_fast_gateway_owners', 'owner', 'INSERT'),
       ('saas_fast_gateway_owners', 'epoch', 'INSERT'),
       ('saas_fast_credit_allocations', 'id', 'INSERT'),

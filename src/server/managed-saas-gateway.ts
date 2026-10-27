@@ -1064,6 +1064,8 @@ export interface ManagedSaasFastGatewayOptions {
 }
 
 export interface ManagedSaasGatewayProductionOptions {
+  /** Activated by the private supervisor startup gate, never supplied by a request or runtime module. */
+  readonly boundedGatewayOwner?: import('../saas/gateway/fast/bounded-deployment-budget.js').BoundedOwnerActivation;
   readonly fastReceiptQueueObserver?: (snapshot: FastReceiptQueueSnapshot) => void;
   readonly fastGateway?: ManagedSaasFastGatewayOptions;
   readonly fastGatewayDiagnostic?: FastGatewayDiagnosticObserver;
@@ -2800,6 +2802,9 @@ export function createManagedSaasGatewayProductionComposition(
       : undefined;
   const payload = createProviderPayloadCompiler(options);
   const fastConfig = resolveManagedSaasFastGatewayConfiguration(options);
+  if (options.boundedGatewayOwner && (!fastConfig || fastConfig.allocationOwner !== options.boundedGatewayOwner.owner)) {
+    throw new ManagedSaasGatewayCompositionError('INVALID_CONFIGURATION');
+  }
   let fastClose: (() => Promise<void>) | undefined;
   let closeFastResources: (() => Promise<void>) | undefined;
   let fastGateway: FastGatewayExecutorPort | undefined;
@@ -2851,6 +2856,7 @@ export function createManagedSaasGatewayProductionComposition(
       );
       const journal = createFastGatewayJournal(database, {
         allocationOwner: fastConfig.allocationOwner,
+        ...(options.boundedGatewayOwner ? { boundedDeployment: options.boundedGatewayOwner } : {}),
         ...(fastConfig.allocationTrancheMinorUnits === undefined
           ? {}
           : { allocationTrancheMinorUnits: fastConfig.allocationTrancheMinorUnits }),

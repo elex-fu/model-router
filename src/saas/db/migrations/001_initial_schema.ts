@@ -124,6 +124,7 @@ import { FAST_GATEWAY_JOURNAL_SAAS_MIGRATION } from './143_fast_gateway_journal.
 import { FAST_GATEWAY_RESOLUTION_SAAS_MIGRATION } from './144_fast_gateway_resolution.js';
 import { FAST_GATEWAY_CREDIT_STRIPES_SAAS_MIGRATION } from './145_fast_gateway_credit_stripes.js';
 import { FAST_RECEIPT_LIABILITY_RELEASES_SAAS_MIGRATION } from './146_fast_receipt_liability_releases.js';
+import { BOUNDED_FAST_GATEWAY_BUDGET_SAAS_MIGRATION } from './147_bounded_fast_gateway_budget.js';
 
 export interface SaasMigration {
   version: number;
@@ -807,4 +808,5 @@ export const SAAS_MIGRATIONS: readonly SaasMigration[] = [
   FAST_GATEWAY_RESOLUTION_SAAS_MIGRATION,
   FAST_GATEWAY_CREDIT_STRIPES_SAAS_MIGRATION,
   FAST_RECEIPT_LIABILITY_RELEASES_SAAS_MIGRATION,
+  BOUNDED_FAST_GATEWAY_BUDGET_SAAS_MIGRATION,
 ];

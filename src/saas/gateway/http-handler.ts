@@ -14,6 +14,7 @@ import {
 } from '../observability/metrics.js';
 import type { GatewayCapabilityReadiness } from '../runtime/gateway-capability-readiness.js';
 import { resolveClientAddress } from './client-address.js';
+import { requestPeerAddress } from './trusted-request-peer.js';
 import type { GatewayProtocol } from './contracts.js';
 import {
   COUNT_TOKENS_POLICY_HEADER,
@@ -1267,7 +1268,7 @@ function safeAuditValue(value: unknown): string | null {
 function requestAudit(req: IncomingMessage, entryPoint: string): Omit<PreparedRequestEvidenceAudit, 'actorUserId'> {
   return {
     entryPoint,
-    sourceIp: safeAuditValue(req.socket?.remoteAddress) ?? null,
+    sourceIp: safeAuditValue(requestPeerAddress(req)) ?? null,
     userAgent: safeAuditValue(oneHeader(req, 'user-agent')),
   };
 }
@@ -1727,7 +1728,7 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
       let plazaResult: SaasGatewayQueryResult;
       try {
         const clientAddress = resolveClientAddress(
-          req.socket?.remoteAddress ?? '',
+          requestPeerAddress(req) ?? '',
           req.headers['x-forwarded-for'],
           trustedProxyCidrs ?? [],
         );
@@ -2451,7 +2452,7 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
     // fails closed on a non-disabled key IP policy without it. Also the
     // sticky-session content fallback's client discriminator.
     const clientAddress = resolveClientAddress(
-      req.socket?.remoteAddress ?? '',
+      requestPeerAddress(req) ?? '',
       req.headers['x-forwarded-for'],
       options.trustedProxyCidrs ?? [],
     );
