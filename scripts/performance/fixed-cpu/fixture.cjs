@@ -6,6 +6,7 @@ const path = require('node:path');
 const { randomBytes, randomUUID, generateKeyPairSync, createHash } = require('node:crypto');
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+const { readOwnerProof, validateOwnerProof } = require('./owner-proof.cjs');
 const directory = '/fixture'; // Container mount, NOT a host-specific path.
 const root = path.resolve(__dirname, '../../..');
 const production = name => require(path.join(root, 'dist', name));
@@ -44,6 +45,7 @@ async function seed(input) {
         assert.equal(await ensureBoundedCreditBudget(tx, spec, seeded.tenantId, 'USD'), BigInt(input.creditCap));
       });
     }
+    await save('owner-seed-proof.json', await readOwnerProof(database));
     await save('runtime.json', { estimator: 'builtin', maxConcurrency: input.httpInFlight, privateKeyFile: `${directory}/signing-private.pem`, publicKeyFile: `${directory}/signing-public.pem`, mockPort: input.mockPort, routes: seeded.inventory, affinityKey: randomBytes(32).toString('base64'), idempotencyKey: randomBytes(32).toString('base64') });
     await fs.writeFile(`${directory}/api-key`, seeded.key, { mode: 0o600 });
     await save('identity.json', { tenantId: seeded.tenantId, projectId: seeded.projectId, keyId: seeded.keyId, namespace });
@@ -131,7 +133,11 @@ function validateFinance(facts, count, input, stopped) {
   assert.ok(Number(facts.gateway_sessions) <= 16);
   assert.equal(facts.gateway_role_limit, '16');
   assert.equal(facts.business_owners, input.arm === 'single' ? '1' : '2');
-  if (stopped) for (const key of ['backing', 'available', 'allocated', 'active_allocations', 'active_slots', 'gateway_sessions']) assert.equal(facts[key], '0', key);
+  if (stopped) {
+    for (const key of ['backing', 'available', 'allocated', 'active_allocations', 'gateway_sessions'])
+      assert.equal(facts[key], '0', key);
+    if (input.arm === 'single') assert.equal(facts.active_slots, '0', 'single inactive seed slots');
+  }
 }
 async function redisFacts(input, identity, expected) {
   const redis = require('@redis/client').createClient({ url: `redis://127.0.0.1:${input.redisPort}`, socket: { reconnectStrategy: false } });
@@ -189,9 +195,24 @@ async function audit(input, stopped, warmOnly = false) {
         FROM saas_projects p JOIN saas_project_inference_policy_versions v ON v.tenant_id=p.tenant_id AND v.project_id=p.id AND v.version=p.inference_policy_version WHERE p.tenant_id=$1 AND p.id=$2
       UNION ALL SELECT 'key',requests_per_minute::text,tokens_per_minute::text,max_concurrent_requests::text FROM saas_api_keys WHERE tenant_id=$1 AND project_id=$2 AND id=$3 ORDER BY scope`,
       [identity.tenantId, identity.projectId, identity.keyId])).rows;
-    // Save evidence BEFORE assertions; a rejection/failure is never silently excluded.
-    await save(warmOnly ? 'warm-audit.json' : stopped ? 'stopped-audit.json' : 'drain-audit.json', { finance: facts, usage, rateLimits, allAttemptCount: warm.requests + measured.requests, successCount: count, stopped });
+    const auditName = warmOnly ? 'warm-audit.json' : stopped ? 'stopped-audit.json' : 'drain-audit.json';
+    const ownerLifecycle = await readOwnerProof(database);
+    const auditProof = { finance: facts, usage, rateLimits, ownerLifecycle,
+      allAttemptCount: warm.requests + measured.requests, successCount: count, stopped };
+    // Preserve finance and all raw owner records even if manifest evidence is missing.
+    await save(auditName, auditProof);
+    const ownerEvidence = { seed: JSON.parse(await fs.readFile(`${directory}/owner-seed-proof.json`, 'utf8')) };
+    if (input.arm === 'bounded') {
+      ownerEvidence.ready = JSON.parse(await fs.readFile(`${directory}/process-proof.json`, 'utf8')).state;
+      if (stopped) ownerEvidence.closed = JSON.parse(await fs.readFile(`${directory}/closed-state-proof.json`, 'utf8'));
+    } else if (stopped) {
+      ownerEvidence.warm = JSON.parse(await fs.readFile(`${directory}/warm-audit.json`, 'utf8')).ownerLifecycle;
+    }
+    await save(auditName, { ...auditProof, ownerEvidence });
     validateFinance(facts, count, input, stopped);
+    validateOwnerProof(ownerLifecycle, input, identity, ownerEvidence, stopped,
+      production('server/bounded-gateway-state.js').validateBoundedGatewayState);
+    assert.equal(facts.active_slots, String(ownerLifecycle.slots.filter(slot => slot.active).length), 'raw active_slots matches exact owner proof');
     assert.deepEqual(rateLimits, ['key', 'project', 'tenant'].map(scope => ({ scope, rpm: '600000', tpm: '600000000', concurrency: String(input.httpInFlight) })), 'all declared authority rate/concurrency limits remain unchanged');
     assert.equal(usage.exact, true, 'actual TPM acknowledgement and slot drain');
   } finally { await database.close(); }

@@ -311,7 +311,7 @@ class Runner:
                 retain_driver_files(fixture, out, filename)
             except OSError as error:
                 evidence_errors.append(str(error))
-        for source, target in [('warm.json', 'warm-raw.json'), ('warm-bootstrap.json', 'warm-bootstrap-raw.json'),
+        for source, target in [('owner-seed-proof.json', 'owner-seed-proof.json'), ('warm.json', 'warm-raw.json'), ('warm-bootstrap.json', 'warm-bootstrap-raw.json'),
                                ('warm-matched.json', 'warm-matched-raw.json'), ('measured.json', 'measured-raw.json'),
                                ('warm-audit.json', 'warm-audit.json'), ('drain-audit.json', 'drain-audit.json'),
                                ('stopped-audit.json', 'stopped-audit.json'), ('process-proof.json', 'process-proof.json'),
@@ -349,7 +349,7 @@ class Runner:
                 evidence_errors.append(kind + ': ' + str(error))
         save(out / 'containers-before-cleanup.json', inspections)
         outcome['evidenceCaptureErrors'] = evidence_errors
-        for required in ['constructor-proofs.json', 'process-proof.json', 'warm-before-quiet-queue-checkpoints.json', 'warm-after-quiet-queue-checkpoints.json', 'final-drain-queue-checkpoints.json', 'quiet-interval.json', 'warm-raw.json', 'warm-bootstrap-raw.json', 'warm-matched-raw.json', 'measured-raw.json', 'warm-audit.json', 'drain-audit.json', 'stopped-audit.json']:
+        for required in ['owner-seed-proof.json', 'constructor-proofs.json', 'process-proof.json', 'warm-before-quiet-queue-checkpoints.json', 'warm-after-quiet-queue-checkpoints.json', 'final-drain-queue-checkpoints.json', 'quiet-interval.json', 'warm-raw.json', 'warm-bootstrap-raw.json', 'warm-matched-raw.json', 'measured-raw.json', 'warm-audit.json', 'drain-audit.json', 'stopped-audit.json']:
             if not (out / required).is_file():
                 outcome['failures'].append('required evidence missing: ' + required)
 
@@ -493,14 +493,18 @@ class Runner:
             save(out / 'app-exit.json', stopped)
             if stopped['State']['Running'] or stopped['State']['ExitCode'] != 0 or stopped['State']['OOMKilled']:
                 outcome['failures'].append('app did not exit cleanly')
+            if entry['arm'] == 'bounded':
+                try:
+                    self.one_shot(fixture, 'node', FIXTURE, 'state-closed', timeout=10)
+                except Exception as error:
+                    outcome['failures'].append(str(error))
+                if (fixture / 'closed-state-proof.json').is_file():
+                    copy_required_json(fixture / 'closed-state-proof.json', out / 'closed-state-proof.json')
             try:
                 self.one_shot(fixture, 'node', FIXTURE, 'stopped', timeout=60)
             except Exception as error:
                 outcome['failures'].append(str(error))
             copy_required_json(fixture / 'stopped-audit.json', out / 'stopped-audit.json')
-            if entry['arm'] == 'bounded':
-                self.one_shot(fixture, 'node', FIXTURE, 'state-closed', timeout=10)
-                copy_required_json(fixture / 'closed-state-proof.json', out / 'closed-state-proof.json')
             outcome['validDiagnostic'] = not outcome['failures']
         except Exception as error:
             outcome['failures'].append(f'{type(error).__name__}: {error}')

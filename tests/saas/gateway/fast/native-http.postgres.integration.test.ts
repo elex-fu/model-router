@@ -823,6 +823,22 @@ test(`required native fast HTTP ${scenario}: first funded send and exact durable
     assert.equal(stoppedLiability.held, '0');
     assert.equal(stoppedLiability.pending_v2, '0');
     assert.equal(stoppedLiability.unreceipted, '0');
+
+    // Clean stop retains the exact durable markers. Only the compiled recovery
+    // command may fence them after old processes and native sessions are gone.
+    await boundedFixture.recoverClosed();
+    await boundedFixture.stopGracefully();
+    assert.deepEqual(
+      (await migrator.query<Record<string, string>>(financeSql, [seeded.tenantId])).rows[0],
+      stopped,
+      'clean recovery without traffic cannot change settled finance or create backing',
+    );
+    assert.deepEqual(
+      await readLiability(migrator),
+      stoppedLiability,
+      'clean recovery preserves exact liability evidence',
+    );
+    assert.equal(upstreamRequests, Number(expected.count), 'clean recovery never replays upstream work');
   }
   t.diagnostic(
     `${scenario}: first-funded=200 M=${maximum} completed=${expected.count} charge=${expected.charge} unresolved=0 receipt-v2=${finalLiability.releases} released=${finalLiability.released} H=0 TLS-connections=${tlsConnections}`,

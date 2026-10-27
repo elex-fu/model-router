@@ -68,6 +68,11 @@ jobs:
           --native-correctness-sha "$QUOTA_CORRECTNESS_SHA"
           --profiles "$QUOTA_PROFILES" --protocols "$QUOTA_PROTOCOLS"
           --output "$RUNNER_TEMP/quota-evidence"
+      - name: Print safe qualification outcome and finance summaries
+        if: always()
+        run: >-
+          PYTHONDONTWRITEBYTECODE=1 python3 scripts/performance/fixed_cpu_quota_log_summary.py
+          --evidence "$RUNNER_TEMP/quota-evidence"
       - name: Retain all completed and failed-arm evidence, never private fixture keys/env
         if: always()
         uses: actions/upload-artifact@v4

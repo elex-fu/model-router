@@ -175,6 +175,17 @@ class RunnerContractTests(unittest.TestCase):
             self.assertEqual((out / 'measured-attempts.jsonl').read_text(), partial)
             self.assertFalse((out / 'measured-raw.json').exists())
 
+    def test_stopped_owner_proof_requires_closed_manifest_and_retains_seed(self):
+        source = (runner.ROOT / 'scripts/performance/fixed_cpu_quota_runner.py').read_text()
+        closed = source.index("self.one_shot(fixture, 'node', FIXTURE, 'state-closed'")
+        stopped = source.index("self.one_shot(fixture, 'node', FIXTURE, 'stopped'")
+        self.assertLess(closed, stopped)
+        self.assertIn("('owner-seed-proof.json', 'owner-seed-proof.json')", source)
+        self.assertIn("for required in ['owner-seed-proof.json'", source)
+        workflow = (runner.ROOT / '.github/workflows/fixed-cpu-quota-diagnostic.yml').read_text()
+        self.assertIn('Print safe qualification outcome and finance summaries\n        if: always()', workflow)
+        self.assertLess(workflow.index('fixed_cpu_quota_log_summary.py'), workflow.index('actions/upload-artifact@v4'))
+
     def test_portable_assets_and_pinned_build(self):
         folder = runner.ROOT / 'scripts/performance/fixed-cpu'
         dockerfile = (folder / 'Dockerfile').read_text()

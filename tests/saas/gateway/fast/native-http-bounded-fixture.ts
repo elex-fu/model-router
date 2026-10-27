@@ -13,6 +13,12 @@ import { Pool } from 'pg';
 import ts from 'typescript';
 import type { SqlExecutor } from '../../../../src/saas/db/types.js';
 import {
+  type BoundedOwnerActivation,
+  boundedOwnerName,
+  readBoundedOwnerSlots,
+  verifyBoundedOwner,
+} from '../../../../src/saas/gateway/fast/bounded-deployment-budget.js';
+import {
   type BoundedGatewayProcessIdentity,
   type BoundedGatewayState,
   boundedGatewayProcessIsAlive,
@@ -129,6 +135,40 @@ export class NativeBoundedGatewayFixture {
     }
     return state;
   }
+  private ownerActivation(state: BoundedGatewayState, slot: 0 | 1): BoundedOwnerActivation {
+    const recorded = state.slots[slot];
+    assert.ok(recorded);
+    assert.equal(recorded.slot, slot);
+    return {
+      deploymentId: state.deploymentId,
+      policyDigest: state.policyDigest,
+      creditCapMinorUnits: state.creditCapMinorUnits,
+      slot,
+      owner: boundedOwnerName(state.deploymentId, slot),
+      epoch: recorded.epoch,
+    };
+  }
+  private async assertOwnerMarkers(state: BoundedGatewayState) {
+    const slots = await readBoundedOwnerSlots(this.database, state);
+    assert.equal(slots.length, 2);
+    for (const slot of slots) {
+      const expected = this.ownerActivation(state, slot.slot);
+      assert.equal(slot.owner, expected.owner);
+      assert.equal(slot.epoch, expected.epoch, 'durable activation belongs to the exact recorded process epoch');
+      assert.equal(slot.active, true, 'active is a durable activation marker, not process liveness');
+      await verifyBoundedOwner(this.database, expected);
+    }
+    return slots;
+  }
+  private async ownerHistory(state: BoundedGatewayState) {
+    const result = await this.database.query<{ owner: string; epoch: string }>(
+      `SELECT a.owner,a.epoch::text AS epoch FROM saas_fast_gateway_owner_activations a
+       JOIN saas_fast_gateway_owner_slots s ON s.owner=a.owner
+       WHERE s.deployment_id=$1 ORDER BY a.owner,a.epoch`,
+      [state.deploymentId],
+    );
+    return result.rows;
+  }
   async census(): Promise<void> {
     const live = [...this.knownProcesses.values()].filter(boundedGatewayProcessIsAlive);
     assert.ok(live.length <= 2, 'stop-before-start never has more than TWO native business processes');
@@ -176,6 +216,7 @@ export class NativeBoundedGatewayFixture {
             );
             assert.equal(old.rows[0]?.remaining, 0, 'replacement cannot overlap old native pools');
           }
+          await this.assertOwnerMarkers(state);
           return state;
         }
       }
@@ -300,10 +341,60 @@ export class NativeBoundedGatewayFixture {
     await this.stopPrimary();
     assert.equal(this.child?.exitCode, 0, 'compiled supervisor and both workers drain successfully');
     assert.equal(this.child?.signalCode, null);
-    assert.equal(this.state().phase, 'closed');
+    const stopped = this.state();
+    assert.equal(stopped.phase, 'closed');
+    for (const slot of stopped.slots) {
+      assert.ok(slot);
+      assert.equal(slot.phase, 'exited');
+      assert.equal(slot.exitCode, 0);
+      assert.equal(slot.signal, null);
+      assert.equal(slot.forced, false);
+    }
     for (const identity of this.knownProcesses.values()) assert.equal(boundedGatewayProcessIsAlive(identity), false);
     await this.assertNoSessions(() => this.database.query<{ count: number }>(SESSION_COUNT_SQL));
+    await this.assertOwnerMarkers(stopped);
     await this.census();
+  }
+  async recoverClosed(): Promise<void> {
+    const before = this.state();
+    assert.equal(before.phase, 'closed');
+    assert.equal(this.child?.exitCode, 0);
+    assert.equal(this.child?.signalCode, null);
+    for (const identity of this.knownProcesses.values()) assert.equal(boundedGatewayProcessIsAlive(identity), false);
+    await this.assertNoSessions(() => this.database.query<{ count: number }>(SESSION_COUNT_SQL));
+    await this.assertOwnerMarkers(before);
+    const oldHistory = await this.ownerHistory(before);
+    const oldEpochs = oldHistory.map((entry) => entry.epoch);
+    assert.equal(new Set(oldEpochs).size, oldEpochs.length, 'historical activation epochs are unique');
+    for (const slot of [0, 1] as const) assert.ok(oldEpochs.includes(this.ownerActivation(before, slot).epoch));
+
+    // Use the real compiled recover command; never release markers from the test.
+    this.start(before.generation);
+    const after = await this.ready(oldEpochs);
+    assert.notEqual(after.generation, before.generation);
+    assert.equal(after.deploymentId, before.deploymentId);
+    assert.equal(after.policyDigest, before.policyDigest);
+    assert.equal(after.creditCapMinorUnits, before.creditCapMinorUnits);
+    assert.deepEqual(after.totals, before.totals);
+    const slots = await this.assertOwnerMarkers(after);
+    for (const slot of slots) {
+      const old = this.ownerActivation(before, slot.slot);
+      assert.equal(slot.retiredEpoch, old.epoch, 'recovery fences exactly the proven-dead prior activation');
+      assert.ok(!oldEpochs.includes(slot.epoch), 'clean recovery cannot reuse any historical activation');
+      await assert.rejects(verifyBoundedOwner(this.database, old), /BOUNDED_DEPLOYMENT_OWNER_NOT_ACTIVE/);
+    }
+    const expectedHistory = [
+      ...oldHistory,
+      ...slots.map(({ owner, epoch }) => ({ owner, epoch })),
+    ].sort((a, b) => {
+      if (a.owner !== b.owner) return a.owner < b.owner ? -1 : 1;
+      return a.epoch < b.epoch ? -1 : a.epoch > b.epoch ? 1 : 0;
+    });
+    assert.deepEqual(
+      await this.ownerHistory(after),
+      expectedHistory,
+      'clean recovery adds exactly two durable activations',
+    );
   }
   async close(): Promise<void> {
     this.agent.destroy();

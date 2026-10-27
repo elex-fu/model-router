@@ -24,17 +24,24 @@ function validateState(state, input, phase, validateSchema) {
     assert.equal(slot.exitCode, phase === 'ready' ? null : 0);
   }
 }
-function closed(input) {
-  const state = JSON.parse(fs.readFileSync('/fixture/state/state.json', 'utf8'));
-  const native = require(path.join(root, 'dist/server/bounded-gateway-state.js'));
-  validateState(state, input, 'closed', native.validateBoundedGatewayState);
-  const previous = JSON.parse(fs.readFileSync('/fixture/process-proof.json', 'utf8')).state;
-  assert.equal(state.generation, previous.generation);
-  assert.deepEqual(state.primary, previous.primary);
+function validateClosedPair(previous, state, input, validateSchema) {
+  validateState(previous, input, 'ready', validateSchema);
+  validateState(state, input, 'closed', validateSchema);
+  for (const key of ['version', 'deploymentId', 'machineId', 'bootId', 'generation', 'primary',
+    'totals', 'creditCapMinorUnits', 'policyDigest']) assert.deepEqual(state[key], previous[key], key);
+  assert.equal(new Set(previous.slots.map(slot => slot.epoch)).size, 2);
   for (const [index, slot] of state.slots.entries()) {
     assert.deepEqual(slot.process, previous.slots[index].process);
     assert.equal(slot.epoch, previous.slots[index].epoch);
+    assert.deepEqual(previous.slots[index].recoveryEpochs, []);
+    assert.deepEqual(slot.recoveryEpochs, []);
   }
+}
+function closed(input) {
+  const state = JSON.parse(fs.readFileSync('/fixture/state/state.json', 'utf8'));
+  const native = require(path.join(root, 'dist/server/bounded-gateway-state.js'));
+  const previous = JSON.parse(fs.readFileSync('/fixture/process-proof.json', 'utf8')).state;
+  validateClosedPair(previous, state, input, native.validateBoundedGatewayState);
   fs.writeFileSync('/fixture/closed-state-proof.json', JSON.stringify({ state, schemaValidated: true, exactStartupIdentities: true }) + '\n', { mode: 0o600 });
 }
 function ready(input) {
@@ -60,5 +67,5 @@ function ready(input) {
   fs.writeFileSync('/fixture/process-proof.json', JSON.stringify(proof, null, 2) + '\n', { mode: 0o600 });
   process.stdout.write(JSON.stringify(proof) + '\n');
 }
-module.exports = { validateState, closed };
+module.exports = { validateState, validateClosedPair, closed };
 if (require.main === module) ready(JSON.parse(fs.readFileSync('/fixture/input.json', 'utf8')));

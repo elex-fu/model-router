@@ -265,3 +265,11 @@ outside that quota and must be reported separately. Record throttling, all
 attempts/rejections, CPU and memory, and refuse timing without quota proof.
 CPU affinity is not a CPU quota. This diagnostic must follow native correctness
 acceptance and must not relabel historical runs as resource-controlled.
+
+The quota diagnostic distinguishes durable activation claims from process
+liveness: clean shutdown leaves the two manifest-matched SQL slot activations
+registered until explicit recovery proves the old processes and pools gone.
+Qualification still requires zero backing/available/allocated resources, no
+active allocations, no native gateway sessions and clean original child exits.
+It never clears these claims during benchmark cleanup; exact policy/owner/epoch
+and activation-history proofs reject extras or replacement epochs.

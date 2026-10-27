@@ -16,7 +16,7 @@ test('input accepts only two known matched money profiles and distinct loopback 
 test('financial proof conserves every request, immutable release and exact wallet charge', () => {
   validateFinance(facts(), 2, input, true);
   for (const key of ['intents', 'receipts', 'succeeded', 'completed', 'postings', 'releases', 'charge', 'posted', 'input', 'output', 'released', 'wallet', 'cap']) assert.throws(() => validateFinance({ ...facts(), [key]: '1' }, 2, input, true), key);
-  for (const key of ['unresolved', 'unbalanced', 'invalid_releases', 'invalid_bounds', 'legacy_requests', 'backing', 'allocated', 'active_allocations', 'active_slots', 'gateway_sessions']) assert.throws(() => validateFinance({ ...facts(), [key]: '1' }, 2, input, true), key);
+  for (const key of ['unresolved', 'unbalanced', 'invalid_releases', 'invalid_bounds', 'legacy_requests', 'backing', 'allocated', 'active_allocations', 'gateway_sessions']) assert.throws(() => validateFinance({ ...facts(), [key]: '1' }, 2, input, true), key);
 });
 test('live balance is capped, all owner backing and native PG sessions remain counted', () => {
   validateFinance({ ...facts(), backing: '60', available: '60', allocated: '60', active_allocations: '8', active_slots: '2', gateway_sessions: '16' }, 2, input, false);
@@ -41,4 +41,12 @@ test('closed state requires native validation, exact budgets and two graceful ch
   assert.throws(() => validateState({ phase: 'closed' }, input, 'closed', () => {}));
   for (const change of [{ forced: true }, { signal: 'SIGKILL' }, { exitCode: 1 }, { process: null }])
     assert.throws(() => validateState({ ...state, slots: [{ ...state.slots[0], ...change }, state.slots[1]] }, input, 'closed', () => {}));
+});
+
+test('single stopped finance still requires inactive seed slots and zero resources', () => {
+  const single = { ...input, arm: 'single' };
+  const value = { ...facts(), business_owners: '1' };
+  validateFinance(value, 2, single, true);
+  for (const key of ['active_slots', 'gateway_sessions', 'backing', 'available', 'allocated', 'active_allocations'])
+    assert.throws(() => validateFinance({ ...value, [key]: '1' }, 2, single, true), key);
 });

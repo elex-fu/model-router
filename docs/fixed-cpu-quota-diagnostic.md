@@ -171,8 +171,9 @@ not considered proof that all workers have been created.
 - The app must exit with code0, without OOM; bounded final state must pass the production schema, deployment/budget
   identity checks and show both original child slots exited with code0, no
   signal and no forced termination.
-  All historical allocations must be retired with backing0, no active bounded
-  owner slots and no gateway-role PostgreSQL sessions. Forced cleanup is not a
+  All historical allocations must be retired with backing0. Retained bounded
+  owner claims must match the exact lifecycle proof below; no gateway-role
+  PostgreSQL sessions may remain. Forced cleanup is not a
   graceful-exit proof. Raw mock send/completion/error counts must match all
   successful warm plus measured requests.
 
@@ -236,3 +237,26 @@ assembly, real cgroup enforcement, or a performance benefit. The ordinary CI Go
 step and Docker build both compile/test the helpers with the pinned toolchain;
 the actual diagnostic still requires native correctness and explicit execution
 GO. No local smoke result or unmeasured resource claim substitutes for that run.
+
+## Durable activation claims at clean stop
+
+SQL slot `active` identifies a durable activation claim, not process liveness.
+A clean bounded stop retains exactly its two original active claims until explicit
+recovery proves the old processes and native sessions gone, then rotates/fences
+the epochs. The diagnostic does not clear flags or rotate epochs during cleanup.
+
+The ready and closed manifests must match exactly in generation, deployment,
+policy, budgets, primary/child PID-start identities and both distinct epochs,
+with no recovery history. Every policy, slot, owner, activation-history and
+allocation-owner row in the fresh database is retained and compared: no missing,
+extra, foreign or reused epoch is accepted. Both original children must have
+exited normally. All allocation/backing/available/allocated resources and gateway
+sessions still must be zero; money, actual TPM and native queue proofs remain
+mandatory. Merely observing two active SQL rows is not sufficient.
+
+The single control retains its exact two inactive seed slots and one native
+namespace owner, with no activation history; its stopped identity snapshot must
+match warmup. Safe allowlisted numeric finance and failure labels are also
+printed in CI logs, never private keys, arbitrary exception text or raw bodies.
+The failed attempt 2 remains unchanged and inconclusive. A corrected qualification
+must run a fresh full 16-arm cohort, not splice completed arms from that attempt.
