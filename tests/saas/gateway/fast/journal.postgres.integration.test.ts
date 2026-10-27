@@ -1322,8 +1322,14 @@ test('fast money journal real PostgreSQL: atomic reserve, durable completion, ex
   );
   await t.test(
     'acknowledged fragmented no-write admission rebalances one conserved cap; warm aggregate never executes and recovered ACK loss never retries',
-    async () => {
+    async (t) => {
       for (const loseRecoveredAck of [false, true]) {
+        const realMonotonicNow = performance.now.bind(performance);
+        let recoveryStarted = 0,
+          refills = 0,
+          refillDelayMs = 0;
+        const phases: Array<{ phase: string; elapsedMs: number }> = [];
+        const mark = (phase: string) => phases.push({ phase, elapsedMs: realMonotonicNow() - recoveryStarted });
         let watchedRequest = '',
           statements = 0;
         const valuesSeen: Array<readonly unknown[]> = [];
@@ -1339,11 +1345,18 @@ test('fast money journal real PostgreSQL: atomic reserve, durable completion, ex
               warmValues = values ?? [];
               if (values?.[1] === watchedRequest) {
                 statements++;
+                mark(`reserve_db_completed_${statements}`);
                 valuesSeen.push(values);
                 resultsSeen.push(result.rows[0] as (typeof resultsSeen)[number]);
                 if (loseRecoveredAck && statements === 2) throw new Error('recovered intent ACK lost');
               }
             }
+            if (
+              watchedRequest &&
+              values?.[0] === watchedRequest &&
+              sql.startsWith('SELECT i.request_id, i.intent_digest')
+            )
+              mark('replay_ack');
             return result;
           },
         };
@@ -1400,28 +1413,67 @@ test('fast money journal real PostgreSQL: atomic reserve, durable completion, ex
           Array(8).fill('79'),
         );
         const input = intentFixture(scope.tenantId, scope.owner);
+        const replenish = scope.journal.replenish.bind(scope.journal);
+        scope.journal.replenish = (...args) => {
+          if (!watchedRequest) return replenish(...args);
+          refills++;
+          mark('refill_started');
+          const delayedAt = realMonotonicNow();
+          // This conservation/ACK proof deliberately includes a slow refill;
+          // it is not a recovery-latency or production-budget assertion.
+          return new Promise<void>((resolve) => setTimeout(resolve, 150)).then(async () => {
+            refillDelayMs = realMonotonicNow() - delayedAt;
+            mark('refill_delay_finished');
+            await replenish(...args);
+            mark('refill_committed');
+          });
+        };
+        recoveryStarted = realMonotonicNow();
+        // Only this exact-conservation/ACK-order proof has a logical recovery
+        // clock. Real SQL, COMMIT, original authority and fault injection stay
+        // real; restore explicitly before the next loop or timing test.
+        const recoveryClock = t.mock.method(performance, 'now', () => recoveryStarted);
         watchedRequest = input.requestId;
-        if (loseRecoveredAck) await assert.rejects(scope.journal.reserveIntent(input), /recovered intent ACK lost/);
-        else assert.equal((await scope.journal.reserveIntent(input)).kind, 'created');
-        assert.equal(statements, 2, 'only acknowledged id:null is retried, never a recovered lost ACK');
-        assert.equal(resultsSeen[0].id, null);
-        assert.equal(resultsSeen[0].credit_recoverable, true);
-        assert.equal(resultsSeen[0].credit_busy, false);
-        assert.equal(typeof resultsSeen[1].id, 'string');
-        assert.deepEqual(
-          valuesSeen[0].slice(0, 17),
-          valuesSeen[1].slice(0, 17),
-          'all identity, money and deadline bytes are frozen',
-        );
-        const current = await facts(scope.tenantId);
-        assert.equal(current.intents, '33');
-        assert.equal(current.balance, '2552');
-        assert.equal(current.backing, '2552', 'recovery cannot expand the explicit cap or mint wallet funds');
-        assert.equal(current.available, '552');
-        assert.equal(current.charges, '8');
-        watchedRequest = '';
-        assert.equal((await scope.journal.reserveIntent(input)).kind, 'existing');
-        await scope.journal.close();
+        try {
+          if (loseRecoveredAck) await assert.rejects(scope.journal.reserveIntent(input), /recovered intent ACK lost/);
+          else {
+            const result = await scope.journal.reserveIntent(input);
+            mark('admission_finished');
+            assert.equal(result.kind, 'created', JSON.stringify({ result, statements, refills, resultsSeen, phases }));
+          }
+          assert.ok(
+            refillDelayMs > 100,
+            'the correctness proof includes a real refill delay longer than the production budget',
+          );
+          assert.equal(performance.now(), recoveryStarted, 'only this functional recovery clock is frozen');
+          assert.equal(refills, 1, 'one conserved-cap refill per acknowledged fragment recovery');
+          assert.equal(statements, 2, 'only acknowledged id:null is retried, never a recovered lost ACK');
+          assert.equal(resultsSeen[0].id, null);
+          assert.equal(resultsSeen[0].credit_recoverable, true);
+          assert.equal(resultsSeen[0].credit_busy, false);
+          assert.equal(typeof resultsSeen[1].id, 'string');
+          assert.deepEqual(
+            valuesSeen[0].slice(0, 17),
+            valuesSeen[1].slice(0, 17),
+            'all identity, money and deadline bytes are frozen',
+          );
+          const current = await facts(scope.tenantId);
+          assert.equal(current.intents, '33');
+          assert.equal(current.balance, '2552');
+          assert.equal(current.backing, '2552', 'recovery cannot expand the explicit cap or mint wallet funds');
+          assert.equal(current.available, '552');
+          assert.equal(current.charges, '8');
+          watchedRequest = '';
+          assert.equal((await scope.journal.reserveIntent(input)).kind, 'existing');
+        } finally {
+          watchedRequest = '';
+          try {
+            await scope.journal.close();
+          } finally {
+            recoveryClock.mock.restore();
+            t.diagnostic(JSON.stringify({ loseRecoveredAck, statements, refills, refillDelayMs, phases }));
+          }
+        }
         assert.equal(
           (await facts(scope.tenantId)).backing,
           '2000',
