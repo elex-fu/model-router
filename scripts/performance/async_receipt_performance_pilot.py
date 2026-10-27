@@ -110,6 +110,7 @@ def main():
                ("sustained-c32", "durable", 1000000, 32, False, 60),
                ("sustained-c32", "memory-queue", 1000000, 32, False, 60)]
     results = []
+    owned_gateway_identities = []
     try:
         wait_active(fixture)
         fixture.save("manifest", {"source_commit": args.expected_source, "generation": args.generation,
@@ -128,6 +129,7 @@ def main():
             name = protocol + "-" + mode
             fixture.receipt_mode = mode; fixture.total = 0
             fixture.start_router(observer=False)
+            owned_gateway_identities.append(process_snapshot(fixture.info["gatewayPid"]))
             fixture.save("source-manifest", {"commit": args.expected_source, "tracked_clean": True,
                 "mode": mode, "diagnostic_instrumented": True,
                 "instrumentation_kind": "supported numeric queue telemetry factory wrapper only",
@@ -231,6 +233,17 @@ def main():
         fixture.save("result", {"passed": all(result["zero_denials"] for result in results), "scenes": len(results), "pilot_only": True})
     finally:
         fixture.cleanup()
+        still_present = []
+        for original in owned_gateway_identities:
+            current = process_snapshot(original["pid"])
+            if current.get("available") and current.get("start_ticks") == original.get("start_ticks"):
+                still_present.append({"pid": original["pid"], "start_ticks": original.get("start_ticks")})
+        if still_present:
+            # Top-level launcher death alone does not prove its gateway exited.
+            # Fail closed and leave this quiet window active for owned cleanup.
+            fixture.save("cleanup", {"all_exited": False, "known_gateway_processes_still_present": still_present,
+                "top_level_exit_codes": [child.returncode for child in fixture.children]})
+            raise RuntimeError("ASYNC_PILOT_DESCENDANT_EXIT_UNPROVEN")
         # Never opens a mismatched/newer generation, and verifies owned exits.
         release(args.generation, args.expected_source, [args.label])
 
