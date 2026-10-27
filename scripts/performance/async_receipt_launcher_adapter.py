@@ -34,6 +34,11 @@ def adapt(source, *, base_directory, observer_directory):
   }
   const faultEnabled = process.env.PAIR_ASYNC_FAULTS === '1';
   const metricsEnabled = process.env.PAIR_ASYNC_METRICS === '1';
+  const cpuProfileEnabled = process.env.PAIR_ASYNC_CPU_PROFILE === '1';
+  // CLI flags belong to the gateway child, not the fixture launcher. The
+  // profiler starts at process startup and writes only during graceful exit.
+  assert.ok(!cpuProfileEnabled || (!faultEnabled && !metricsEnabled && Number(process.env.PAIR_INSTANCES ?? '1') === 1), 'CPU profile requires observer/fault OFF and exactly one gateway');
+  const gatewayNodeArgs = cpuProfileEnabled ? ['--cpu-prof', '--cpu-prof-dir=' + out, '--cpu-prof-name=gateway.cpuprofile', '--cpu-prof-interval=1000'] : [];
   // Do not combine with the old request observer or profiler.
   assert.ok(!env.NODE_OPTIONS, 'Async fixture owns its explicitly selected preloads');
   const preloads = [];
@@ -53,13 +58,17 @@ def adapt(source, *, base_directory, observer_directory):
   await writeFile(join(out, 'async-receipt-profile.json'), JSON.stringify({
     mode: env.MODEL_ROUTER_FAST_RECEIPT_MODE ?? 'durable',
     modeSettingOmitted: env.MODEL_ROUTER_FAST_RECEIPT_MODE === undefined,
-    receiptOverrides, faultEnabled, metricsEnabled,
+    receiptOverrides, faultEnabled, metricsEnabled, cpuProfileEnabled,
+    cpuProfileArguments: gatewayNodeArgs,
     baselineLauncherSha256: 'BASELINE_HASH',
     note: 'Declared env settings; actual behavior must be verified by native boundary tests.'
   }, null, 2) + '\n', { mode: 0o600 });
 '''.replace("FAULT_OBSERVER", json.dumps(str(observers / "async-receipt-fault-observer.cjs")))
     hook = hook.replace("METRICS_OBSERVER", json.dumps(str(observers / "async-receipt-metrics-observer.cjs"))).replace("BASELINE_HASH", BASE_SHA256)
     source = replace_once(source, "  const log = createWriteStream(join(out, 'gateway.log'),", hook + "  const log = createWriteStream(join(out, 'gateway.log'),")
+    source = replace_once(source,
+        "gateway = spawn(process.execPath, [join(root, 'dist/cli/index.js'), 'start', '--role', 'gateway']",
+        "gateway = spawn(process.execPath, [...gatewayNodeArgs, join(root, 'dist/cli/index.js'), 'start', '--role', 'gateway']")
     source = replace_once(source,
         "for(const child of gateways)assert.equal(child.exitCode,null,'Gateway exited during paired benchmark');",
         "for(const child of gateways)assert.ok(child.exitCode===null && child.signalCode===null,'Gateway exited during async functional fixture');")

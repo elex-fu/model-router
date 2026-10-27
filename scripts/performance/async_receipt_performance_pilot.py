@@ -17,8 +17,10 @@ import time
 
 from async_receipt_launcher_adapter import adapt
 from async_receipt_fixture_checks import wait_until
+from async_receipt_cpu_profile import summarize_cpu_profile
 
 OBSERVER_COST_PLAN = "observer-workers8-c32-60s"
+CPU_PROFILE_PLAN = "cpu-profile-workers8-c32-30s"
 
 # Atomic read-only, post-load census of this fixture's lease tombstones. Only
 # aggregate counts leave Redis; no lease identity, binding or token is emitted.
@@ -75,6 +77,8 @@ def distribution(values):
 
 
 def scene_plan(name):
+    if name == CPU_PROFILE_PLAN:
+        return [("cpu-profile-c32-workers8", "memory-queue", 1000000, 32, False, 30)]
     if name == OBSERVER_COST_PLAN:
         return [("observer-on-c32-workers8", "memory-queue", 1000000, 32, False, 60),
                 ("observer-off-c32-workers8", "memory-queue", 1000000, 32, False, 60)]
@@ -95,6 +99,8 @@ def scene_plan(name):
 
 
 def scene_worker_override(plan, protocol):
+    if plan == CPU_PROFILE_PLAN:
+        return {"cpu-profile-c32-workers8": 8}[protocol]
     if plan == OBSERVER_COST_PLAN:
         return {"observer-on-c32-workers8": 8, "observer-off-c32-workers8": 8}[protocol]
     if plan != "workers4-8-c32-60s":
@@ -104,13 +110,17 @@ def scene_worker_override(plan, protocol):
 
 
 def scene_metrics_enabled(plan, protocol):
+    if plan == CPU_PROFILE_PLAN:
+        return {"cpu-profile-c32-workers8": False}[protocol]
     if plan == OBSERVER_COST_PLAN:
         return {"observer-on-c32-workers8": True, "observer-off-c32-workers8": False}[protocol]
     return True
 
 
-def router_environment(env, mode, workers, metrics_enabled):
-    env = dict(env, PAIR_ASYNC_FAULTS="0", PAIR_ASYNC_METRICS="1" if metrics_enabled else "0")
+def router_environment(env, mode, workers, metrics_enabled, cpu_profile=False):
+    assert not cpu_profile or not metrics_enabled, "ASYNC_PILOT_CPU_PROFILE_OBSERVER_MUST_BE_OFF"
+    env = dict(env, PAIR_ASYNC_FAULTS="0", PAIR_ASYNC_METRICS="1" if metrics_enabled else "0",
+               PAIR_ASYNC_CPU_PROFILE="1" if cpu_profile else "0")
     for key in list(env):
         if key.startswith("MODEL_ROUTER_FAST_RECEIPT_"): del env[key]
     env["MODEL_ROUTER_FAST_RECEIPT_MODE"] = mode
@@ -206,7 +216,7 @@ def main():
     parser.add_argument("--label", required=True)
     parser.add_argument("--generation", type=int, required=True)
     parser.add_argument("--client", type=Path, required=True)
-    parser.add_argument("--plan", choices=["pilot-six", "phase-workers2-30s", "workers4-8-c32-60s", OBSERVER_COST_PLAN], default="pilot-six")
+    parser.add_argument("--plan", choices=["pilot-six", "phase-workers2-30s", "workers4-8-c32-60s", OBSERVER_COST_PLAN, CPU_PROFILE_PLAN], default="pilot-six")
     args = parser.parse_args()
     if not args.execute: parser.error("--execute requires root quiet-window GO")
     assert args.label.startswith("async-receipt-pilot-")
@@ -234,11 +244,12 @@ def main():
         receipt_mode = "durable"
         receipt_workers = None
         metrics_enabled = True
+        cpu_profile = False
 
         def spawn(self, name, command, env=None):
             if name == "router-launch":
                 command = ["node", generated]
-                env = router_environment(env, self.receipt_mode, self.receipt_workers, self.metrics_enabled)
+                env = router_environment(env, self.receipt_mode, self.receipt_workers, self.metrics_enabled, self.cpu_profile)
             return super().spawn(name, command, env)
 
         def stop(self, process):
@@ -290,22 +301,26 @@ def main():
     planned = scene_plan(args.plan)
     phase_required = args.plan != "pilot-six"
     observer_cost = args.plan == OBSERVER_COST_PLAN
-    diagnostic_only = args.plan == "phase-workers2-30s" or observer_cost
+    cpu_profile = args.plan == CPU_PROFILE_PLAN
+    background_truth_required = observer_cost or cpu_profile
+    diagnostic_only = args.plan == "phase-workers2-30s" or background_truth_required
     results = []
     owned_gateway_identities = []
     try:
         wait_active(fixture)
         fixture.save("manifest", {"source_commit": args.expected_source, "generation": args.generation,
             "planned": planned, "plan": args.plan, "pilot_only": True, "not_full_performance_acceptance": True,
-            "built_in_queue_phase_metrics_required": "when observer enabled" if observer_cost else phase_required,
+            "built_in_queue_phase_metrics_required": "when observer enabled" if background_truth_required else phase_required,
             "diagnostic_only": diagnostic_only,
-            "queue_telemetry_factory_wrapper": "per-scene" if observer_cost else True, "fault_preload": False, "phase_profiler": False,
+            "queue_telemetry_factory_wrapper": False if cpu_profile else "per-scene" if observer_cost else True, "fault_preload": False, "phase_profiler": False,
+            "cpu_profile_only": cpu_profile,
+            "cpu_profile_scope": "Gateway child Node CLI --cpu-prof at 1000us; whole process startup/warm/load/drain/shutdown, not timed-window-only. No HTTP/fetch/PG/eventloop observer. Profiled throughput is diagnostic and must not be compared as unprofiled acceptance." if cpu_profile else None,
             "extra_SQL_periodic_sampler": False, "quiet_guard_file_sampler_seconds": 1,
             "client_change": "GEN17 transport/body/workload unchanged; post-loop wall-clock endpoints added",
             "client_sha256": hashlib.sha256(args.client.read_bytes()).hexdigest(),
             "helper_hashes": {file.name: hashlib.sha256(file.read_bytes()).hexdigest() for file in here.glob("async*receipt*") if file.is_file()},
             "M": 524480, "automatic_credit_target": 67133440, "concurrency_cap": 64, "database_pool_max": 16,
-            "warm_protocol": "10 bootstrap + 128 c32 protocol-matched + full financial drain; observer-cost also proves retained TPM/slots drain; queue snapshot only if observer enabled; minimum1s gap",
+            "warm_protocol": "10 bootstrap + 128 c32 protocol-matched + full financial drain; observer-cost/CPU-profile also prove retained TPM/slots drain; queue snapshot only if observer enabled; minimum1s gap",
             "queue_defaults": {"entries": 256, "bytes": 2097152, "workers": 2, "per_tenant": 64, "max_age_ms": 5000, "drain_timeout_ms": 10000},
             "scene_worker_overrides": {protocol: scene_worker_override(args.plan, protocol) for protocol, *_ in planned},
             "scene_metrics_enabled": {protocol: scene_metrics_enabled(args.plan, protocol) for protocol, *_ in planned},
@@ -318,15 +333,18 @@ def main():
             fixture.receipt_mode = mode; fixture.total = 0
             fixture.receipt_workers = scene_worker_override(args.plan, protocol)
             fixture.metrics_enabled = scene_metrics_enabled(args.plan, protocol)
+            fixture.cpu_profile = cpu_profile
             fixture.start_router(observer=False)
             owned_gateway_identities.append(process_snapshot(fixture.info["gatewayPid"]))
             fixture.save("source-manifest", {"commit": args.expected_source, "tracked_clean": True,
                 "mode": mode, "diagnostic_instrumented": fixture.metrics_enabled,
                 "instrumentation_kind": "supported numeric queue telemetry factory wrapper only" if fixture.metrics_enabled else "none; observer disabled",
                 "factory_wrapper_preload": fixture.metrics_enabled, "fault_preload": False, "phase_profiler": False,
+                "cpu_profiler": cpu_profile,
                 "SQL_observer": False, "periodic_SQL_sampler": False})
             profile = json.loads((fixture.out / "async-receipt-profile.json").read_text())
             assert profile["mode"] == mode and profile["metricsEnabled"] == fixture.metrics_enabled and not profile["faultEnabled"]
+            assert profile["cpuProfileEnabled"] == cpu_profile
             expected_overrides = {"MODEL_ROUTER_FAST_RECEIPT_MODE": mode}
             if fixture.receipt_workers is not None:
                 expected_overrides["MODEL_ROUTER_FAST_RECEIPT_WORKERS"] = str(fixture.receipt_workers)
@@ -337,7 +355,7 @@ def main():
             warm = fixture.client(name + "-warm", 128, 32, stream)
             assert warm["success"] == warm["requests"] == 128 and warm["status_counts"] == {"200": 128}
             fixture.total += 128; fixture.drain(name + "-warm", fixture.total); fixture.queue_empty()
-            if observer_cost: fixture.tpm_drain(name + "-warm")
+            if background_truth_required: fixture.tpm_drain(name + "-warm")
             warm_drained = time.monotonic()
             before = fixture.census(); mock_before = fixture.metrics()
             time.sleep(max(0, warm_drained + 1 - time.monotonic()))
@@ -355,7 +373,7 @@ def main():
                 fixture.total += raw["success"]
                 immediate = fixture.census(); fixture.save(name + "-immediate", immediate)
                 final = fixture.drain(name, fixture.total, raise_on_error=False)
-                tpm_proof = fixture.tpm_drain(name) if observer_cost else None
+                tpm_proof = fixture.tpm_drain(name) if background_truth_required else None
                 financial_tpm_end_wall_ns = time.time_ns()
                 telemetry = fixture.queue_empty()
                 # OFF has no pre-shutdown queue-empty observation. Its common
@@ -389,13 +407,14 @@ def main():
                 "plan": args.plan, "diagnostic_only": diagnostic_only,
                 "receipt_and_reconciliation_workers_each": fixture.receipt_workers or 2,
                 "queue_telemetry_enabled": fixture.metrics_enabled,
+                "cpu_profile_only": cpu_profile,
                 "pilot_only": True, "client": {key: value for key, value in raw.items() if key != "samples"},
                 "client_completion_success_rps": raw["throughput_success_rps"],
                 "client_plus_durable_drain_seconds": full_duration if fixture.metrics_enabled else None,
                 "client_plus_durable_drain_success_rps": raw["success"] / full_duration if clock_stable and fixture.metrics_enabled else None,
                 "observed_post_EOF_drain_tail_ms": (full_duration - raw["duration_s"]) * 1000 if fixture.metrics_enabled else None,
-                "client_plus_financial_and_tpm_drain_seconds": financial_tpm_duration if observer_cost else None,
-                "client_plus_financial_and_tpm_drain_success_rps": raw["success"] / financial_tpm_duration if observer_cost and clock_stable else None,
+                "client_plus_financial_and_tpm_drain_seconds": financial_tpm_duration if background_truth_required else None,
+                "client_plus_financial_and_tpm_drain_success_rps": raw["success"] / financial_tpm_duration if background_truth_required and clock_stable else None,
                 "financial_and_tpm_drain": tpm_proof,
                 "queue_empty_verified_before_shutdown": True if fixture.metrics_enabled else None,
                 "observer_off_qualification": None if fixture.metrics_enabled else "Queue occupancy/phase/lag/fallback/retry counts are unavailable, not zero. Financial+TPM completion does not by itself prove queue empty; graceful lifecycle exit is separately required.",
@@ -442,12 +461,24 @@ def main():
             # Native shutdown awaits receipt.close() before closing the journal
             # and admission; clean exit is required even when OFF cannot observe
             # the last in-memory removal. Recheck financial truth after exit.
-            if observer_cost:
+            if background_truth_required:
                 fixture.drain(name + "-postshutdown", fixture.total)
                 fixture.save(name + "-lifecycle-drain", {"verified": True,
                     "all_exited": True, "all_graceful": True,
                     "queue_empty_verified_before_shutdown": True if fixture.metrics_enabled else None,
                     "scope": "Native graceful shutdown plus exact postshutdown finance; OFF has no occupancy/phase samples."})
+            if cpu_profile:
+                profile_path = fixture.out / "gateway.cpuprofile"
+                assert profile_path.is_file(), "ASYNC_PILOT_CPU_PROFILE_MISSING_AFTER_CLEAN_EXIT"
+                output = A / "results" / f"{fixture.label}-{name}.cpuprofile"
+                assert not output.exists(), "ASYNC_PILOT_REFUSE_PROFILE_OVERWRITE"
+                payload = profile_path.read_bytes(); output.write_bytes(payload)
+                profile_summary = summarize_cpu_profile(json.loads(payload))
+                profile_summary.update(profile_file=output.name, profile_bytes=len(payload),
+                    profile_sha256=hashlib.sha256(payload).hexdigest(),
+                    sampling_interval_us=1000, graceful_exit_required=True,
+                    scope="Whole gateway process including startup/warm/load/drain/shutdown until profiler stop; profile-file write adds exit latency outside the recorded client/drain timing. No timed-only attribution or unprofiled throughput claim.")
+                fixture.save(name + "-cpu-profile-summary", profile_summary)
         fixture.save("result", {"passed": all(result["zero_denials"] for result in results), "scenes": len(results), "pilot_only": True})
     finally:
         fixture.cleanup()

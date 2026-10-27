@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from async_receipt_performance_pilot import (
-    OBSERVER_COST_PLAN, queue_metrics_snapshot, receipt_append_calls,
+    OBSERVER_COST_PLAN, CPU_PROFILE_PLAN, queue_metrics_snapshot, receipt_append_calls,
     router_environment, scene_metrics_enabled, scene_plan, scene_worker_override,
     unavailable_queue_telemetry, verify_phase_metrics, verify_tpm_reconciled,
     verify_lease_reconciliation,
@@ -13,6 +13,17 @@ from async_receipt_performance_pilot import (
 
 
 class PilotTests(unittest.TestCase):
+    def test_cpu_profile_is_one_workers8_observer_off_c32_30s_scene(self):
+        plan = scene_plan(CPU_PROFILE_PLAN)
+        self.assertEqual(plan, [("cpu-profile-c32-workers8", "memory-queue", 1000000, 32, False, 30)])
+        self.assertEqual(scene_worker_override(CPU_PROFILE_PLAN, plan[0][0]), 8)
+        self.assertFalse(scene_metrics_enabled(CPU_PROFILE_PLAN, plan[0][0]))
+        plain = router_environment({}, "memory-queue", 8, False)
+        profiled = router_environment({}, "memory-queue", 8, False, True)
+        self.assertEqual({key for key in plain if plain[key] != profiled[key]}, {"PAIR_ASYNC_CPU_PROFILE"})
+        self.assertEqual(profiled["PAIR_ASYNC_CPU_PROFILE"], "1")
+        with self.assertRaises(AssertionError): router_environment({}, "memory-queue", 8, True, True)
+
     def test_all_retained_lease_records_reconciled_or_original_bucket_expired(self):
         census = {"records": 5, "settled_actual": 4, "expired_pending": 1, "unresolved": 0}
         self.assertTrue(verify_lease_reconciliation(census, 10)["verified"])
