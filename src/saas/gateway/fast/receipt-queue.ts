@@ -1,7 +1,7 @@
 import { AsyncResource } from 'node:async_hooks';
 import { performance } from 'node:perf_hooks';
 import type { FastGatewayJournalPort, FastReceiptInput } from './executor.js';
-import { calculateFastReceiptCharge, fastJournalCanonicalJson } from './journal.js';
+import { captureUntrustedFastReceipt, getPreparedFastReceipt } from './prepared-receipt.js';
 
 export interface FastReceiptQueueLimits {
   readonly maxEntries?: number;
@@ -102,53 +102,6 @@ function recordTiming(counter: TimingCounter, durationMs: number): void {
   counter.lastMs = elapsed;
   counter.maxMs = Math.max(counter.maxMs, elapsed);
 }
-const USAGE_KEYS = new Set([
-  'inputTotal',
-  'inputUncached',
-  'cacheRead',
-  'cacheWrite',
-  'cacheWrite5m',
-  'cacheWrite1h',
-  'outputTotal',
-  'reasoningOutput',
-]);
-const PRICE_KEYS = new Set([
-  'kind',
-  'id',
-  'version',
-  'publicModelId',
-  'publicModelVersion',
-  'providerId',
-  'productId',
-  'protocol',
-  'endpoint',
-  'currency',
-  'commercialPolicyVersion',
-  'calculatorVersion',
-  'roundingVersion',
-  'roundingMode',
-  'roundingBoundary',
-  'rates',
-  'tokenMultipliers',
-  'effectiveAt',
-  'expiresAt',
-  'idempotencyKey',
-  'definitionDigest',
-  'createdAt',
-]);
-const RATE_KEYS = new Set([
-  'input',
-  'output',
-  'cache_read',
-  'cache_write',
-  'cache_write_5m',
-  'cache_write_1h',
-  'per_unit',
-  'per_unit_tiers',
-]);
-function scalar(value: unknown): boolean {
-  return value === null || ['string', 'number', 'boolean', 'bigint'].includes(typeof value);
-}
 function decimal(value: unknown): value is string {
   return typeof value === 'string' && /^(0|[1-9][0-9]*)$/.test(value);
 }
@@ -158,67 +111,6 @@ function freeze<T>(value: T): T {
     Object.freeze(value);
   }
   return value;
-}
-/** Whitelist the retained evidence. Never clone a request, candidate, credential or arbitrary extension. */
-function capture(input: FastReceiptInput): { receipt: FastReceiptInput; canonical: string } {
-  if (
-    ![input.intentId, input.requestId, input.tenantId].every(
-      (v) => typeof v === 'string' && v.length > 0 && v.length <= 256,
-    ) ||
-    !['succeeded', 'failed', 'unknown'].includes(input.outcome) ||
-    !/^[a-f0-9]{64}$/.test(input.usageDigest) ||
-    (input.chargeMinorUnits !== null && !decimal(input.chargeMinorUnits)) ||
-    (input.httpStatus !== null &&
-      (!Number.isInteger(input.httpStatus) || input.httpStatus < 100 || input.httpStatus > 599)) ||
-    (input.outcome === 'unknown' && input.chargeMinorUnits !== null)
-  )
-    throw new Error('FAST_RECEIPT_INVALID');
-  const usage: Record<string, string | null> = {};
-  for (const [key, value] of Object.entries(input.usage)) {
-    if (!USAGE_KEYS.has(key) || (value !== null && !decimal(value))) throw new Error('FAST_RECEIPT_INVALID');
-    usage[key] = value;
-  }
-  const proof = input.verification?.priceSnapshot;
-  if (proof) {
-    const price = proof.customerPrice;
-    if (
-      Object.keys(proof).some(
-        (key) => !['schemaVersion', 'customerPrice', 'maxInputTokens', 'maxOutputTokens'].includes(key),
-      ) ||
-      Object.entries(price).some(([key, value]) => !PRICE_KEYS.has(key) || (key !== 'rates' && !scalar(value))) ||
-      price.tokenMultipliers !== null ||
-      Object.entries(price.rates).some(
-        ([key, rate]) =>
-          !RATE_KEYS.has(key) ||
-          (rate !== null &&
-            (key === 'per_unit' ||
-              key === 'per_unit_tiers' ||
-              Object.entries(rate).some(
-                ([k, v]) => !['numeratorMinorUnits', 'denominatorUnits'].includes(k) || !scalar(v),
-              ))),
-      ) ||
-      input.outcome !== 'succeeded' ||
-      input.httpStatus === null ||
-      input.httpStatus < 200 ||
-      input.httpStatus >= 300 ||
-      input.chargeMinorUnits === null ||
-      calculateFastReceiptCharge(proof, usage) !== BigInt(input.chargeMinorUnits)
-    )
-      throw new Error('FAST_RECEIPT_INVALID_PROOF');
-  }
-  const canonical = fastJournalCanonicalJson({
-    intentId: input.intentId,
-    requestId: input.requestId,
-    tenantId: input.tenantId,
-    outcome: input.outcome,
-    chargeMinorUnits: input.chargeMinorUnits,
-    usage,
-    usageDigest: input.usageDigest,
-    httpStatus: input.httpStatus,
-    ...(proof ? { verification: { priceSnapshot: proof } } : {}),
-  });
-  // Admission must use the canonical snapshot, not re-read caller-owned getters.
-  return { receipt: JSON.parse(canonical) as FastReceiptInput, canonical };
 }
 function positive(value: number, maximum = Number.MAX_SAFE_INTEGER): number {
   if (!Number.isSafeInteger(value) || value < 1 || value > maximum)
@@ -354,7 +246,10 @@ export class FastReceiptQueue {
     this.#notify();
   }
   tryEnqueue(input: FastReceiptInput, completion: FastReceiptQueueCompletion): boolean {
-    const { receipt, canonical } = capture(input);
+    const prepared = getPreparedFastReceipt(input);
+    const { receipt, canonical } = prepared
+      ? { receipt: input, canonical: prepared.canonical }
+      : captureUntrustedFastReceipt(input);
     if (
       !decimal(completion.retainedLiabilityMinorUnits) ||
       (completion.currency !== null &&
@@ -383,7 +278,7 @@ export class FastReceiptQueue {
       return true;
     }
     // Include canonical comparison material and envelope; count separately bounds object/promise overhead.
-    const bytes = Buffer.byteLength(canonical) * 2 + 256;
+    const bytes = prepared?.retainedBytes ?? Buffer.byteLength(canonical) * 2 + 256;
     const tenantCount = this.#tenants.get(receipt.tenantId) ?? 0;
     if (
       !this.canAdmit() ||
@@ -395,7 +290,7 @@ export class FastReceiptQueue {
       return false;
     }
     // Only accepted evidence is retained; duplicates and fallbacks need no recursive freeze.
-    freeze(receipt);
+    if (!prepared) freeze(receipt);
     const acceptedAt = this.#now();
     const entry: Entry = {
       receipt,

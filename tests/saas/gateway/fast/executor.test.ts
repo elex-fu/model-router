@@ -9,6 +9,7 @@ import {
   type FastReceiptInput,
 } from '../../../../src/saas/gateway/fast/executor.js';
 import { fastJournalCanonicalJson } from '../../../../src/saas/gateway/fast/journal.js';
+import { getPreparedFastReceipt } from '../../../../src/saas/gateway/fast/prepared-receipt.js';
 import { FastReceiptQueue } from '../../../../src/saas/gateway/fast/receipt-queue.js';
 import type { FastAdmissionFeedback } from '../../../../src/saas/gateway/fast/redis-admission.js';
 import { CachedFastGatewaySnapshots } from '../../../../src/saas/gateway/fast/snapshots.js';
@@ -185,6 +186,7 @@ test('native engine sends after durable intent and completes after durable recei
   assert.equal(s.receipts[0].outcome, 'succeeded');
   assert.equal(s.receipts[0].usage.inputTotal, '10');
   assert.equal(s.receipts[0].chargeMinorUnits, '0');
+  assert.ok(getPreparedFastReceipt(s.receipts[0]), 'durable BYOK path uses owned preparation');
   assert.equal(s.receipts[0].verification, undefined);
   assert.ok(s.ended());
 });
@@ -222,6 +224,7 @@ test('paid pricing proof is the identical deeply frozen intent snapshot across a
   assert.equal(s.intents[0].maxCostMinorUnits, '144');
   assert.equal(s.receipts[0].chargeMinorUnits, '15');
   assert.equal(s.receipts[0].verification?.priceSnapshot, s.intents[0].priceSnapshot);
+  assert.ok(getPreparedFastReceipt(s.receipts[0]), 'durable paid path uses owned preparation');
   assert.deepEqual(s.receipts[0].verification?.priceSnapshot.customerPrice, expectedPrice);
   assert.equal(s.calls.filter((call) => call === 'fetch').length, 1);
 });
@@ -772,6 +775,7 @@ test('explicit async JSON and SSE terminal precede receipt ACK but never pre-sen
     assert.deepEqual(reconciled, [15]);
     assert.equal(s.receipts.length, 1);
     assert.equal(s.receipts[0].chargeMinorUnits, '15');
+    assert.ok(getPreparedFastReceipt(s.receipts[0]), 'queue preserves exact owned prepared receipt');
   }
 });
 
@@ -820,6 +824,9 @@ test('queue byte/count fallback and missing split capability preserve durable AC
     assert.equal(await pending, true);
     assert.equal(s.ended(), true);
     assert.equal(queue.snapshot().fallbacks, 1);
+    const fallbackReceipt = s.receipts.find((receipt) => receipt.intentId === 'intent-a');
+    assert.ok(fallbackReceipt);
+    assert.ok(getPreparedFastReceipt(fallbackReceipt), 'durable fallback preserves owned prepared receipt');
     assert.ok(s.calls.includes('release'));
     await queue.close();
   }

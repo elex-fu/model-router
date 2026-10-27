@@ -18,7 +18,8 @@ import {
 } from '../provider-http-transport.js';
 import { observeRequestDiagnosticPhase } from '../request-diagnostic-trace.js';
 import type { RequestPreparationPayloadCompiler } from '../request-preparation-service.js';
-import { calculateFastReceiptCharge, type FastPriceSnapshot } from './journal.js';
+import { prepareFastReceipt, prepareFastReceiptPrice } from './prepared-receipt.js';
+import type { FastPriceSnapshot } from './receipt-evidence.js';
 import type { FastReceiptQueue } from './receipt-queue.js';
 import type { FastGatewayAdmission } from './redis-admission.js';
 import {
@@ -365,7 +366,7 @@ export class FastGatewayExecutor implements FastGatewayExecutorPort {
       return false;
     }
     const priceSnapshot: FastPriceSnapshot | null = price
-      ? Object.freeze({
+      ? prepareFastReceiptPrice({
           schemaVersion: 1,
           customerPrice: price,
           maxInputTokens: maxInput.toString(),
@@ -612,24 +613,16 @@ export class FastGatewayExecutor implements FastGatewayExecutorPort {
       upstreamComplete = true;
       const succeeded = status >= 200 && status < 300;
       const usage: Record<string, string | null> = succeeded ? normalizedUsage(response) : {};
-      let charge = 0n;
-      if (succeeded && price) {
-        const calculated = calculateFastReceiptCharge(priceSnapshot, usage);
-        if (calculated > maxCost) throw new Error('Fast usage exceeds frozen price bound');
-        charge = calculated;
-      }
-      // Capture complete scalar evidence before any terminal write. A failed or
-      // ambiguous append must never be replaced by a conflicting unknown receipt.
-      const receipt: FastReceiptInput = deepFreeze({
+      // Prepare once before terminal writes; only this module-owned immutable
+      // evidence can reuse pricing, canonical bytes and SQL parameters downstream.
+      const receipt = prepareFastReceipt({
         intentId,
         requestId: input.requestId,
         tenantId: snapshot.caller.tenantId,
-        outcome: succeeded ? 'succeeded' : 'failed',
-        chargeMinorUnits: charge.toString(),
-        usage,
-        usageDigest: hash(canonical({ status, usage, charge: charge.toString() })),
         httpStatus: status,
-        ...(succeeded && priceSnapshot ? { verification: { priceSnapshot } } : {}),
+        usage,
+        priceSnapshot,
+        maxCostMinorUnits: maxCost.toString(),
       });
       receiptState = 'captured';
       let completedTokenUnits: number | undefined;
