@@ -1,0 +1,64 @@
+{
+  "report_snapshot": "2026-10-27T22:36:23+08:00",
+  "completed_cohort": {
+    "commit": "f2d988929f4adf20414d82c6db318176ad936f3b",
+    "run_id": 40510835490,
+    "artifact_id": 12741662277,
+    "artifact_sha256": "86b68f04152fd985c97378b5ffa261bb6937586f7753f864f30c6c1c347c693c",
+    "artifact_bytes": 9569609,
+    "files": 717,
+    "arms": 16,
+    "measured_requests": 242120,
+    "warm_requests": 2208,
+    "measured_queue_accepted": 157118,
+    "measured_sync_receipt_fallbacks": 85002,
+    "errors": 0,
+    "diagnostic_valid": true,
+    "performance_acceptance": false
+  },
+  "latest_code": {
+    "commit": "8d6482e7dd36748289ba5dc00ddcff109a33508d",
+    "ci_run": 40510951454,
+    "fast_ci_run": 40510951456,
+    "jobs_passed": 78
+  },
+  "unfinished_cohort_at_snapshot": {
+    "commit": "8d6482e7dd36748289ba5dc00ddcff109a33508d",
+    "run_id": 40510951391,
+    "job_id": 122245201933,
+    "status": "in_progress",
+    "artifact_available": false,
+    "canceled": false,
+    "monitoring": "paused_at_user_request"
+  },
+  "units": {
+    "rps": "successful requests per client second",
+    "cpu": "application cgroup CPU milliseconds per successful measured request",
+    "mem": "MiB container lifetime peak, not timed-only peak or summed RSS",
+    "throttle": "application cgroup throttled milliseconds over measurement",
+    "p50/p95/p99/p999/max": "full response latency milliseconds, nearest-rank; not TTFB",
+    "fallback": "timed final-minus-warm synchronous durable receipt fallback count",
+    "rate": "fallback / measured successes * 100 percent"
+  },
+  "constraints": {
+    "app_cpu": 2,
+    "app_memory_bytes": 2147483648,
+    "docker_memory_swap_bytes": 2147483648,
+    "memory_swap_semantics": "combined memory and swap limit, not additional swap",
+    "aggregate_pg_connections": 16,
+    "queue_entries": 256,
+    "queue_bytes": 2097152,
+    "aggregate_tenant_entries": 64,
+    "receipt_concurrency": 8,
+    "reconciliation_concurrency": 8
+  },
+  "limitations": [
+    "Only two repeats per arm/workload; descriptive means are not significance tests",
+    "Shared host infrastructure outside app quota",
+    "No current same-quota Sub2api comparison",
+    "85–88% synchronous receipt fallback at c200",
+    "Latest run excluded and never spliced into completed cohort",
+    "Refusal-reason telemetry not implemented"
+  ],
+  "csv": "fixed-quota-f2d-metrics.csv"
+}
