@@ -1034,13 +1034,24 @@ test('server-clock expiry closes missing/restarted rate-only work without touchi
   const keys = await f.inspector.keys(`${namespacePrefix(namespace)}:lease:*`);
   const records = await Promise.all(keys.map(async (key) => JSON.parse(required(await f.inspector.get(key)))));
   const expiresAt = Math.max(...records.map((record) => Number(record.bucket) * 1000 + 61000));
-  // The long wait is deliberate: prove this with Redis TIME and natural TTL
-  // expiry, not a client clock or an artificially deleted authority record.
+  const tombstoneExpiries = await Promise.all(keys.map((key) => f.inspector.pExpireTime(key)));
+  t.diagnostic(JSON.stringify({ bucketExpiresAt: expiresAt, tombstoneExpiries }));
+  // Rate irrelevance and tombstone disappearance are separate conditions.
+  // SET PX uses Redis's command clock, and PTTL=0 may still mean a live key
+  // at its exact expiry millisecond. Observe each original tombstone until
+  // PTTL=-2 instead of assuming bucket expiry also proves key disappearance.
+  // The long wait still uses real Redis TIME and natural TTL expiry only.
   for (;;) {
     const time = (await f.inspector.sendCommand(['TIME'])) as string[];
     const now = Number(time[0]) * 1000 + Math.floor(Number(time[1]) / 1000);
-    if (now >= expiresAt) break;
-    await delay(Math.min(1000, expiresAt - now));
+    const ttls = await Promise.all(keys.map((key) => f.inspector.pTTL(key)));
+    assert.ok(
+      ttls.every((ttl) => ttl === -2 || ttl >= 0),
+      `Unexpected persistent tombstone: ${JSON.stringify(ttls)}`,
+    );
+    if (now >= expiresAt && ttls.every((ttl) => ttl === -2)) break;
+    const untilMissing = Math.max(0, ...ttls.map((ttl) => (ttl >= 0 ? ttl + 1 : 0)));
+    await delay(Math.min(1000, Math.max(expiresAt - now, untilMissing)));
   }
   assert.equal((await f.inspector.keys(`${namespacePrefix(namespace)}:lease:*`)).length, 0);
   const fresh = admitted(await service.acquire(replayRequest));
