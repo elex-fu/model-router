@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { parseMinorUnits } from '../../billing/money.js';
+import type { CustomerPriceVersionRecord } from '../../pricing/types.js';
 import type { FastReceiptInput } from './executor.js';
 import {
   calculateFastReceiptCharge,
@@ -11,6 +12,7 @@ import {
 /** Only exact module-owned objects carry reusable work. No property/symbol is a trust marker. */
 const preparedReceipts = new WeakMap<object, PreparedFastReceipt>();
 const preparedPrices = new WeakMap<object, string>();
+const capturedCustomerPrices = new WeakSet<object>();
 export interface PreparedFastReceipt {
   readonly canonical: string;
   readonly receiptDigest: string;
@@ -33,27 +35,75 @@ function copyJsonFacts(value: unknown, ancestors = new Set<object>(), normalizeB
     const descriptor = Object.getOwnPropertyDescriptor(value, key);
     if (typeof key !== 'string' || !descriptor?.enumerable || !('value' in descriptor))
       throw new Error('FAST_RECEIPT_INVALID');
-    Object.defineProperty(copy, key, {
-      value: copyJsonFacts(descriptor.value, ancestors, normalizeBigInt),
-      enumerable: true,
-      writable: true,
-      configurable: true,
-    });
+    const child = copyJsonFacts(descriptor.value, ancestors, normalizeBigInt);
+    // The sole inherited setter on a fresh ordinary record must not mutate its
+    // prototype. Other data keys can use ordinary fast property assignment.
+    if (key === '__proto__')
+      Object.defineProperty(copy, key, {
+        value: child,
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      });
+    else copy[key] = child;
   }
   ancestors.delete(value);
   return copy;
 }
 
-/** Capture before intent awaits; the receipt later shares this exact immutable price. */
+/** Capture before executor awaits, replacing (not following) its old JSON clone. */
+export function captureFastReceiptCustomerPrice(input: CustomerPriceVersionRecord): CustomerPriceVersionRecord {
+  if (capturedCustomerPrices.has(input)) return input;
+  const customerPrice = copyJsonFacts(input, new Set(), true) as CustomerPriceVersionRecord;
+  freeze(customerPrice);
+  capturedCustomerPrices.add(customerPrice);
+  return customerPrice;
+}
+
+/** The wrapper copies scalars, not the price subtree already owned by this module. */
 export function prepareFastReceiptPrice(snapshot: FastPriceSnapshot): FastPriceSnapshot {
   if (preparedPrices.has(snapshot)) return snapshot;
-  const price = copyJsonFacts(snapshot, new Set(), true) as FastPriceSnapshot;
+  // Descriptor capture keeps the public API's getter/prototype/extension rejection;
+  // only exact privately owned nested prices avoid the full defensive clone.
+  const captured = captureFields(snapshot, SNAPSHOT_KEYS);
+  const ownedCustomer = capturedCustomerPrices.has(captured.customerPrice as object);
+  if (ownedCustomer) {
+    if (typeof captured.maxInputTokens === 'bigint') captured.maxInputTokens = captured.maxInputTokens.toString();
+    if (typeof captured.maxOutputTokens === 'bigint') captured.maxOutputTokens = captured.maxOutputTokens.toString();
+  }
+  const price = (ownedCustomer ? captured : copyJsonFacts(captured, new Set(), true)) as unknown as FastPriceSnapshot;
   validatePriceSnapshot(price);
   if (!validPriceShape(price)) throw new Error('FAST_RECEIPT_INVALID_PROOF');
   const canonical = fastJournalCanonicalJson(price);
-  freeze(price);
+  if (ownedCustomer) Object.freeze(price);
+  else freeze(price);
   preparedPrices.set(price, canonical);
   return price;
+}
+
+/** Fixed schema: capture each own data field once; never retain caller accessors/aliases. */
+function captureFields(input: unknown, keys: ReadonlySet<string>): Record<string, unknown> {
+  if (!input || typeof input !== 'object' || Object.getPrototypeOf(input) !== Object.prototype)
+    throw new Error('FAST_RECEIPT_INVALID');
+  const copy: Record<string, unknown> = {};
+  for (const key of Reflect.ownKeys(input)) {
+    const descriptor = Object.getOwnPropertyDescriptor(input, key);
+    if (typeof key !== 'string' || !keys.has(key) || !descriptor?.enumerable || !('value' in descriptor))
+      throw new Error('FAST_RECEIPT_INVALID');
+    copy[key] = descriptor.value;
+  }
+  return copy;
+}
+
+function captureUsage(input: unknown): Record<string, string | null> {
+  const usage = captureFields(input, USAGE_KEYS);
+  for (const value of Object.values(usage)) {
+    if (value !== null) {
+      if (!decimal(value)) throw new Error('FAST_RECEIPT_INVALID');
+      parseMinorUnits(value, { allowZero: true });
+    }
+  }
+  return usage as Record<string, string | null>;
 }
 
 /** Complete provider responses only: callers supply facts, never a claimed charge, digest or trust bit. */
@@ -66,27 +116,23 @@ export function prepareFastReceipt(input: {
   readonly priceSnapshot: FastPriceSnapshot | null;
   readonly maxCostMinorUnits: string;
 }): FastReceiptInput {
-  const facts = copyJsonFacts({
+  const facts = {
     intentId: input.intentId,
     requestId: input.requestId,
     tenantId: input.tenantId,
     httpStatus: input.httpStatus,
-    usage: input.usage,
+    usage: captureUsage(input.usage),
     maxCostMinorUnits: input.maxCostMinorUnits,
-  }) as Omit<typeof input, 'priceSnapshot'>;
+  };
   if (
     ![facts.intentId, facts.requestId, facts.tenantId].every(
       (v) => typeof v === 'string' && v.length > 0 && v.length <= 256,
     ) ||
     !Number.isInteger(facts.httpStatus) ||
     facts.httpStatus < 100 ||
-    facts.httpStatus > 599 ||
-    !facts.usage ||
-    typeof facts.usage !== 'object' ||
-    Object.entries(facts.usage).some(([key, value]) => !USAGE_KEYS.has(key) || (value !== null && !decimal(value)))
+    facts.httpStatus > 599
   )
     throw new Error('FAST_RECEIPT_INVALID');
-  for (const value of Object.values(facts.usage)) if (value !== null) parseMinorUnits(value, { allowZero: true });
   const maximum = parseMinorUnits(facts.maxCostMinorUnits, { allowZero: true });
   const succeeded = facts.httpStatus >= 200 && facts.httpStatus < 300;
   const rawPrice = input.priceSnapshot;
@@ -151,6 +197,7 @@ export function prepareFastReceipt(input: {
   return receipt;
 }
 
+const SNAPSHOT_KEYS = new Set(['schemaVersion', 'customerPrice', 'maxInputTokens', 'maxOutputTokens']);
 const USAGE_KEYS = new Set([
   'inputTotal',
   'inputUncached',

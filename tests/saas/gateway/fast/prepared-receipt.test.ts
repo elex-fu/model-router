@@ -10,6 +10,7 @@ import {
   PostgresFastGatewayJournal,
 } from '../../../../src/saas/gateway/fast/journal.js';
 import {
+  captureFastReceiptCustomerPrice,
   getPreparedFastReceipt,
   prepareFastReceipt,
   prepareFastReceiptPrice,
@@ -317,4 +318,88 @@ test('public journal snapshots getter-backed evidence once and retries identical
   } finally {
     await journal.close({ drain: false });
   }
+});
+
+test('native customer price is captured once and scalar envelopes reuse only exact private ownership', (t) => {
+  const original = facts();
+  const descriptor = t.mock.method(Object, 'getOwnPropertyDescriptor');
+  const captured = captureFastReceiptCustomerPrice(original.priceSnapshot.customerPrice);
+  const before = descriptor.mock.calls.length;
+  const price = prepareFastReceiptPrice({ ...original.priceSnapshot, customerPrice: captured });
+  const reads = descriptor.mock.calls.slice(before);
+  assert.equal(price.customerPrice, captured);
+  assert.notEqual(captured, original.priceSnapshot.customerPrice);
+  assert.equal(reads.length, 4, 'only four wrapper fields are captured, never the owned price subtree again');
+  assert.ok(reads.every(({ arguments: [value] }) => value !== captured && value !== captured.rates));
+  assert.equal(captureFastReceiptCustomerPrice(captured), captured);
+  descriptor.mock.restore();
+  assert.notEqual(
+    captureFastReceiptCustomerPrice(original.priceSnapshot.customerPrice),
+    captured,
+    'mutable/raw source identity is never memoized as trusted',
+  );
+  const bigintWrapper = prepareFastReceiptPrice({
+    ...original.priceSnapshot,
+    customerPrice: captured,
+    maxInputTokens: 80n as unknown as string,
+    maxOutputTokens: 64n as unknown as string,
+  });
+  assert.equal(bigintWrapper.maxInputTokens, '80');
+  assert.equal(bigintWrapper.maxOutputTokens, '64');
+  assert.equal(bigintWrapper.customerPrice, captured);
+  const bigintReceipt = prepareFastReceipt({ ...original, priceSnapshot: bigintWrapper });
+  assert.doesNotThrow(() => JSON.stringify(bigintReceipt));
+  assert.equal(getPreparedFastReceipt(bigintReceipt)?.canonical, fastJournalCanonicalJson(bigintReceipt));
+
+  const replay = prepareFastReceiptPrice({ ...price, customerPrice: { ...captured } });
+  assert.notEqual(replay.customerPrice, captured, 'a copied caller price is not privately owned');
+  assert.deepEqual(replay.customerPrice, captured);
+  Object.assign(original.priceSnapshot.customerPrice.rates.input ?? {}, { numeratorMinorUnits: '900' });
+  const receipt = prepareFastReceipt({ ...original, priceSnapshot: price });
+  assert.equal(receipt.chargeMinorUnits, '15');
+  assert.equal(receipt.verification?.priceSnapshot.customerPrice, captured);
+  assert.equal(getPreparedFastReceipt(receipt)?.canonical, fastJournalCanonicalJson(receipt));
+});
+
+test('fixed usage capture rejects hidden, inherited, accessor and extension facts and reads input once', () => {
+  for (const usage of [
+    Object.assign(Object.create({ hidden: '1' }), facts().usage),
+    Object.defineProperty({ ...facts().usage }, 'inputTotal', { get: () => '10', enumerable: true }),
+    Object.defineProperty({ ...facts().usage }, 'hidden', { value: '1' }),
+    { ...facts().usage, [Symbol('secret')]: '1' },
+    { ...facts().usage, inputTotal: { valueOf: () => 10 } },
+    { ...facts().usage, unexpected: '0' },
+  ])
+    assert.throws(() => prepareFastReceipt({ ...facts(), usage }), /INVALID/);
+  const source = facts();
+  let reads = 0;
+  const receipt = prepareFastReceipt({
+    ...source,
+    get usage() {
+      reads++;
+      return source.usage;
+    },
+  });
+  source.usage.inputTotal = '900';
+  assert.equal(reads, 1);
+  assert.equal(receipt.usage.inputTotal, '10');
+  assert.equal(receipt.chargeMinorUnits, '15');
+});
+
+test('customer capture cannot turn injected __proto__ or copied ownership into trusted receipt evidence', () => {
+  const input = facts();
+  Object.defineProperty(input.priceSnapshot.customerPrice, '__proto__', {
+    value: { injected: true },
+    enumerable: true,
+  });
+  const captured = captureFastReceiptCustomerPrice(input.priceSnapshot.customerPrice);
+  assert.equal(Object.getPrototypeOf(captured), Object.prototype);
+  assert.ok(Object.hasOwn(captured, '__proto__'));
+  assert.equal(Object.hasOwn(Object.prototype, 'injected'), false);
+  assert.throws(() => prepareFastReceiptPrice({ ...input.priceSnapshot, customerPrice: captured }), /INVALID_PROOF/);
+  for (const invalid of [
+    Object.defineProperty({ ...facts().priceSnapshot.customerPrice }, 'id', { get: () => 'id', enumerable: true }),
+    Object.assign(Object.create({ hidden: true }), facts().priceSnapshot.customerPrice),
+  ])
+    assert.throws(() => captureFastReceiptCustomerPrice(invalid), /INVALID/);
 });

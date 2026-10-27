@@ -1485,3 +1485,19 @@ test('failed responses preserve rate-limit and failure feedback without actual u
     }
   }
 });
+
+test('one-time customer capture preserves strict fallback for unsupported commercial pricing', async () => {
+  for (const unsupported of ['multipliers', 'perUnit', 'tiers'] as const) {
+    const s = setup({}, false, true);
+    const price = s.snapshot.candidates[0].customerPrice;
+    assert.ok(price);
+    if (unsupported === 'multipliers') Object.assign(price, { tokenMultipliers: {} });
+    else if (unsupported === 'perUnit')
+      Object.assign(price.rates, { per_unit: { numeratorMinorUnits: 1n, denominatorUnits: 1n } });
+    else Object.assign(price.rates, { per_unit_tiers: { '1k': { numeratorMinorUnits: 1n, denominatorUnits: 1n } } });
+    assert.equal(await s.executor.execute(s.input), false);
+    assert.equal(s.calls.includes('admit'), false);
+    assert.equal(s.calls.includes('intent'), false);
+    assert.equal(s.calls.includes('fetch'), false);
+  }
+});

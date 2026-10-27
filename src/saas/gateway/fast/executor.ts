@@ -18,7 +18,7 @@ import {
 } from '../provider-http-transport.js';
 import { observeRequestDiagnosticPhase } from '../request-diagnostic-trace.js';
 import type { RequestPreparationPayloadCompiler } from '../request-preparation-service.js';
-import { prepareFastReceipt, prepareFastReceiptPrice } from './prepared-receipt.js';
+import { captureFastReceiptCustomerPrice, prepareFastReceipt, prepareFastReceiptPrice } from './prepared-receipt.js';
 import type { FastPriceSnapshot } from './receipt-evidence.js';
 import type { FastReceiptQueue } from './receipt-queue.js';
 import type { FastGatewayAdmission } from './redis-admission.js';
@@ -124,13 +124,6 @@ function hash(value: string | Uint8Array): string {
 }
 function canonical(value: unknown): string {
   return JSON.stringify(value, (_key, item) => (typeof item === 'bigint' ? item.toString() : item));
-}
-function deepFreeze<T>(value: T): T {
-  if (value && typeof value === 'object') {
-    for (const child of Object.values(value)) deepFreeze(child);
-    Object.freeze(value);
-  }
-  return value;
 }
 function fallbackReason(input: FastGatewayExecuteInput): string | null {
   if (input.idempotencyKey !== undefined) return 'client_idempotency';
@@ -264,7 +257,7 @@ export class FastGatewayExecutor implements FastGatewayExecutorPort {
     // may refresh or reuse its snapshot objects; that must never change the
     // maximum, durable intent price, final charge or compaction proof in flight.
     const price: CustomerPriceVersionRecord | null = candidate.customerPrice
-      ? deepFreeze(JSON.parse(canonical(candidate.customerPrice)) as CustomerPriceVersionRecord)
+      ? captureFastReceiptCustomerPrice(candidate.customerPrice)
       : null;
     if (candidate.authority.supplyMode === 'platform' && (!price || !pricingSupported(price))) {
       input.selected?.('strict', 'price_policy');
