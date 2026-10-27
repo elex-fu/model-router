@@ -20,6 +20,8 @@ export interface NativeFastHttpRoute {
 }
 export interface NativeFastHttpConfig {
   estimator: 'builtin' | 'fixed-4096';
+  /** Test-only matched quota profiles; omitted preserves the native gate's 64. */
+  maxConcurrency?: 64 | 256;
   privateKeyFile: string;
   publicKeyFile: string;
   mockPort: number;
@@ -45,6 +47,8 @@ export async function createManagedSaasGatewayRuntime(
   const configPath = options.env.NATIVE_FAST_HTTP_CONFIG;
   if (!configPath) throw new Error('Native HTTP fixture configuration is required');
   const config = JSON.parse(await readFile(configPath, 'utf8')) as NativeFastHttpConfig;
+  const maxConcurrency = config.maxConcurrency ?? 64;
+  if (maxConcurrency !== 64 && maxConcurrency !== 256) throw new Error('Unsupported native fixture concurrency');
   const registry = new TrustedPreparedRequestVerifierKeyRegistry({
     keys: [
       { keyId: 'r9-local-test', publicKey: createPublicKey(await readFile(config.publicKeyFile)), status: 'active' },
@@ -80,7 +84,7 @@ export async function createManagedSaasGatewayRuntime(
           activeKeyVersion: 'r9-test-v1',
           keys: [{ version: 'r9-test-v1', key: Buffer.from(config.affinityKey, 'base64') }],
         },
-        leaseConcurrencyLimit: 64,
+        leaseConcurrencyLimit: maxConcurrency,
       },
       idempotencyHmacKey: Buffer.from(config.idempotencyKey, 'base64'),
       providerPreparationRoute: async ({ authority }) => {
@@ -157,7 +161,7 @@ export async function createManagedSaasGatewayRuntime(
       fetch: (url, init) => undiciFetch(url, init as Parameters<typeof undiciFetch>[1]) as unknown as Promise<Response>,
       endpointPolicy,
       timeoutMs: 60000,
-      maxConcurrency: 64,
+      maxConcurrency,
       leaseTtlMs: 90000,
       maxBodyBytes: 1048576,
       entryPoint: 'r9-current-build-mock-test-assembly',

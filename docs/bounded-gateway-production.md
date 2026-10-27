@@ -253,9 +253,11 @@ Local socket test startup can be sandbox-blocked with `listen EPERM`; that is
 the authorized CI fixture. There is no measured production-mode throughput or
 CPU-efficiency claim in this change.
 
-The user's fixed-CPU comparison remains a required subsequent implementation
-and test phase, not optional documentation: a separate CI diagnostic workflow
-will run matched single-business and bounded-two ABBA arms from the **same final
+The user's fixed-CPU comparison remains a required subsequent execution and
+acceptance phase, not optional documentation. The separate explicit-opt-in
+[fixed CPU quota diagnostic](fixed-cpu-quota-diagnostic.md) now contains the
+portable runner, container assets and pure validation contracts. When authorized
+after native correctness CI is green, it runs matched single-business and bounded-two ABBA arms from the **same final
 image/source**, app-container quota `--cpus=2` with actual `cpu.max` readback,
 fixed aggregate PG/queue/credit policy, fresh wallets and full finance/actual-TPM
 drain. The app container includes the primary; PG, Redis, mock and driver remain

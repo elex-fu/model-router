@@ -21,6 +21,22 @@ jobs:
           cache-dependency-path: package-lock.json
       - name: Install from lockfile
         run: npm ci
+      # Official v5 version/cache inputs: https://github.com/actions/setup-go/blob/v5/README.md
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.4"
+          check-latest: false
+          cache: false
+      - name: Compile and unit-test fixed quota helpers without listeners
+        env:
+          CGO_ENABLED: "0"
+          GOTOOLCHAIN: local
+        run: |
+          test "$(go env GOVERSION)" = go1.24.4
+          go test scripts/performance/fixed-cpu/client.go scripts/performance/fixed-cpu/client_test.go
+          go test scripts/performance/fixed-cpu/mock.go scripts/performance/fixed-cpu/mock_test.go
+          go build -trimpath -o "$RUNNER_TEMP/quota-client" scripts/performance/fixed-cpu/client.go
+          go build -trimpath -o "$RUNNER_TEMP/quota-mock" scripts/performance/fixed-cpu/mock.go
       - name: Build server and console
         run: npm run build
       - name: Run offline tests
@@ -29,6 +45,10 @@ jobs:
         run: |
           node --test scripts/performance/bounded-business-cluster.test.cjs scripts/performance/bounded-business-capacity-probe.test.cjs
           python3 -m unittest discover -s scripts/performance -p 'bounded_business_*_test.py'
+      - name: Run fixed CPU quota pure contracts (no timing or Docker)
+        run: |
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/performance -p 'fixed_cpu_quota_*_test.py'
+          node --test scripts/performance/fixed-cpu/*.test.cjs
       - name: Run pinned Sub2api diagnostic runner unit tests
         run: python3 -m unittest discover -s scripts/performance -p 'sub2api_fresh_*_test.py'
       - name: Install Chromium for browser E2E

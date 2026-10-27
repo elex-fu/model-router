@@ -6,7 +6,12 @@ import type { SaasDatabase } from '../../../../src/saas/db/types.js';
 import type { ProviderEnvironment } from '../../../../src/saas/runtime/providers.js';
 import type { NativeFastHttpRoute } from './native-http-runtime-fixture.js';
 
-export async function seedNativeFastHttpInventory(database: SaasDatabase, kmsEnv: ProviderEnvironment) {
+export async function seedNativeFastHttpInventory(
+  database: SaasDatabase,
+  kmsEnv: ProviderEnvironment,
+  maxConcurrency: 64 | 256 = 64,
+) {
+  assert.ok(maxConcurrency === 64 || maxConcurrency === 256, 'known native fixture concurrency');
   const { SaasIdentityService } = await import('../../../../src/saas/identity/service.js');
   const { SaasCatalogService } = await import('../../../../src/saas/catalog/service.js');
   const { SaasProjectInferencePolicyService } = await import('../../../../src/saas/gateway/project-policy-service.js');
@@ -350,21 +355,21 @@ export async function seedNativeFastHttpInventory(database: SaasDatabase, kmsEnv
   const nextVersion = (BigInt(policy.version) + 1n).toString();
   await database.transaction(async (executor) => {
     await executor.query(
-      `UPDATE saas_tenants SET requests_per_minute=600000,tokens_per_minute=600000000,max_concurrent_requests=64 WHERE id=$1`,
-      [tenant.id],
+      `UPDATE saas_tenants SET requests_per_minute=600000,tokens_per_minute=600000000,max_concurrent_requests=$2 WHERE id=$1`,
+      [tenant.id, maxConcurrency],
     );
     await executor.query(
       `INSERT INTO saas_project_inference_policy_versions(tenant_id,project_id,version,status,changed_by_user_id,created_at,requests_per_minute,tokens_per_minute,max_concurrent_requests)
-      SELECT tenant_id,project_id,$3,status,$4,clock_timestamp(),600000,600000000,64 FROM saas_project_inference_policy_versions WHERE tenant_id=$1 AND project_id=$2 AND version=$5`,
-      [tenant.id, project.id, nextVersion, admin.id, policy.version],
+      SELECT tenant_id,project_id,$3,status,$4,clock_timestamp(),600000,600000000,$6 FROM saas_project_inference_policy_versions WHERE tenant_id=$1 AND project_id=$2 AND version=$5`,
+      [tenant.id, project.id, nextVersion, admin.id, policy.version, maxConcurrency],
     );
     await executor.query(
       'UPDATE saas_projects SET inference_policy_version=$3 WHERE tenant_id=$1 AND id=$2 AND inference_policy_version=$4',
       [tenant.id, project.id, nextVersion, policy.version],
     );
     await executor.query(
-      'UPDATE saas_api_keys SET requests_per_minute=600000,tokens_per_minute=600000000,max_concurrent_requests=64,authz_version=authz_version+1 WHERE tenant_id=$1 AND id=$2',
-      [tenant.id, key.id],
+      'UPDATE saas_api_keys SET requests_per_minute=600000,tokens_per_minute=600000000,max_concurrent_requests=$3,authz_version=authz_version+1 WHERE tenant_id=$1 AND id=$2',
+      [tenant.id, key.id, maxConcurrency],
     );
     await new PlatformWalletLedgerService().postVerifiedFunding(executor, {
       tenantId: tenant.id,

@@ -1,0 +1,80 @@
+name: Fixed CPU quota diagnostic (explicit opt-in)
+
+# Ordinary pushes skip every job; only the exact owner-authorized marker can opt in.
+on:
+  push:
+    branches: [perf/db-hotpath-20261026]
+  workflow_dispatch:
+    inputs:
+      authorization:
+        description: 'After native CI green and owner GO, type RUN_FIXED_CPU_DIAGNOSTIC (up to 135 runner-minutes)'
+        required: true
+        type: string
+      profiles:
+        description: 'One ABBA block for each selected profile/protocol; no retries'
+        required: true
+        type: choice
+        default: c32
+        options: [c32, c200, both]
+      protocols:
+        required: true
+        type: choice
+        default: both
+        options: [json, sse, both]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: fixed-cpu-quota-diagnostic
+  cancel-in-progress: false
+
+jobs:
+  quota-diagnostic:
+    if: >-
+      github.repository == 'elex-fu/model-router' &&
+      github.ref == 'refs/heads/perf/db-hotpath-20261026' &&
+      ((github.event_name == 'push' && github.event.head_commit.message == '[run-fixed-cpu-quota]') ||
+      (github.event_name == 'workflow_dispatch' && inputs.authorization == 'RUN_FIXED_CPU_DIAGNOSTIC'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 135
+    steps:
+      - uses: actions/checkout@v4
+      - name: Refuse timing without explicit GO and exact-SHA correctness gates
+        uses: actions/github-script@v7
+        env:
+          AUTHORIZATION: ${{ inputs.authorization }}
+        with:
+          script: |
+            const fs = require('node:fs');
+            const path = require('node:path');
+            const { waitForCorrectness } = require('./scripts/performance/fixed-cpu/workflow-gate.cjs');
+            await waitForCorrectness({ github, context, authorization: process.env.AUTHORIZATION,
+              observe: evidence => fs.writeFileSync(path.join(process.env.RUNNER_TEMP, 'quota-correctness-proof.json'), JSON.stringify(evidence, null, 2)) });
+      - name: Validate finite source-only runner contracts
+        run: |
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/performance -p 'fixed_cpu_quota_*_test.py'
+          node --test scripts/performance/fixed-cpu/*.test.cjs
+      - name: Run app-only 2-CPU 2-GiB matched-image ABBA cohort
+        env:
+          QUOTA_PROFILES: ${{ inputs.profiles || 'both' }}
+          QUOTA_PROTOCOLS: ${{ inputs.protocols || 'both' }}
+          QUOTA_AUTHORIZATION: ${{ github.event_name == 'push' && 'RUN_FIXED_CPU_DIAGNOSTIC' || inputs.authorization }}
+          QUOTA_CORRECTNESS_SHA: ${{ github.sha }}
+        run: >-
+          PYTHONDONTWRITEBYTECODE=1 python3 scripts/performance/fixed_cpu_quota_runner.py
+          --execute --authorization "$QUOTA_AUTHORIZATION"
+          --native-correctness-sha "$QUOTA_CORRECTNESS_SHA"
+          --profiles "$QUOTA_PROFILES" --protocols "$QUOTA_PROTOCOLS"
+          --output "$RUNNER_TEMP/quota-evidence"
+      - name: Retain all completed and failed-arm evidence, never private fixture keys/env
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fixed-cpu-quota-${{ github.sha }}-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/quota-evidence
+            ${{ runner.temp }}/quota-correctness-proof.json
+          retention-days: 14
+          if-no-files-found: warn
