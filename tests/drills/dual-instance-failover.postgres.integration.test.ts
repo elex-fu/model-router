@@ -29,6 +29,13 @@ const LEASE_TTL_MS = 2_000;
 
 interface Marker {
   readonly kind: string;
+  readonly sequence: number;
+  readonly wallTimeMs?: number;
+  readonly monotonicMs?: number;
+  readonly operationDurationMs?: number;
+  readonly sinceAckMs?: number;
+  readonly stage?: string;
+  readonly code?: string;
   readonly instanceId?: string;
   readonly role?: string;
   readonly gate?: string;
@@ -113,10 +120,13 @@ async function untilMarker(
   label: string,
   exits: readonly Promise<ChildExit>[],
   timeoutMs = 90_000,
+  check?: (observed: readonly Marker[]) => void,
 ): Promise<Marker> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
-    const found = markers(progressPath).find(predicate);
+    const observed = markers(progressPath);
+    check?.(observed);
+    const found = observed.find(predicate);
     if (found) return found;
     const raced = await Promise.race([
       Promise.race(exits.map((exit) => exit.then((value) => ({ exit: value }) as const))),
@@ -154,6 +164,10 @@ interface LeaseRow {
   readonly status: string;
   readonly attempt_id: string;
   readonly live: boolean;
+  readonly db_now: string;
+  readonly lease_expires_at: string;
+  readonly updated_at: string;
+  readonly remaining_ms: string;
 }
 
 test('OPS-01 I3: dual-instance SIGKILL failover keeps gates green and PostgreSQL lease authority exact', {
@@ -172,7 +186,44 @@ test('OPS-01 I3: dual-instance SIGKILL failover keeps gates green and PostgreSQL
   const scratch = mkdtempSync(join(tmpdir(), 'ops01-failover-drill-'));
   const progressPath = join(scratch, 'progress.jsonl');
   const children: Array<{ child: ChildProcess }> = [];
+  let diagnosticStage = 'startup';
+  let survivorStopRequestedAt: number | undefined;
+  let continuity: { instanceId: string; token: string; sequence: number } | undefined;
+  function assertContinuity(observed: readonly Marker[] = markers(progressPath)): void {
+    if (!continuity) return;
+    const current = observed.filter((entry) =>
+      entry.instanceId === continuity!.instanceId && entry.sequence >= continuity!.sequence);
+    assert.equal(current.filter((entry) => entry.kind === 'lease-acquired').length, 1,
+      'survivor cannot reacquire before intentional SIGTERM');
+    assert.ok(current.every((entry) => !['lease-lost', 'failed', 'shutdown'].includes(entry.kind)),
+      'survivor lease continuity must not be lost before intentional SIGTERM');
+    assert.ok(current.every((entry) => entry.fencingToken === undefined || entry.fencingToken === continuity!.token),
+      'survivor must retain the exact failover fencing token');
+  }
   t.after(async () => {
+    // Observe before killing children/removing scratch. Never emit raw errors.
+    try {
+      const observed = markers(progressPath);
+      const selected = observed.slice(-120).map((entry) => ({
+        kind: entry.kind, instanceId: entry.instanceId, sequence: entry.sequence,
+        wallTimeMs: entry.wallTimeMs, monotonicMs: entry.monotonicMs,
+        fencingToken: entry.fencingToken, renewals: entry.renewals,
+        operationDurationMs: entry.operationDurationMs, sinceAckMs: entry.sinceAckMs,
+        gate: entry.gate, ok: entry.ok, clean: entry.clean, stage: entry.stage,
+        code: entry.code && /^[A-Z][A-Z0-9_]{0,63}$/.test(entry.code) ? entry.code : undefined,
+      }));
+      const rows = await leaseRows().catch(() => null);
+      t.diagnostic('failover evidence ' + JSON.stringify({
+        stage: diagnosticStage, leaseTtlMs: LEASE_TTL_MS, survivorStopRequestedAt,
+        markerCount: observed.length, markerTail: selected, databaseRows: rows,
+        authorityEvents: observed.filter((entry) =>
+          ['lease-acquired', 'lease-lost', 'failed', 'shutdown'].includes(entry.kind))
+          .map(({ kind, instanceId, sequence, fencingToken, wallTimeMs, monotonicMs }) =>
+            ({ kind, instanceId, sequence, fencingToken, wallTimeMs, monotonicMs })),
+      }));
+    } catch {
+      t.diagnostic('failover evidence unavailable; original assertion remains authoritative');
+    }
     await phase('cleanup', async () => {
       for (const entry of children) {
         if (entry.child.exitCode === null && entry.child.signalCode === null) entry.child.kill('SIGKILL');
@@ -274,6 +325,8 @@ test('OPS-01 I3: dual-instance SIGKILL failover keeps gates green and PostgreSQL
     return phase('snapshot', async () => {
       const result = await migrator.database.query<LeaseRow>(
         `SELECT fencing_token::text, status, attempt_id,
+                clock_timestamp()::text AS db_now, lease_expires_at::text, updated_at::text,
+                (EXTRACT(EPOCH FROM (lease_expires_at - clock_timestamp())) * 1000)::text AS remaining_ms,
                 lease_expires_at > clock_timestamp() AS live
            FROM saas_provider_account_leases
           WHERE account_id = $1
@@ -298,6 +351,7 @@ test('OPS-01 I3: dual-instance SIGKILL failover keeps gates green and PostgreSQL
   }
 
   // Instance A assembles its gates and takes the lease.
+  diagnosticStage = 'holder-startup';
   const attemptA = randomUUID();
   const instanceA = startHold('a', attemptA);
   const readyA = await untilMarker(
@@ -309,22 +363,23 @@ test('OPS-01 I3: dual-instance SIGKILL failover keeps gates green and PostgreSQL
   assert.equal(readyA.role, 'gateway');
   const acquiredA = await untilMarker(
     progressPath,
-    (marker) => marker.kind === 'lease-acquired' && marker.instanceId === 'a',
+    (marker) => marker.kind === 'lease-acquired' && marker.instanceId === 'a' && marker.sequence > readyA.sequence,
     'a:lease-acquired',
     [instanceA.exit],
   );
   const tokenA = acquiredA.fencingToken ?? '';
 
   // Instance B assembles the same gates but stays fenced out while A holds.
+  diagnosticStage = 'contender-startup';
   const attemptB = randomUUID();
   const instanceB = startHold('b', attemptB);
-  await untilMarker(progressPath, (marker) => marker.kind === 'ready' && marker.instanceId === 'b', 'b:ready', [
+  const readyB = await untilMarker(progressPath, (marker) => marker.kind === 'ready' && marker.instanceId === 'b', 'b:ready', [
     instanceA.exit,
     instanceB.exit,
   ]);
   await untilMarker(
     progressPath,
-    (marker) => marker.kind === 'lease-pending' && marker.instanceId === 'b',
+    (marker) => marker.kind === 'lease-pending' && marker.instanceId === 'b' && marker.sequence > readyB.sequence,
     'b:lease-pending',
     [instanceA.exit, instanceB.exit],
   );
@@ -338,6 +393,7 @@ test('OPS-01 I3: dual-instance SIGKILL failover keeps gates green and PostgreSQL
   assert.equal(heldByA?.attempt_id, attemptA, 'PostgreSQL shows exactly A as the live lease holder');
 
   // SIGKILL the holder mid-renewal: the process must die by the real signal.
+  diagnosticStage = 'sigkill-failover';
   instanceA.child.kill('SIGKILL');
   const crash = await boundedExit(instanceA.exit, 15_000);
   assert.equal(crash.signal, 'SIGKILL', 'the killed instance must die by the real signal, not gracefully');
@@ -352,6 +408,8 @@ test('OPS-01 I3: dual-instance SIGKILL failover keeps gates green and PostgreSQL
     30_000,
   );
   const tokenB = acquiredB.fencingToken ?? '';
+  continuity = { instanceId: 'b', token: tokenB, sequence: acquiredB.sequence };
+  assertContinuity();
   assert.ok(BigInt(tokenB) > BigInt(tokenA), 'fencing tokens must strictly increase across failover');
   const rowsAfterFailover = await leaseRows();
   const heldByB = liveLease(rowsAfterFailover);
@@ -367,11 +425,14 @@ test('OPS-01 I3: dual-instance SIGKILL failover keeps gates green and PostgreSQL
   // both roles' startup gate chains still pass after the kill.
   await untilMarker(
     progressPath,
-    (marker) => marker.kind === 'lease-renewed' && marker.instanceId === 'b' && Number(marker.renewals) >= 3,
+    (marker) => marker.kind === 'lease-renewed' && marker.instanceId === 'b' &&
+      marker.fencingToken === tokenB && marker.sequence > acquiredB.sequence && Number(marker.renewals) >= 3,
     'b:lease-renewed>=3',
     [instanceB.exit],
     30_000,
+    assertContinuity,
   );
+  diagnosticStage = 'post-failover-gate-probes';
   for (const [probeId, probeUrl, probeRole] of [
     ['probe-gateway', urls[2], 'gateway'],
     ['probe-control-plane', urls[1], 'control-plane'],
@@ -386,24 +447,42 @@ test('OPS-01 I3: dual-instance SIGKILL failover keeps gates green and PostgreSQL
     const probeMarkers = markers(progressPath).filter((marker) => marker.instanceId === probeId);
     assert.ok(probeMarkers.some((marker) => marker.kind === 'ready'));
     assert.ok(probeMarkers.some((marker) => marker.kind === 'shutdown' && marker.clean === true));
+    assertContinuity();
   }
 
   // Restart the killed instance: it passes the gates again but stays fenced
   // out until the survivor gracefully releases.
+  diagnosticStage = 'restarted-contender';
+  assertContinuity();
   const attemptA2 = randomUUID();
   const instanceA2 = startHold('a2', attemptA2);
-  await untilMarker(progressPath, (marker) => marker.kind === 'ready' && marker.instanceId === 'a2', 'a2:ready', [
-    instanceB.exit,
-    instanceA2.exit,
-  ]);
+  const readyA2 = await untilMarker(
+    progressPath, (marker) => marker.kind === 'ready' && marker.instanceId === 'a2', 'a2:ready',
+    [instanceB.exit, instanceA2.exit], 90_000, assertContinuity,
+  );
   await untilMarker(
     progressPath,
-    (marker) => marker.kind === 'lease-pending' && marker.instanceId === 'a2',
+    (marker) => marker.kind === 'lease-pending' && marker.instanceId === 'a2' && marker.sequence > readyA2.sequence,
     'a2:lease-pending',
     [instanceB.exit, instanceA2.exit],
+    90_000,
+    assertContinuity,
   );
-  assert.equal(liveLease(await leaseRows())?.attempt_id, attemptB, 'the restarted instance does not steal the lease');
+  const renewalCursor = Math.max(0, ...markers(progressPath)
+    .filter((entry) => entry.instanceId === 'b').map((entry) => entry.sequence));
+  await untilMarker(
+    progressPath, (marker) => marker.kind === 'lease-renewed' && marker.instanceId === 'b' &&
+      marker.fencingToken === tokenB && marker.sequence > renewalCursor,
+    'b:fresh-renewal-after-a2-pending', [instanceB.exit, instanceA2.exit], 30_000, assertContinuity,
+  );
+  const beforeRelease = liveLease(await leaseRows());
+  assert.equal(beforeRelease?.attempt_id, attemptB, 'the restarted instance does not steal the lease');
+  assert.equal(beforeRelease?.fencing_token, tokenB, 'the survivor retains its exact original token');
+  assertContinuity();
 
+  diagnosticStage = 'intentional-survivor-release';
+  survivorStopRequestedAt = Date.now();
+  continuity = undefined;
   instanceB.child.kill('SIGTERM');
   const gracefulB = await boundedExit(instanceB.exit, 30_000);
   assert.equal(gracefulB.signal, null);
@@ -440,4 +519,6 @@ test('OPS-01 I3: dual-instance SIGKILL failover keeps gates green and PostgreSQL
   assert.equal(terminal.find((row) => row.fencing_token === tokenB)?.status, 'released');
   assert.equal(terminal.find((row) => row.fencing_token === tokenA2)?.status, 'released');
   assert.equal(liveLease(terminal), undefined, 'no live lease remains after both graceful shutdowns');
+  diagnosticStage = 'complete';
 });
+

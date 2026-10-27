@@ -60,9 +60,11 @@ if (mode === 'hold') {
   }
 }
 
+let markerSequence = 0;
 function marker(kind, extra) {
   // Synchronous append: a SIGKILL after this line cannot lose the marker.
-  appendFileSync(progressPath, `${JSON.stringify({ kind, instanceId, role: ROLE, ...extra })}\n`);
+  appendFileSync(progressPath, `${JSON.stringify({ kind, instanceId, role: ROLE, sequence: ++markerSequence,
+    wallTimeMs: Date.now(), monotonicMs: performance.now(), ...extra })}\n`);
 }
 
 const { createSaasDatabase, verifySaasRuntimeDatabasePrivileges } = await import('../../src/saas/db/index.js');
@@ -152,9 +154,11 @@ async function holdLease() {
   stage = 'lease';
   const service = new PostgresProviderAccountLeaseService({ database, maxConcurrency: 1, leaseTtlMs });
   let renewals = 0;
+  let lastAckAt = 0;
   let lastPendingMarker = 0;
   while (!stopping) {
     if (!lease) {
+      const acquireStartedAt = performance.now();
       try {
         lease = await service.acquire(leaseRequest());
       } catch (error) {
@@ -167,24 +171,33 @@ async function holdLease() {
       if (!lease) {
         if (Date.now() - lastPendingMarker >= 500) {
           lastPendingMarker = Date.now();
-          marker('lease-pending');
+          marker('lease-pending', { operationDurationMs: performance.now() - acquireStartedAt });
         }
         await sleep(100);
         continue;
       }
       renewals = 0;
-      marker('lease-acquired', { fencingToken: lease.fencingToken });
+      lastAckAt = performance.now();
+      marker('lease-acquired', { fencingToken: lease.fencingToken, leaseTtlMs,
+        operationDurationMs: lastAckAt - acquireStartedAt });
     }
     await sleep(Math.min(lease.renewIntervalMs, 500));
     if (stopping) break;
+    const renewStartedAt = performance.now();
+    marker('lease-renew-start', { fencingToken: lease.fencingToken, renewals,
+      sinceAckMs: renewStartedAt - lastAckAt });
     try {
       await lease.renew();
       renewals += 1;
-      marker('lease-renewed', { fencingToken: lease.fencingToken, renewals });
+      const acknowledgedAt = performance.now();
+      marker('lease-renewed', { fencingToken: lease.fencingToken, renewals,
+        operationDurationMs: acknowledgedAt - renewStartedAt, sinceAckMs: acknowledgedAt - lastAckAt });
+      lastAckAt = acknowledgedAt;
     } catch (error) {
       const code = error && typeof error === 'object' ? String(error.code ?? 'error') : 'error';
       if (code === 'STALE_LEASE') {
-        marker('lease-lost', { fencingToken: lease.fencingToken });
+        marker('lease-lost', { fencingToken: lease.fencingToken, renewals,
+          operationDurationMs: performance.now() - renewStartedAt, sinceAckMs: performance.now() - lastAckAt });
         lease = null;
         continue;
       }
@@ -223,3 +236,4 @@ try {
   }
   process.exitCode = 1;
 }
+
