@@ -241,11 +241,16 @@ def main():
         fixture.save("manifest", {"source_commit": args.expected_source, "publication_status": "LOCAL_UNPUBLISHED",
             "case": args.case, "not_performance_acceptance": True, "receipt_mode": "memory-queue",
             "fault_preload": True, "queue_telemetry_factory_wrapper": True,
-            "mock_delay_ms": int(os.environ["PAIR_MOCK_DELAY_MS"]), "M": 524480, "auto_credit_formula": "2*M*64",
+            "mock_delay_ms": int(os.environ["PAIR_MOCK_DELAY_MS"]), "M": 0 if args.case == "byok" else 524480,
+            "auto_credit_formula": "not applicable: unpriced BYOK, no platform allocation" if args.case == "byok" else "2*M*64",
             "harness_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
             "generated_launcher_sha256": hashlib.sha256(generated.read_bytes()).hexdigest(),
             "restart_contract": "same database/namespace/owner, new process epoch, DRAINED=0, no reseed; private env stays in memory"})
         fixture.start_services(); fixture.start_router(observer=False)
+        if args.case == "byok":
+            fixture.save("concurrency-cap-proof", {"explicit_fixture_cap": 64, "persisted_policies_checked_by_base_fixture": True,
+                "actual_financial_mode": "unpriced BYOK", "M": 0, "expected_auto_target_minor_units": 0,
+                "money_cap_override": False, "platform_wallet_required": False})
         if args.case in ("byok", "strict-fallback"):
             semantic_case(fixture, args.case, capture)
             fixture.save("result", {"passed": True, "not_performance_acceptance": True,
