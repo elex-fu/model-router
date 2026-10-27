@@ -151,8 +151,18 @@ def main():
                 "lost_usage_receipt_reconstructed": False, "full_M_retained": True})
             fixture.stop(restart)
             assert restart.returncode == 0
-            after_stop = fixture.census(); assert_receipt_not_written(before, after_stop)
+            after_stop = fixture.census(); assert_conservation(after_stop)
+            # A clean restart may retire unused backing. That is allowed; the
+            # unresolved intent's FULL M must remain and no receipt is invented.
+            assert after_stop["intent_count"] == before["intent_count"] + 1
+            assert after_stop["allocation_unresolved_liability_minor_units"] == 524480
+            assert after_stop["allocation_unresolved_max_minor_units"] == 524480
+            for key in ("receipt_count", "receipt_release_count", "settlement_ledger_count", "settlement_ledger_minor_units", "wallet_posted_minor_units"):
+                assert after_stop[key] == before[key], key
             fixture.save("restart-clean-shutdown-retained-M", after_stop)
+            restart_metrics = json.loads((fixture.out / "restart-queue-metrics.json").read_text())
+            fixture.save("restart-final-queue-metrics", restart_metrics)
+            assert restart_metrics["latest"]["accepted"] == restart_metrics["latest"]["durable"] == restart_metrics["latest"]["completed"] == 0
             fixture.drain("known-unknown-after-restart", fixture.total, allow_unknown=1)
         else:
             pool = ThreadPoolExecutor(max_workers=1)
