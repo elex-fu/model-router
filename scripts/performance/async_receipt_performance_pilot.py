@@ -128,6 +128,11 @@ def main():
             name = protocol + "-" + mode
             fixture.receipt_mode = mode; fixture.total = 0
             fixture.start_router(observer=False)
+            fixture.save("source-manifest", {"commit": args.expected_source, "tracked_clean": True,
+                "mode": mode, "diagnostic_instrumented": True,
+                "instrumentation_kind": "supported numeric queue telemetry factory wrapper only",
+                "factory_wrapper_preload": True, "fault_preload": False, "phase_profiler": False,
+                "SQL_observer": False, "periodic_SQL_sampler": False})
             profile = json.loads((fixture.out / "async-receipt-profile.json").read_text())
             assert profile["mode"] == mode and profile["metricsEnabled"] and not profile["faultEnabled"]
             assert profile["receiptOverrides"] == {"MODEL_ROUTER_FAST_RECEIPT_MODE": mode}
@@ -165,6 +170,9 @@ def main():
             quiet_after = capture(fixture)
             app_stats(fixture, name, fixture.db, True)
             sql_rows = json.loads((A / "results" / f"{fixture.label}-{name}-sql.json").read_text())
+            reserve_calls = sum(row["calls"] for row in sql_rows if "fast-journal:reserve-intent" in row["query"] or row["query"].startswith("WITH current_owner AS MATERIALIZED"))
+            lookup_calls = sum(row["calls"] for row in sql_rows if row["query"].startswith("SELECT i.request_id, i.intent_digest, COALESCE("))
+            receipt_calls = sum(row["calls"] for row in sql_rows if "fast-journal:append-receipt" in row["query"])
             mock_after = fixture.metrics()
             client_start = int(raw["started_at_unix_ns"]); client_end = int(raw["completed_at_unix_ns"])
             clock_error_ns = abs((client_end - client_start) - round(raw["duration_s"] * 1e9))
@@ -195,6 +203,10 @@ def main():
                 "sql_recorded_app_role_calls_through_drain": sum(row["calls"] for row in sql_rows),
                 "sql_recorded_calls_per_success": sum(row["calls"] for row in sql_rows) / raw["success"] if raw["success"] else None,
                 "sql_scope": "PGSS recorded all app roles including worker/refill through drain and final snapshot; not client RTTs or complete internal trigger SQL",
+                "recovery_SQL": {"reserve_calls": reserve_calls, "created_intents": final["intent_count"] - before["intent_count"],
+                    "reserve_minus_created": reserve_calls - (final["intent_count"] - before["intent_count"]),
+                    "intent_replay_lookup_calls": lookup_calls, "receipt_append_calls": receipt_calls,
+                    "created_receipts": final["receipt_count"] - before["receipt_count"]},
                 "mock_received_delta": mock_after["received"] - mock_before["received"],
                 "mock_completed_delta": mock_after["completed"] - mock_before["completed"],
                 "warm_successes": 138, "warm_gap_ms": (cpu_before["monotonic_ns"] / 1e9 - warm_drained) * 1000,
