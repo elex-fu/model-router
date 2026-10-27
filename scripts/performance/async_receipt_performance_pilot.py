@@ -297,7 +297,7 @@ def main():
         wait_active(fixture)
         fixture.save("manifest", {"source_commit": args.expected_source, "generation": args.generation,
             "planned": planned, "plan": args.plan, "pilot_only": True, "not_full_performance_acceptance": True,
-            "built_in_queue_phase_metrics_required": phase_required,
+            "built_in_queue_phase_metrics_required": "when observer enabled" if observer_cost else phase_required,
             "diagnostic_only": diagnostic_only,
             "queue_telemetry_factory_wrapper": "per-scene" if observer_cost else True, "fault_preload": False, "phase_profiler": False,
             "extra_SQL_periodic_sampler": False, "quiet_guard_file_sampler_seconds": 1,
@@ -399,7 +399,7 @@ def main():
                 "financial_and_tpm_drain": tpm_proof,
                 "queue_empty_verified_before_shutdown": True if fixture.metrics_enabled else None,
                 "observer_off_qualification": None if fixture.metrics_enabled else "Queue occupancy/phase/lag/fallback/retry counts are unavailable, not zero. Financial+TPM completion does not by itself prove queue empty; graceful lifecycle exit is separately required.",
-                "drain_timestamp_qualification": "Observed full drain includes client result serialization/read, aggregate finance checks and queue metrics file acknowledgement; not pure receipt or COMMIT latency.",
+                "drain_timestamp_qualification": "Observed endpoints include client serialization/read, aggregate finance and (for observer-cost) Redis truth probes; ON also observes queue-file acknowledgement. OFF full-queue endpoint is unavailable; lifecycle drain is proved separately after shutdown. Not pure receipt or COMMIT latency.",
                 "clock": {"stable_within_1ms": clock_stable, "client_wall_vs_monotonic_error_ns": clock_error_ns,
                     "outer_realtime_monotonic_offset_change_ns": clock_after - clock_before,
                     "client_start_unix_ns": str(client_start), "observed_drain_end_unix_ns": str(durable_end_wall_ns)},
