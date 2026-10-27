@@ -65,6 +65,10 @@ slot sets and rate buckets; match durable receipts to actual input+output15.
   qualification. If measuring actual client adapter calls, label separately;
   complete internal trigger SQL is not automatically measured.
 - Drain after client EOF is part of financial completion and whole-window cost.
+  Report both successful requests divided by client-start to final EOF, and by
+  the same start to full receipt plus ledger financial drain. Retain all failed
+  attempts in latency/status populations. A faster EOF with unpaid queue debt
+  is not a completed scene.
   Report queue peak/backlog and undurable liability with the exact observation
   method. Never call post-EOF latency savings a free durability improvement.
 - Stage gates: functional boundaries and crash conservation first; then matched
