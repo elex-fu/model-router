@@ -249,7 +249,8 @@ test('capacity probe is explicit c200/two only and cannot forge an ordinary star
     startupObserversRemoved: true, compositionHttpCaps: [128], executorLocalCaps: [128],
     receiptQueues: [{maxEntries:128,maxBytes:1048576,maxPerTenant:32,workers:4,maxAgeMs:5000,drainTimeoutMs:10000}],
     capacityDiagnostic: { enabled: true, compiledSha256: require('./bounded-business-capacity-probe.cjs').COMPILED_SHA256 } };
-  assert.equal(verifyProof(proof, row, config), true);
+  for (const pin of require('./bounded-business-capacity-probe.cjs').ALLOWED_COMPILED_SHA256)
+    assert.equal(verifyProof({ ...proof, capacityDiagnostic: { enabled: true, compiledSha256: pin } }, row, config), true);
   assert.equal(verifyProof(proof, row, { ...config, capacityDiagnostic: false }), false);
   assert.equal(verifyProof({ ...proof, inferenceHooksInstalled: false }, row, config), false);
   assert.equal(verifyProof({ ...proof, capacityDiagnostic: { enabled: true, compiledSha256: 'wrong' } }, row, config), false);

@@ -10,7 +10,7 @@ import time
 import unittest
 
 from bounded_business_performance_pilot import (
-    TOTAL_BUDGETS, TOTAL_CREDIT_TARGET, CAPACITY_COMPILED_SHA256, aggregate_resources, expected_budgets,
+    TOTAL_BUDGETS, TOTAL_CREDIT_TARGET, CAPACITY_COMPILED_SHA256, CAPACITY_COMPILED_PINS, CAPACITY_ALLOWED_COMPILED_SHA256, aggregate_resources, expected_budgets,
     router_environment, verify_bootstrap, verify_cluster_cleanup, verify_owner_bounds,
     verify_pending_term_observation,
     verify_queue_snapshots,
@@ -130,11 +130,18 @@ class CapacityDiagnosticTests(unittest.TestCase):
     def test_bootstrap_requires_instrumentation_only_when_explicit(self):
         state, proofs = bootstrap(2, "c200")
         state["capacityDiagnostic"] = True
-        for proof in proofs:
-            proof.update(inferenceHooksInstalled=True, capacityDiagnostic={"enabled": True, "compiledSha256": CAPACITY_COMPILED_SHA256})
-        self.assertTrue(verify_bootstrap(state, proofs, 2, "c200", capacity_diagnostic=True)["verified"])
+        self.assertEqual(CAPACITY_ALLOWED_COMPILED_SHA256, frozenset(CAPACITY_COMPILED_PINS.values()))
+        self.assertEqual(len(CAPACITY_ALLOWED_COMPILED_SHA256), 2)
+        for pin in CAPACITY_ALLOWED_COMPILED_SHA256:
+            for proof in proofs:
+                proof.update(inferenceHooksInstalled=True, capacityDiagnostic={"enabled": True, "compiledSha256": pin})
+            self.assertTrue(verify_bootstrap(state, proofs, 2, "c200", capacity_diagnostic=True)["verified"])
+            self.assertTrue(all(proof["capacityDiagnostic"]["compiledSha256"] == pin for proof in proofs))
+            with self.assertRaises(AssertionError):
+                verify_bootstrap(state, proofs, 2, "c200")
+        proofs[0]["capacityDiagnostic"]["compiledSha256"] = "0" * 64
         with self.assertRaises(AssertionError):
-            verify_bootstrap(state, proofs, 2, "c200")
+            verify_bootstrap(state, proofs, 2, "c200", capacity_diagnostic=True)
 
     def test_only_known429_can_continue_and_never_passes_zero_error_gate(self):
         success = {"Status": 200, "Err": "", "Bytes": 276, "Mode": "fast-reserved-max", "Fallback": ""}
@@ -159,7 +166,16 @@ class CapacityDiagnosticTests(unittest.TestCase):
             "enabled": True, "pid": row["pid"], "limit": 128, "current": 0, "peak": 128,
             "accepted": 10, "settled": 10, "rejected": 0, "dropped": 0, "violations": 0, "samples": [],
             "compiledSha256": "a98faa12c22e5283281af4e70b96c7153c0e57aacf12788de9afb3622aa9307f"}} for row in state["workers"]]
-        self.assertTrue(verify_capacity_snapshots(values, state)["verified"])
+        for pin in CAPACITY_ALLOWED_COMPILED_SHA256:
+            for value in values:
+                value["capacityDiagnostic"]["compiledSha256"] = pin
+            result = verify_capacity_snapshots(values, state)
+            self.assertTrue(result["verified"])
+            self.assertTrue(all(value["capacityDiagnostic"]["compiledSha256"] == pin for value in result["workers"]))
+        values[0]["capacityDiagnostic"]["compiledSha256"] = "0" * 64
+        with self.assertRaises(AssertionError):
+            verify_capacity_snapshots(values, state)
+        values[0]["capacityDiagnostic"]["compiledSha256"] = CAPACITY_COMPILED_SHA256
         values[0]["capacityDiagnostic"]["limit"] = 256
         with self.assertRaises(AssertionError):
             verify_capacity_snapshots(values, state)

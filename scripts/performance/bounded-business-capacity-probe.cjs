@@ -1,14 +1,19 @@
 'use strict';
-// Explicit diagnostic only: one pinned compiled module, no application source edits.
+// Explicit diagnostic only: exact allowlisted compiled modules, no application source edits.
 const fs = require('node:fs');
 const path = require('node:path');
 const Module = require('node:module');
 const { createHash } = require('node:crypto');
-const COMPILED_SHA256 = 'a98faa12c22e5283281af4e70b96c7153c0e57aacf12788de9afb3622aa9307f';
+const COMPILED_PINS = Object.freeze(require('./bounded-business-capacity-pins.json'));
+const ALLOWED_COMPILED_SHA256 = Object.freeze(Object.values(COMPILED_PINS));
+// Compatibility alias for historical callers; never used as observed runtime metadata.
+const COMPILED_SHA256 = COMPILED_PINS.legacy;
 const SAMPLE_LIMIT = 128;
 let installedProbe;
 
-function makeProbe(limit) {
+function makeProbe(limit, compiledSha256 = null) {
+  if (compiledSha256 !== null && !ALLOWED_COMPILED_SHA256.includes(compiledSha256))
+    throw new Error('CAPACITY_DIAGNOSTIC_SOURCE_PIN');
   if (limit !== 128) throw new Error('CAPACITY_DIAGNOSTIC_REQUIRES_LOCAL_128');
   const pending = new Map();
   const samples = [];
@@ -47,7 +52,7 @@ function makeProbe(limit) {
     attachPublicServer(server) { publicServer = server; },
     snapshot() {
       return { enabled: true, diagnosticOnly: true, performanceAcceptance: false,
-        compiledSha256: COMPILED_SHA256, pid: process.pid, limit, current, peak,
+        compiledSha256, pid: process.pid, limit, current, peak,
         accepted, settled, rejected, dropped, violations, ...occupancy(), samples: samples.slice(),
         limitations: ['writableEnded/Finished are server states, not client EOF timestamps',
           'publicSocketsCurrent is native local Server._connections or null, not active requests',
@@ -55,9 +60,10 @@ function makeProbe(limit) {
     },
   };
 }
-function createProbe(limit) {
+function createProbe(limit, compiledSha256) {
+  if (!ALLOWED_COMPILED_SHA256.includes(compiledSha256)) throw new Error('CAPACITY_DIAGNOSTIC_SOURCE_PIN');
   if (installedProbe) throw new Error('CAPACITY_DIAGNOSTIC_MULTIPLE_COMPOSITIONS');
-  installedProbe = makeProbe(limit);
+  installedProbe = makeProbe(limit, compiledSha256);
   return installedProbe;
 }
 function replaceOnce(source, before, after) {
@@ -65,11 +71,12 @@ function replaceOnce(source, before, after) {
   return source.replace(before, after);
 }
 function transform(source) {
-  if (createHash('sha256').update(source).digest('hex') !== COMPILED_SHA256)
+  const compiledSha256 = createHash('sha256').update(source).digest('hex');
+  if (!ALLOWED_COMPILED_SHA256.includes(compiledSha256))
     throw new Error('CAPACITY_DIAGNOSTIC_SOURCE_PIN');
   source = replaceOnce(source, '    const maxHttpInFlight = dependencies.maxHttpInFlight;\n',
     '    const maxHttpInFlight = dependencies.maxHttpInFlight;\n' +
-    `    const capacityProbe = require(${JSON.stringify(__filename)}).createProbe(maxHttpInFlight);\n`);
+    `    const capacityProbe = require(${JSON.stringify(__filename)}).createProbe(maxHttpInFlight, ${JSON.stringify(compiledSha256)});\n`);
   source = replaceOnce(source, '        if (closing && (0, http_handler_js_1.isSaasGatewayInferenceRequest)(req)) {\n',
     '        if (closing && (0, http_handler_js_1.isSaasGatewayInferenceRequest)(req)) {\n' +
     '            capacityProbe.reject(httpInFlight, closing, currentRequestId);\n');
@@ -96,9 +103,15 @@ function install(dist, env = process.env) {
   if (require.cache[filename]) throw new Error('CAPACITY_DIAGNOSTIC_MODULE_ALREADY_LOADED');
   const original = Module._extensions['.js'];
   let loaded = false;
+  let loadedSha256;
   const hooked = function (module, name) {
     if (name !== filename) return original(module, name);
-    try { module._compile(transform(fs.readFileSync(name, 'utf8')), name); loaded = true; }
+    try {
+      const source = fs.readFileSync(name, 'utf8');
+      const transformed = transform(source);
+      loadedSha256 = createHash('sha256').update(source).digest('hex');
+      module._compile(transformed, name); loaded = true;
+    }
     finally { Module._extensions['.js'] = original; }
   };
   Module._extensions['.js'] = hooked;
@@ -106,10 +119,12 @@ function install(dist, env = process.env) {
     proof() {
       if (!loaded || !installedProbe || Module._extensions['.js'] !== original)
         throw new Error('CAPACITY_DIAGNOSTIC_INSTALL_UNPROVEN');
-      return { enabled: true, compiledSha256: COMPILED_SHA256 };
+      if (installedProbe.snapshot().compiledSha256 !== loadedSha256)
+        throw new Error('CAPACITY_DIAGNOSTIC_SOURCE_PROOF_MISMATCH');
+      return { enabled: true, compiledSha256: loadedSha256 };
     },
     snapshot() { this.proof(); return installedProbe.snapshot(); },
     attachPublicServer(server) { this.proof(); installedProbe.attachPublicServer(server); },
   };
 }
-module.exports = { COMPILED_SHA256, SAMPLE_LIMIT, makeProbe, createProbe, transform, install };
+module.exports = { COMPILED_PINS, ALLOWED_COMPILED_SHA256, COMPILED_SHA256, SAMPLE_LIMIT, makeProbe, createProbe, transform, install };

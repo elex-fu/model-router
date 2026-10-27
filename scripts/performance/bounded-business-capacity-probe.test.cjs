@@ -6,19 +6,23 @@ const path = require('node:path');
 const os = require('node:os');
 const vm = require('node:vm');
 const Module = require('node:module');
-const { makeProbe, transform, install, COMPILED_SHA256 } = require('./bounded-business-capacity-probe.cjs');
+const { createHash } = require('node:crypto');
+const { makeProbe, createProbe, transform, install, COMPILED_SHA256, COMPILED_PINS, ALLOWED_COMPILED_SHA256 } = require('./bounded-business-capacity-probe.cjs');
 const compiled = () => fs.readFileSync(path.join(__dirname, '../../dist/server/managed-saas-gateway.js'), 'utf8');
 
 function graph(httpHandler) {
+  const compiledSha256 = createHash('sha256').update(compiled()).digest('hex');
   const source = transform(compiled());
   const begin = source.indexOf('    const pendingHttpHandlers = new Set();');
   const end = source.indexOf('    return Object.freeze({ handler, handleUpgrade: responsesWs.handleUpgrade, preparation, dispatch, close });', begin);
   assert.ok(begin > 0 && end > begin);
   const body = source.slice(begin, source.indexOf('\n', end));
-  const probe = makeProbe(128);
+  const probe = makeProbe(128, compiledSha256);
   let id = 0, closed = 0;
   const context = {
-    require: () => ({ createProbe: limit => { assert.equal(limit, 128); return probe; } }),
+    require: () => ({ createProbe: (limit, observedHash) => {
+      assert.equal(limit, 128); assert.equal(observedHash, compiledSha256); return probe;
+    } }),
     requestId: () => `request-${++id}`,
     requestIdContext: { run: (_id, work) => work() },
     runWithDiagnostics: (_id, work) => work(),
@@ -43,7 +47,18 @@ test('strict source pin and opt-in leave ordinary module loader untouched', () =
   assert.throws(() => install('/unused', { BOUNDED_CLUSTER_CAPACITY_DIAGNOSTIC: '1' }), /FIXED_PROFILE/);
   assert.throws(() => makeProbe(256), /LOCAL_128/);
   assert.match(transform(compiled()), /capacityProbe.reject\(httpInFlight, closing, currentRequestId\)/);
-  assert.equal(COMPILED_SHA256.length, 64);
+  assert.deepEqual(ALLOWED_COMPILED_SHA256, [
+    'a98faa12c22e5283281af4e70b96c7153c0e57aacf12788de9afb3622aa9307f',
+    '728953dd0353abffe9661515581327d5b457c6329ccef1a44d7927fbbb8af001',
+  ]);
+  assert.equal(COMPILED_SHA256, COMPILED_PINS.legacy);
+  assert.equal(Object.isFrozen(ALLOWED_COMPILED_SHA256), true);
+  assert.equal(Object.isFrozen(COMPILED_PINS), true);
+  for (const pin of ALLOWED_COMPILED_SHA256)
+    assert.equal(makeProbe(128, pin).snapshot().compiledSha256, pin);
+  assert.equal(makeProbe(128).snapshot().compiledSha256, null);
+  assert.throws(() => makeProbe(128, '0'.repeat(64)), /SOURCE_PIN/);
+  assert.throws(() => createProbe(128, '0'.repeat(64)), /SOURCE_PIN/);
 });
 
 test('symlink dist resolves to the loader identity and pin failure restores loader', () => {
@@ -118,4 +133,35 @@ test('sample retention is bounded; finished and aborted flags never release a pe
   assert.equal(value.samples.length, 128); assert.equal(value.dropped, 72); assert.equal(value.rejected, 200);
   p.settle(response, 0);
   assert.equal(p.snapshot().current, 0);
+});
+
+test('matched current module hash reaches installed proof and snapshots without a legacy label', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'capacity-current-pin-'));
+  const filename = path.join(directory, 'server/managed-saas-gateway.js');
+  fs.mkdirSync(path.dirname(filename));
+  const source = compiled();
+  const actual = createHash('sha256').update(source).digest('hex');
+  assert.equal(actual, COMPILED_PINS.current);
+  fs.writeFileSync(filename, source);
+  const original = Module._extensions['.js'];
+  try {
+    const installed = install(directory, { BOUNDED_CLUSTER_CAPACITY_DIAGNOSTIC: '1',
+      BOUNDED_CLUSTER_DIAGNOSTIC: '1', BOUNDED_CLUSTER_PROFILE: 'c200',
+      BOUNDED_CLUSTER_WORKERS: '2', MODEL_ROUTER_SAAS_GATEWAY_MAX_HTTP_IN_FLIGHT: '128' });
+    // Exercise the real loader hook and injected construction, without importing
+    // the application's dependencies or starting a listener.
+    Module._extensions['.js']({ _compile(transformed, name) {
+      assert.equal(name, filename);
+      const construction = transformed.split('\n').find(line => line.includes('const capacityProbe = '));
+      assert.ok(construction);
+      vm.runInNewContext(construction, { maxHttpInFlight: 128, require: () => ({ createProbe }) });
+    } }, filename);
+    assert.equal(Module._extensions['.js'], original);
+    assert.equal(installed.proof().compiledSha256, actual);
+    assert.equal(installed.snapshot().compiledSha256, actual);
+    assert.notEqual(installed.snapshot().compiledSha256, COMPILED_PINS.legacy);
+  } finally {
+    Module._extensions['.js'] = original;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });

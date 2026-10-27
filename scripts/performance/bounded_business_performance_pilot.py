@@ -31,7 +31,11 @@ from bounded_business_profiles import (
 # selected profile, never these aliases for c200 accounting.
 TOTAL_BUDGETS = aggregate_budgets()
 TOTAL_CREDIT_TARGET = TOTAL_BUDGETS["automaticCreditTarget"]
-CAPACITY_COMPILED_SHA256 = "a98faa12c22e5283281af4e70b96c7153c0e57aacf12788de9afb3622aa9307f"
+# One exact registry is shared with the Node probe/supervisor. The legacy alias
+# remains available to historical pure fixtures; observed metadata is never replaced.
+CAPACITY_COMPILED_PINS = json.loads(Path(__file__).with_name("bounded-business-capacity-pins.json").read_text())
+CAPACITY_ALLOWED_COMPILED_SHA256 = frozenset(CAPACITY_COMPILED_PINS.values())
+CAPACITY_COMPILED_SHA256 = CAPACITY_COMPILED_PINS["legacy"]
 
 # All allocations, including retired epochs, are included. Nothing here mutates
 # financial authority, creates jobs, repairs state, or waits for TTL expiry.
@@ -88,7 +92,7 @@ def verify_bootstrap(state, proofs, workers, profile="c32", *, capacity_diagnost
         assert proof["inferenceHooksInstalled"] is capacity_diagnostic
         assert bool(proof.get("capacityDiagnostic", {}).get("enabled", False)) is capacity_diagnostic
         if capacity_diagnostic:
-            assert proof["capacityDiagnostic"]["compiledSha256"] == CAPACITY_COMPILED_SHA256
+            assert proof["capacityDiagnostic"]["compiledSha256"] in CAPACITY_ALLOWED_COMPILED_SHA256
         for key, expected in budgets.items():
             assert proof["budgets"][key] == expected, (key, proof["budgets"], budgets)
         assert sorted(pool["max"] for pool in proof["pools"]) == expected_pools
@@ -342,7 +346,7 @@ def verify_capacity_snapshots(values, bootstrap):
         assert len(probe["samples"]) <= 128 and probe["violations"] == 0
         assert probe["accepted"] - probe["settled"] == probe["current"]
         assert probe["rejected"] == len(probe["samples"]) + probe["dropped"]
-        assert probe["compiledSha256"] == CAPACITY_COMPILED_SHA256
+        assert probe["compiledSha256"] in CAPACITY_ALLOWED_COMPILED_SHA256
     return {"verified": True, "workers": values,
             "scope": "Bounded native rejection snapshots; boundary observations are not simultaneous cross-worker occupancy proof."}
 

@@ -102,7 +102,7 @@ function verifyProof(proof, worker, config) {
     proof.readyStatus === 200 && proof.readinessListenerClosed === true &&
     proof.poolObserverRemoved === true && proof.inferenceHooksInstalled === Boolean(config.capacityDiagnostic) &&
     (config.capacityDiagnostic ? proof.capacityDiagnostic?.enabled === true &&
-      proof.capacityDiagnostic.compiledSha256 === require('./bounded-business-capacity-probe.cjs').COMPILED_SHA256
+      require('./bounded-business-capacity-probe.cjs').ALLOWED_COMPILED_SHA256.includes(proof.capacityDiagnostic.compiledSha256)
       : proof.capacityDiagnostic === undefined) &&
     proof.nativePoolPrototypes === true &&
     proof.nativeFastPrototypes === true && proof.startupObserversRemoved === true &&
