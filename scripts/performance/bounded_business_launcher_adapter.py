@@ -9,9 +9,12 @@ import json
 from pathlib import Path
 
 from async_receipt_launcher_adapter import BASE_SHA256, adapt as adapt_async, replace_once
+from bounded_business_profiles import PROFILE_NAMES, aggregate_budgets, get_profile
 
 
-def adapt(source, *, base_directory, observer_directory):
+def adapt(source, *, base_directory, observer_directory, profile="c32"):
+    get_profile(profile)
+    totals = aggregate_budgets(profile)
     here = Path(observer_directory).resolve()
     source = adapt_async(source, base_directory=base_directory, observer_directory=here)
     # The original fixture installs these only after readiness. An early TERM
@@ -33,11 +36,14 @@ def adapt(source, *, base_directory, observer_directory):
   // DIAGNOSTIC ONLY. The primary splits these aggregate budgets, never copies them.
   assert.ok(!stopping, 'BOUNDED_CLUSTER_OUTER_STOP_REQUESTED');
   assert.equal(Number(process.env.PAIR_INSTANCES ?? '1'), 1, 'BOUNDED_CLUSTER_NESTED_REPLICAS_FORBIDDEN');
+  const boundedClusterProfile = process.env.BOUNDED_CLUSTER_PROFILE ?? 'c32';
+  assert.equal(boundedClusterProfile, __BOUNDED_PROFILE__, 'BOUNDED_CLUSTER_PROFILE_MISMATCH');
+  const boundedClusterTotals = __BOUNDED_TOTALS__;
   const boundedClusterWorkers = Number(process.env.BOUNDED_CLUSTER_WORKERS);
   assert.ok([1, 2].includes(boundedClusterWorkers), 'BOUNDED_CLUSTER_WORKER_COUNT_REQUIRED');
   assert.ok(!faultEnabled && !metricsEnabled && !cpuProfileEnabled && !env.NODE_OPTIONS && gatewayNodeArgs.length === 0,
     'BOUNDED_CLUSTER_TIMED_OBSERVERS_FORBIDDEN');
-  assert.ok(fastMode && fixtureCap === 64 && builtinEstimator && process.env.PAIR_TRANCHE_MINOR_UNITS === 'auto',
+  assert.ok(fastMode && fixtureCap === boundedClusterTotals.httpInFlight && builtinEstimator && process.env.PAIR_TRANCHE_MINOR_UNITS === 'auto',
     'BOUNDED_CLUSTER_FIXED_FINANCIAL_PROFILE_REQUIRED');
   assert.equal(env.MODEL_ROUTER_FAST_RECEIPT_MODE, 'memory-queue', 'BOUNDED_CLUSTER_MEMORY_QUEUE_REQUIRED');
   const boundedClusterStateFile = join(out, 'bounded-business-cluster-state.json');
@@ -45,15 +51,20 @@ def adapt(source, *, base_directory, observer_directory):
   await mkdir(boundedClusterChildDirectory, { recursive: true, mode: 0o700 });
   Object.assign(env, {
     BOUNDED_CLUSTER_DIAGNOSTIC: '1', BOUNDED_CLUSTER_WORKERS: String(boundedClusterWorkers),
+    BOUNDED_CLUSTER_PROFILE: boundedClusterProfile,
     BOUNDED_CLUSTER_STATE_FILE: boundedClusterStateFile,
     BOUNDED_CLUSTER_CHILD_DIRECTORY: boundedClusterChildDirectory,
     BOUNDED_CLUSTER_SHUTDOWN_MS: '45000',
-    MODEL_ROUTER_SAAS_DB_POOL_MAX: '16', MODEL_ROUTER_SAAS_GATEWAY_MAX_HTTP_IN_FLIGHT: '64',
-    MODEL_ROUTER_FAST_RECEIPT_MAX_ENTRIES: '256', MODEL_ROUTER_FAST_RECEIPT_MAX_BYTES: '2097152',
-    MODEL_ROUTER_FAST_RECEIPT_MAX_PER_TENANT: '64', MODEL_ROUTER_FAST_RECEIPT_WORKERS: '8',
-    MODEL_ROUTER_FAST_CREDIT_STRIPES: '8',
+    MODEL_ROUTER_SAAS_DB_POOL_MAX: String(boundedClusterTotals.databasePoolMax),
+    MODEL_ROUTER_SAAS_GATEWAY_MAX_HTTP_IN_FLIGHT: String(boundedClusterTotals.httpInFlight),
+    MODEL_ROUTER_FAST_RECEIPT_MAX_ENTRIES: String(boundedClusterTotals.receiptEntries),
+    MODEL_ROUTER_FAST_RECEIPT_MAX_BYTES: String(boundedClusterTotals.receiptBytes),
+    MODEL_ROUTER_FAST_RECEIPT_MAX_PER_TENANT: String(boundedClusterTotals.receiptPerTenant),
+    MODEL_ROUTER_FAST_RECEIPT_WORKERS: String(boundedClusterTotals.receiptWorkers),
+    MODEL_ROUTER_FAST_CREDIT_STRIPES: String(boundedClusterTotals.creditStripes),
   });
 '''
+    hook = hook.replace('__BOUNDED_PROFILE__', json.dumps(profile)).replace('__BOUNDED_TOTALS__', json.dumps(totals))
     source = replace_once(source, "  const log = createWriteStream(join(out, 'gateway.log'),",
                           hook + "  const log = createWriteStream(join(out, 'gateway.log'),")
     source = replace_once(source,
@@ -72,6 +83,7 @@ def adapt(source, *, base_directory, observer_directory):
         boundedClusterState.workers.every(worker => worker.ready === true)) break;
     await delay(100);
   }
+  assert.equal(boundedClusterState?.profile, boundedClusterProfile, 'BOUNDED_CLUSTER_STATE_PROFILE');
   assert.equal(boundedClusterState?.primaryPid, gateway.pid, 'BOUNDED_CLUSTER_PRIMARY_IDENTITY');
   assert.equal(boundedClusterState?.businessWorkersStarted, boundedClusterWorkers, 'BOUNDED_CLUSTER_NO_RESTART');
   assert.equal(boundedClusterState?.restartEnabled, false, 'BOUNDED_CLUSTER_NO_RESTART');
@@ -81,6 +93,7 @@ def adapt(source, *, base_directory, observer_directory):
   assert.equal(new Set(boundedClusterState.workers.map(worker => worker.owner)).size, boundedClusterWorkers);
   for (const worker of boundedClusterState.workers) {
     const proof = JSON.parse(await readFile(worker.bootstrapProofFile, 'utf8'));
+    assert.equal(proof.profile, boundedClusterProfile, 'BOUNDED_CLUSTER_PROOF_PROFILE');
     assert.equal(proof.pid, worker.pid); assert.equal(proof.owner, worker.owner);
     assert.equal(proof.readyStatus, 200); assert.equal(proof.readinessListenerClosed, true);
     assert.equal(proof.poolObserverRemoved, true); assert.equal(proof.nativePoolPrototypes, true);
@@ -93,9 +106,9 @@ def adapt(source, *, base_directory, observer_directory):
                           readiness + "  await writeFile(join(out, 'paired-ready.json'),")
     source = replace_once(source, "gatewayPid: gateway.pid, gatewayPids:gateways.map(child=>child.pid),gatewayUrls,",
         "gatewayPid: boundedClusterState.workers[0].pid, gatewayPids: boundedClusterState.workers.map(worker => worker.pid), "
-        "clusterPrimaryPid: gateway.pid, businessWorkers: boundedClusterWorkers, "
+        "clusterPrimaryPid: gateway.pid, businessWorkers: boundedClusterWorkers, profile: boundedClusterProfile, "
         "clusterStateFile: boundedClusterStateFile, clusterChildDirectory: boundedClusterChildDirectory, "
-        "configuredPerProcessPoolMax: 16 / boundedClusterWorkers, gatewayUrls,")
+        "configuredPerProcessPoolMax: boundedClusterTotals.databasePoolMax / boundedClusterWorkers, gatewayUrls,")
     # The primary has a 45s business-drain deadline; do not race it with an equal outer timeout.
     source = replace_once(source, "await waitForExit(child, 45000);", "await waitForExit(child, 65000);")
     return "// GENERATED bounded-business diagnostic; no deployment/default change.\n" + source
@@ -105,17 +118,18 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--base", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--profile", choices=PROFILE_NAMES, default="c32")
     parser.add_argument("--observers", type=Path, default=Path(__file__).parent)
     args = parser.parse_args()
     if args.base.resolve() == args.out.resolve() or args.out.exists():
         parser.error("Refusing to overwrite an input or existing generated launcher")
-    generated = adapt(args.base.read_text(), base_directory=args.base.parent, observer_directory=args.observers)
+    generated = adapt(args.base.read_text(), base_directory=args.base.parent, observer_directory=args.observers, profile=args.profile)
     args.out.write_text(generated)
     args.out.with_suffix(args.out.suffix + ".derivation.json").write_text(json.dumps({
         "baseline_sha256": BASE_SHA256,
         "generated_sha256": hashlib.sha256(generated.encode()).hexdigest(),
         "adapter_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-        "diagnostic_only": True, "production_changes": False, "launched": False,
+        "diagnostic_only": True, "production_changes": False, "launched": False, "profile": args.profile,
         "delta": ["one RR primary with one or two real business workers", "fixed aggregate budgets",
                   "per-PID readiness proof", "no nested replicas or respawn", "65s outer exit verification"],
     }, indent=2) + "\n")

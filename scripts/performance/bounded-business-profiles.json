@@ -1,0 +1,26 @@
+{
+  "maximum": 524480,
+  "fixedTotals": {
+    "databasePoolMax": 16,
+    "receiptEntries": 256,
+    "receiptBytes": 2097152,
+    "receiptPerTenant": 64,
+    "receiptWorkers": 8,
+    "reconciliationWorkers": 8,
+    "creditStripes": 8
+  },
+  "profiles": {
+    "c32": {
+      "httpInFlight": 64,
+      "concurrency": 32,
+      "timedSeconds": 60,
+      "timedRequests": null
+    },
+    "c200": {
+      "httpInFlight": 256,
+      "concurrency": 200,
+      "timedSeconds": null,
+      "timedRequests": 10000
+    }
+  }
+}

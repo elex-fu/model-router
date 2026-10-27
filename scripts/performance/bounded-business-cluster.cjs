@@ -7,10 +7,16 @@ const cluster = require('node:cluster');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const TOTALS = Object.freeze({ databasePoolMax: 16, httpInFlight: 64,
-  receiptEntries: 256, receiptBytes: 2097152, receiptPerTenant: 64,
-  receiptWorkers: 8, reconciliationWorkers: 8, creditStripes: 8,
-  automaticCreditTarget: 67133440 });
+const PROFILE_DATA = require('./bounded-business-profiles.json');
+function totalBudgets(profile = 'c32') {
+  if (!['c32', 'c200'].includes(profile)) throw new Error('BOUNDED_CLUSTER_INVALID_PROFILE');
+  const httpInFlight = PROFILE_DATA.profiles[profile].httpInFlight;
+  return Object.freeze({ ...PROFILE_DATA.fixedTotals, httpInFlight,
+    automaticCreditTarget: 2 * PROFILE_DATA.maximum * httpInFlight });
+}
+// Preserve the original c32 API/default; opt-in c200 changes only HTTP and its
+// automatically estimated credit target, never receipt/tenant/PG budgets.
+const TOTALS = totalBudgets();
 
 function processStartTicks(pid) {
   const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
@@ -20,9 +26,9 @@ function processStartTicks(pid) {
   return value;
 }
 
-function workerBudget(workers) {
+function workerBudget(workers, profile = 'c32') {
   if (workers !== 1 && workers !== 2) throw new Error('BOUNDED_CLUSTER_WORKER_COUNT');
-  return Object.fromEntries(Object.entries(TOTALS).map(([key, value]) => [key, value / workers]));
+  return Object.fromEntries(Object.entries(totalBudgets(profile)).map(([key, value]) => [key, value / workers]));
 }
 function positive(raw, fallback, minimum, maximum) {
   if (raw === undefined) return fallback;
@@ -35,7 +41,9 @@ function positive(raw, fallback, minimum, maximum) {
 function configuration(env, argv, execArgv, primary) {
   const [entrypoint, ...args] = argv;
   const workers = Number(env.BOUNDED_CLUSTER_WORKERS);
-  const budgets = workerBudget(workers);
+  const profile = env.BOUNDED_CLUSTER_PROFILE ?? 'c32';
+  const totals = totalBudgets(profile);
+  const budgets = workerBudget(workers, profile);
   const directory = env.BOUNDED_CLUSTER_CHILD_DIRECTORY;
   const stateFile = env.BOUNDED_CLUSTER_STATE_FILE;
   const namespace = env.MODEL_ROUTER_FAST_NAMESPACE;
@@ -54,7 +62,7 @@ function configuration(env, argv, execArgv, primary) {
       env.MODEL_ROUTER_SAAS_WORKLOAD_ROLE !== 'gateway') {
     throw new Error('BOUNDED_CLUSTER_INVALID_DIAGNOSTIC_SETUP');
   }
-  return { entrypoint, args, workers, budgets, namespace, directory, stateFile,
+  return { entrypoint, args, workers, profile, totals, budgets, namespace, directory, stateFile,
     shutdownMs: positive(env.BOUNDED_CLUSTER_SHUTDOWN_MS, 45000, 100, 60000),
     startupMs: positive(env.BOUNDED_CLUSTER_STARTUP_MS, 90000, 100, 180000) };
 }
@@ -62,6 +70,7 @@ function childEnvironment(env, config, slot) {
   if (!Number.isInteger(slot) || slot < 0 || slot >= config.workers) throw new Error('BOUNDED_CLUSTER_SLOT');
   const b = config.budgets;
   return { ...env, NODE_OPTIONS: '', BOUNDED_CLUSTER_SLOT: String(slot),
+    BOUNDED_CLUSTER_PROFILE: config.profile,
     BOUNDED_CLUSTER_BOOTSTRAP_PROOF: path.join(config.directory, `worker-${slot}-bootstrap.json`),
     BOUNDED_CLUSTER_QUEUE_SNAPSHOT: path.join(config.directory, `worker-${slot}-queue.json`),
     MODEL_ROUTER_FAST_OWNER: `${config.namespace}-bounded-slot-${slot}`,
@@ -83,6 +92,7 @@ function verifyProof(proof, worker, config) {
   const queue = { maxEntries: b.receiptEntries, maxBytes: b.receiptBytes, maxPerTenant: b.receiptPerTenant,
     workers: b.receiptWorkers, maxAgeMs: 5000, drainTimeoutMs: 10000 };
   return proof?.pid === worker.pid && proof.owner === worker.owner && proof.slot === worker.slot &&
+    proof.profile === config.profile &&
     proof.readyStatus === 200 && proof.readinessListenerClosed === true &&
     proof.poolObserverRemoved === true && proof.inferenceHooksInstalled === false &&
     proof.nativePoolPrototypes === true &&
@@ -104,7 +114,7 @@ function main() {
   const state = { diagnosticOnly: true, topology: `cluster_rr_${config.workers}_business_workers`,
     primaryPid: process.pid, primaryStartTicks: processStartTicks(process.pid),
     primaryApplicationImports: false, businessWorkersStarted: 0,
-    restartEnabled: false, totalBudgets: TOTALS, perWorkerBudgets: config.budgets,
+    restartEnabled: false, profile: config.profile, totalBudgets: config.totals, perWorkerBudgets: config.budgets,
     pendingHandoffQueue: 'node_cluster_internal_not_production_bounded',
     phase: 'starting', workers: [], snapshotSequence: 0, events: [], eventDrops: 0 };
   const live = new Map();
@@ -221,7 +231,7 @@ function main() {
   fork(0);
 }
 
-module.exports = { TOTALS, workerBudget, configuration, childEnvironment, verifyProof, processStartTicks };
+module.exports = { TOTALS, totalBudgets, workerBudget, configuration, childEnvironment, verifyProof, processStartTicks };
 if (require.main === module) {
   try { main(); }
   catch { process.stderr.write('BOUNDED_CLUSTER_SETUP_FAILED\n'); process.exitCode = 1; }

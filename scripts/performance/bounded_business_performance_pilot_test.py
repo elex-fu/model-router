@@ -16,20 +16,22 @@ from bounded_business_performance_pilot import (
     verify_queue_snapshots,
     cleanup_owned_cluster, finalize_run,
     cleanup_owned_group, process_group_members,
-    verify_sse_qualification,
+    verify_sse_qualification, verify_mock_counts, verify_main_client,
 )
 
+from bounded_business_profiles import aggregate_budgets, get_profile, scene_parameters
 
-def bootstrap(workers=2):
-    budgets = expected_budgets(workers)
-    state = {"primaryPid": 100, "businessWorkersStarted": workers, "restartEnabled": False,
+
+def bootstrap(workers=2, profile="c32"):
+    budgets = expected_budgets(workers, profile)
+    state = {"profile": profile, "primaryPid": 100, "businessWorkersStarted": workers, "restartEnabled": False,
              "phase": "ready", "workers": []}
     proofs = []
     for slot in range(workers):
         row = {"slot": slot, "pid": 101 + slot, "owner": f"fixture-slot-{slot}", "ready": True,
                "exitCode": None, "signal": None, "forcedKill": False}
         state["workers"].append(row)
-        proofs.append({"pid": row["pid"], "owner": row["owner"], "slot": slot,
+        proofs.append({"profile": profile, "pid": row["pid"], "owner": row["owner"], "slot": slot,
                        "budgets": budgets.copy(), "pools": [{"max": budgets["databasePoolMax"] - 2}, {"max": 2}],
                        "poolObserverRemoved": True, "nativePoolPrototypes": True, "inferenceHooksInstalled": False,
                        "nativeFastPrototypes": True,
@@ -42,21 +44,82 @@ def bootstrap(workers=2):
     return state, proofs
 
 
-def census(workers=2):
+def census(workers=2, profile="c32"):
+    target = aggregate_budgets(profile)["automaticCreditTarget"]
     allocations = []
     owners = [f"fixture-slot-{slot}" for slot in range(workers)]
     for owner in owners:
         for stripe in range(8 // workers):
             allocations.append({"owner": owner, "epoch": owner + "-epoch", "currency": "USD", "state": "active",
-                                "stripe": stripe, "backing": str(TOTAL_CREDIT_TARGET // 8),
-                                "available": str(TOTAL_CREDIT_TARGET // 8), "intents": 2, "completed": 2,
+                                "stripe": stripe, "backing": str(target // 8),
+                                "available": str(target // 8), "intents": 2, "completed": 2,
                                 "settled_charge": "70"})
     return {"owners": [{"owner": owner, "epoch": owner + "-epoch"} for owner in owners],
             "allocations": allocations, "maxima": [{"maximum": "524480", "intents": 16}],
-            "all_backing": str(TOTAL_CREDIT_TARGET), "all_available": str(TOTAL_CREDIT_TARGET)}, owners
+            "all_backing": str(target), "all_available": str(target)}, owners
 
 
 class BudgetTests(unittest.TestCase):
+    def test_profiles_share_fixed_budgets_but_explicitly_change_admission_and_funds(self):
+        for profile, concurrency, cap, target in (("c32", 32, 64, 67133440), ("c200", 200, 256, 268533760)):
+            totals = aggregate_budgets(profile)
+            self.assertEqual(get_profile(profile)["concurrency"], concurrency)
+            self.assertEqual(totals["httpInFlight"], cap)
+            self.assertEqual(totals["automaticCreditTarget"], target)
+            for workers in (1, 2):
+                child = expected_budgets(workers, profile)
+                self.assertEqual({key: value * workers for key, value in child.items()}, totals)
+                self.assertEqual(child["databasePoolMax"] * workers, 16)
+                self.assertEqual(child["receiptPerTenant"] * workers, 64)
+                env = router_environment({"PAIR_CONCURRENCY_CAP": "999", "BOUNDED_CLUSTER_PROFILE": "unknown"}, workers, profile)
+                self.assertEqual(env["PAIR_CONCURRENCY_CAP"], str(cap))
+                self.assertEqual(env["BOUNDED_CLUSTER_PROFILE"], profile)
+        for invalid in ("unknown", "", "C200", None, 200):
+            with self.assertRaises(ValueError):
+                get_profile(invalid)
+        self.assertEqual(scene_parameters("c32", "timed"), {"count": 1000000, "concurrency": 32, "duration": 60})
+        self.assertEqual(scene_parameters("c200", "timed"), {"count": 10000, "concurrency": 200, "duration": 0})
+        self.assertEqual(scene_parameters("c200", "qualification"), {"count": 256, "concurrency": 200, "duration": 0})
+
+    def test_c200_bootstrap_requires_profile_and_real_cap128_per_child(self):
+        for workers in (1, 2):
+            state, proofs = bootstrap(workers, "c200")
+            self.assertTrue(verify_bootstrap(state, proofs, workers, "c200")["verified"])
+            self.assertEqual(proofs[0]["budgets"]["automaticCreditTarget"], 268533760 // workers)
+        for mutate in (lambda s, p: s.update(profile="c32"), lambda s, p: p[1].update(profile="c32"),
+                       lambda s, p: p[1]["budgets"].update(httpInFlight=32),
+                       lambda s, p: p[1].update(executorLocalCaps=[32]),
+                       lambda s, p: p[1]["budgets"].update(automaticCreditTarget=33566720)):
+            state, proofs = bootstrap(2, "c200")
+            mutate(state, proofs)
+            with self.assertRaises(AssertionError):
+                verify_bootstrap(state, proofs, 2, "c200")
+
+    def test_finite_c200_preserves_all10000_attempts_including_errors_and_tail(self):
+        raw = {"concurrency": 200, "requests": 10000, "samples": [{"MS": 1}] * 9999 + [{"MS": 10000, "Err": "tail-error"}]}
+        self.assertEqual(verify_main_client(raw, "c200", "timed")["retained_attempts"], 10000)
+        for change in ({"requests": 9999, "samples": raw["samples"][:-1]}, {"samples": raw["samples"][:-1]},
+                       {"concurrency": 32}):
+            with self.assertRaises(AssertionError):
+                verify_main_client({**raw, **change}, "c200", "timed")
+
+    def test_mock_proofs_close_SSE_held_and_postshutdown_whole_fixture_gaps(self):
+        initial = {"received": 0, "completed": 0}
+        json_end = {"received": 394, "completed": 394}
+        sse_end = {"received": 426, "completed": 426}
+        held_end = {"received": 458, "completed": 458}
+        self.assertTrue(verify_mock_counts(json_end, sse_end, 32)["verified"])
+        self.assertTrue(verify_mock_counts(sse_end, held_end, 32)["verified"])
+        proof = verify_mock_counts(initial, held_end, 458, fresh=True)
+        self.assertEqual(proof["after"], held_end)
+        for before, after, expected, fresh in ((sse_end, sse_end, 32, False),
+                (sse_end, {"received": 459, "completed": 458}, 32, False),
+                (initial, {"received": 459, "completed": 459}, 458, True),
+                ({"received": 1, "completed": 1}, {"received": 459, "completed": 459}, 458, True)):
+            with self.assertRaises(AssertionError):
+                verify_mock_counts(before, after, expected, fresh=fresh)
+        self.assertTrue(verify_mock_counts(initial, {"received": 10138, "completed": 10138}, 10138, fresh=True)["verified"])
+
     def test_every_total_is_conserved_and_stripes_are_four_each(self):
         for workers in (1, 2):
             per_child = expected_budgets(workers)
@@ -108,6 +171,18 @@ class BudgetTests(unittest.TestCase):
 
 
 class OwnerTests(unittest.TestCase):
+    def test_c200_owner_target_is134266880_each_not_c32_target(self):
+        for workers in (1, 2):
+            data, owners = census(workers, "c200")
+            result = verify_owner_bounds(data, owners, workers, profile="c200")
+            self.assertEqual(result["expected_initial_target_per_owner"], 268533760 // workers)
+            self.assertEqual(result["all_active_and_retired_backing"], 268533760)
+            with self.assertRaises(AssertionError):
+                verify_owner_bounds(data, owners, workers)
+        data, owners = census()
+        with self.assertRaisesRegex(AssertionError, "COLD_TARGET_UNPROVEN"):
+            verify_owner_bounds(data, owners, 2, profile="c200")
+
     def test_all_owners_have_work_and_sum_backing_is_not_multiplied(self):
         for workers in (1, 2):
             data, owners = census(workers)

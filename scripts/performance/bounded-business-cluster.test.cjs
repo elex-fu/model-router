@@ -8,7 +8,7 @@ const http = require('node:http');
 const net = require('node:net');
 const { spawn } = require('node:child_process');
 const { setTimeout: delay } = require('node:timers/promises');
-const { TOTALS, workerBudget, childEnvironment, configuration, verifyProof } = require('./bounded-business-cluster.cjs');
+const { TOTALS, totalBudgets, workerBudget, childEnvironment, configuration, verifyProof } = require('./bounded-business-cluster.cjs');
 const launcher = path.join(__dirname, 'bounded-business-cluster.cjs');
 
 async function until(read, label, timeout = 6000) {
@@ -33,7 +33,7 @@ async function portReleased(port) {
   await new Promise(resolve => server.close(resolve));
 }
 function validEnv(directory, workers = 2) {
-  return { ...process.env, NODE_OPTIONS: '', BOUNDED_CLUSTER_DIAGNOSTIC: '1',
+  return { ...process.env, NODE_OPTIONS: '', BOUNDED_CLUSTER_DIAGNOSTIC: '1', BOUNDED_CLUSTER_PROFILE: 'c32',
     BOUNDED_CLUSTER_WORKERS: String(workers), BOUNDED_CLUSTER_STATE_FILE: path.join(directory, 'state.json'),
     BOUNDED_CLUSTER_CHILD_DIRECTORY: path.join(directory, 'children'),
     BOUNDED_CLUSTER_STARTUP_MS: '2500', BOUNDED_CLUSTER_SHUTDOWN_MS: '1500',
@@ -136,10 +136,14 @@ import('./dist/server/managed-saas.js').then(module=>module.startManagedSaasServ
 }
 
 test('budget arithmetic preserves exact totals, stripes, phases and owner separation', () => {
-  for (const count of [1, 2]) {
-    const budget = workerBudget(count);
-    for (const [key, total] of Object.entries(TOTALS)) assert.equal(budget[key] * count, total);
-    const env = validEnv('/tmp/bounded-pure', count);
+  assert.deepEqual(totalBudgets(), totalBudgets('c32'));
+  for (const profile of ['c32', 'c200']) for (const count of [1, 2]) {
+    const cap = profile === 'c200' ? 256 : 64;
+    const totals = totalBudgets(profile);
+    assert.deepEqual(totals, { ...TOTALS, httpInFlight: cap, automaticCreditTarget: 2 * 524480 * cap });
+    const budget = workerBudget(count, profile);
+    for (const [key, total] of Object.entries(totals)) assert.equal(budget[key] * count, total);
+    const env = { ...validEnv('/tmp/bounded-pure', count), BOUNDED_CLUSTER_PROFILE: profile };
     const config = configuration(env, ['/absolute/entry.js', 'start'], [], true);
     const children = Array.from({ length: count }, (_, slot) => childEnvironment(env, config, slot));
     assert.equal(new Set(children.map(child => child.MODEL_ROUTER_FAST_OWNER)).size, count);
@@ -147,28 +151,40 @@ test('budget arithmetic preserves exact totals, stripes, phases and owner separa
       assert.equal(child.MODEL_ROUTER_FAST_NAMESPACE, env.MODEL_ROUTER_FAST_NAMESPACE);
       assert.equal(child.MODEL_ROUTER_SAAS_DB_POOL_MAX, String(16 / count));
       assert.equal(child.MODEL_ROUTER_FAST_CREDIT_STRIPES, String(8 / count));
-      assert.equal(child.MODEL_ROUTER_SAAS_GATEWAY_MAX_HTTP_IN_FLIGHT, String(64 / count));
+      assert.equal(child.MODEL_ROUTER_SAAS_GATEWAY_MAX_HTTP_IN_FLIGHT, String(cap / count));
+      assert.equal(child.MODEL_ROUTER_FAST_RECEIPT_MAX_PER_TENANT, String(64 / count));
+      assert.equal(child.MODEL_ROUTER_FAST_RECEIPT_MAX_ENTRIES, String(256 / count));
+      assert.equal(child.MODEL_ROUTER_FAST_RECEIPT_MAX_BYTES, String(2097152 / count));
+      assert.equal(child.MODEL_ROUTER_FAST_RECEIPT_WORKERS, String(8 / count));
+      assert.equal(child.BOUNDED_CLUSTER_PROFILE, profile);
       assert.equal(child.MODEL_ROUTER_FAST_CREDIT_TRANCHE_MINOR_UNITS, undefined);
     }
+    assert.equal(config.profile, profile);
+    assert.deepEqual(config.totals, totals);
     assert.equal(children[0].MODEL_ROUTER_FAST_REDIS_DRAINED, '1');
     if (count === 2) assert.equal(children[1].MODEL_ROUTER_FAST_REDIS_DRAINED, '0');
   }
   for (const count of [0, 3, 1.5, NaN]) assert.throws(() => workerBudget(count));
+  for (const profile of ['', 'C200', 'c128', '__proto__', 200, null, {}]) {
+    assert.throws(() => totalBudgets(profile), /INVALID_PROFILE/);
+    assert.throws(() => workerBudget(2, profile), /INVALID_PROFILE/);
+  }
 });
 test('fail closed on implicit mode, explicit money, foreign preload and invalid setup', () => {
   const env = validEnv('/tmp/bounded-pure');
   for (const change of [{ BOUNDED_CLUSTER_DIAGNOSTIC: '' }, { BOUNDED_CLUSTER_WORKERS: '3' },
     { MODEL_ROUTER_FAST_CREDIT_TRANCHE_MINOR_UNITS: '33566720' }, { NODE_OPTIONS: '--require other' },
     { MODEL_ROUTER_FAST_REDIS_DRAINED: '0' }, { BOUNDED_CLUSTER_STATE_FILE: 'relative' },
-    { MODEL_ROUTER_SAAS_GATEWAY_REDIS_URL: '' }, { BOUNDED_CLUSTER_SHUTDOWN_MS: 'NaN' }])
+    { MODEL_ROUTER_SAAS_GATEWAY_REDIS_URL: '' }, { BOUNDED_CLUSTER_SHUTDOWN_MS: 'NaN' },
+    { BOUNDED_CLUSTER_PROFILE: 'c128' }, { BOUNDED_CLUSTER_PROFILE: '' }])
     assert.throws(() => configuration({ ...env, ...change }, ['/absolute/entry.js'], [], true));
   assert.throws(() => configuration(env, ['/absolute/entry.js'], ['--inspect'], true));
   assert.throws(() => configuration(env, ['/absolute/entry.js'], [], false));
 });
 test('readiness proof rejects wrong PID, owner, pool budget and incomplete private drain', () => {
-  const config = { workers: 2, budgets: workerBudget(2) };
+  const config = { workers: 2, profile: 'c32', budgets: workerBudget(2) };
   const row = { slot: 1, pid: 123, owner: 'fixture-slot-1' };
-  const proof = { ...row, budgets: config.budgets, pools: [{ max: 6 }, { max: 2 }],
+  const proof = { ...row, profile: config.profile, budgets: config.budgets, pools: [{ max: 6 }, { max: 2 }],
     readyStatus: 200, readinessListenerClosed: true, poolObserverRemoved: true,
     nativePoolPrototypes: true, inferenceHooksInstalled: false, nativeFastPrototypes: true,
     startupObserversRemoved: true, compositionHttpCaps: [32], executorLocalCaps: [32],
@@ -178,13 +194,33 @@ test('readiness proof rejects wrong PID, owner, pool budget and incomplete priva
     { pools: [{ max: 8 }, { max: 2 }] }, { readinessListenerClosed: false },
     { nativePoolPrototypes: false }, { poolObserverRemoved: false }, { inferenceHooksInstalled: true },
     { startupObserversRemoved: false }, { nativeFastPrototypes: false }, { compositionHttpCaps: [64] },
-    { executorLocalCaps: [64] }, { receiptQueues: [] }])
+    { executorLocalCaps: [64] }, { receiptQueues: [] }, { profile: 'c200' }, { profile: undefined }])
     assert.equal(verifyProof({ ...proof, ...change }, row, config), false);
 });
-for (const workers of [1, 2]) test(`${workers} business fixture processes, per-PID health and natural resource-owner drain`, async t => {
-  const run = await setup(t, workers, { BOUNDED_TEST_SLOW_SLOT: String(workers - 1) });
+test('c200 config proof scales actual local HTTP only, not tenant receipt or PG limits', () => {
+  for (const workers of [1, 2]) {
+    const config = { workers, profile: 'c200', budgets: workerBudget(workers, 'c200') };
+    const row = { slot: 0, pid: 123, owner: 'fixture-slot-0' };
+    const b = config.budgets;
+    const proof = { ...row, profile: config.profile, budgets: b, pools: [{max:16/workers-2},{max:2}],
+      readyStatus: 200, readinessListenerClosed: true, poolObserverRemoved: true,
+      nativePoolPrototypes: true, inferenceHooksInstalled: false, nativeFastPrototypes: true,
+      startupObserversRemoved: true, compositionHttpCaps: [256/workers], executorLocalCaps: [256/workers],
+      receiptQueues: [{maxEntries:256/workers,maxBytes:2097152/workers,maxPerTenant:64/workers,
+        workers:8/workers,maxAgeMs:5000,drainTimeoutMs:10000}] };
+    assert.equal(verifyProof(proof, row, config), true);
+    for (const change of [{profile:'c32'}, {executorLocalCaps:[64/workers]},
+      {compositionHttpCaps:[64/workers]}, {budgets:workerBudget(workers)},
+      {receiptQueues:[{...proof.receiptQueues[0],maxPerTenant:256/workers}]},
+      {pools:[{max:16},{max:2}]}]) assert.equal(verifyProof({...proof,...change},row,config),false);
+  }
+});
+for (const profile of ['c32', 'c200']) for (const workers of [1, 2])
+  test(`${profile}: ${workers} business fixture processes, per-PID health and natural resource-owner drain`, async t => {
+  const run = await setup(t, workers, { BOUNDED_CLUSTER_PROFILE: profile, BOUNDED_TEST_SLOW_SLOT: String(workers - 1) });
   const state = await run.ready();
   assert.equal(state.primaryPid, run.child.pid); assert.equal(state.primaryApplicationImports, false);
+  assert.equal(state.profile, profile); assert.deepEqual(state.totalBudgets, totalBudgets(profile));
   assert.equal(state.businessWorkersStarted, workers); assert.equal(state.restartEnabled, false);
   assert.equal(state.workers.every(row => row.ready), true);
   assert.equal(new Set(state.workers.map(row => row.owner)).size, workers);
@@ -198,6 +234,12 @@ for (const workers of [1, 2]) test(`${workers} business fixture processes, per-P
   assert.deepEqual([...observed].sort(), state.workers.map(row => row.pid).sort());
   for (const row of state.workers) {
     const proof = json(row.bootstrapProofFile);
+    const budget = workerBudget(workers, profile);
+    assert.equal(proof.profile, profile); assert.deepEqual(proof.budgets, budget);
+    assert.deepEqual(proof.executorLocalCaps, [budget.httpInFlight]);
+    assert.deepEqual(proof.compositionHttpCaps, [budget.httpInFlight]);
+    assert.deepEqual(proof.receiptQueues, [{maxEntries:budget.receiptEntries,maxBytes:budget.receiptBytes,
+      maxPerTenant:budget.receiptPerTenant,workers:budget.receiptWorkers,maxAgeMs:5000,drainTimeoutMs:10000}]);
     assert.equal(proof.readinessListenerClosed, true); assert.equal(proof.poolObserverRemoved, true);
     assert.equal(proof.nativePoolPrototypes, true);
     assert.equal(proof.startupObserversRemoved, true); assert.equal(proof.nativeFastPrototypes, true);

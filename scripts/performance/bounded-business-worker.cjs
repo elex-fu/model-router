@@ -68,7 +68,8 @@ function install() {
   const env = process.env;
   const slot = Number(env.BOUNDED_CLUSTER_SLOT);
   const workers = Number(env.BOUNDED_CLUSTER_WORKERS);
-  const budgets = workerBudget(workers);
+  const profile = env.BOUNDED_CLUSTER_PROFILE ?? 'c32';
+  const budgets = workerBudget(workers, profile);
   const proofFile = env.BOUNDED_CLUSTER_BOOTSTRAP_PROOF;
   const snapshotFile = env.BOUNDED_CLUSTER_QUEUE_SNAPSHOT;
   const dist = env.R9_TEST_DIST;
@@ -182,7 +183,7 @@ function install() {
             JSON.stringify(executorLocalCaps) !== JSON.stringify([budgets.httpInFlight]) ||
             JSON.stringify(compositionHttpCaps) !== JSON.stringify([budgets.httpInFlight]) || !nativeFastPrototypes)
           throw new Error('BOUNDED_ACTUAL_QUEUE_OR_HTTP_BUDGET_MISMATCH');
-        const proof = { pid: process.pid, slot, owner: env.MODEL_ROUTER_FAST_OWNER, budgets,
+        const proof = { pid: process.pid, slot, owner: env.MODEL_ROUTER_FAST_OWNER, profile, budgets,
           pools: actualPools, readyStatus, readinessListenerClosed: true,
           poolObserverRemoved: pg.Pool === OriginalPool,
           nativePoolPrototypes: pools.every(pool => Object.getPrototypeOf(pool) === OriginalPool.prototype),

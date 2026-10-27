@@ -4,21 +4,34 @@ This opt-in **test harness**, not a deployment supervisor, compares one business
 process with two behind the same Node cluster RR primary and public endpoint.
 It changes no production source or default. It promises no performance gain.
 
-## Fixed synthetic fixture budgets
+## Validated synthetic fixture profiles
+
+`--profile c32` is the unchanged default: 60 seconds at concurrency 32, shared
+policy/aggregate local HTTP cap 64 and automatic target 67,133,440. Opt-in
+`--profile c200` runs **exactly 10,000 requests at concurrency 200**, with cap
+256 and target 268,533,760. The target is derived as `2 × M524480 × cap`.
+Only these two named profiles are accepted; JS and Python load the same
+`bounded-business-profiles.json`. No arbitrary concurrency, duration, cap or
+target overrides are accepted. Every finite c200 attempt and its latency,
+including the initial c200 tail, remains in the result.
+
+## Fixed aggregate budgets within each profile
 
 | Resource | One business process | Each of two business processes |
 | --- | ---: | ---: |
 | Configured PostgreSQL maximum | 16 | 8 |
 | Actual gateway / quota pool maxima | 14 + 2 | 6 + 2 |
-| Local HTTP in-flight cap | 64 | 32 |
+| Local HTTP in-flight cap, c32 / c200 | 64 / 256 | 32 / 128 |
 | Receipt entries / accounted bytes / per tenant | 256 / 2 MiB / 64 | 128 / 1 MiB / 32 |
 | Receipt SQL workers / Redis-reconciliation workers | 8 / 8 | 4 / 4 |
 | Credit stripes | 8 | 4 |
-| Automatic credit target, fixed M=524,480 | 67,133,440 | 33,566,720 |
+| Automatic credit target, c32 / c200 | 67,133,440 / 268,533,760 | 33,566,720 / 134,266,880 |
 
-Redis namespace and tenant/project/key/account policy caps of 64 stay shared, not
-multiplied. There is no separate deployment-global Redis counter. The summed
-local HTTP cap is 64. Queue counts include running/retrying entries in both
+Redis namespace and tenant/project/key/account policy caps (64 for c32, 256 for
+c200) stay shared, not multiplied. There is no separate deployment-global Redis
+counter. The summed local HTTP cap equals the selected profile cap. The request's
+`max_tokens=64` and aggregate receipt per-tenant limit 64 do **not** change with
+the profile. Queue counts include running/retrying entries in both
 phases. Max age 5s and native drain timeout 10s remain unchanged.
 
 The target is **not a lifetime aggregate escrow guarantee** across crashes or
@@ -65,7 +78,7 @@ node --import tsx --test tests/ci/bounded-business-diagnostic-gates.test.ts
 ```
 
 The runner requires the separately qualified, **hash-pinned GEN17 local harness**
-and unchanged c32 client. It generates a newly named adapter; historical
+and unchanged client binary. It generates a newly named adapter; historical
 launchers/results are not overwritten. No dependencies or service data are
 downloaded or copied by this harness. Supply actual local paths, frozen commit,
 unique label, and an approved quiet-window generation:
@@ -77,20 +90,29 @@ python3 scripts/performance/bounded_business_performance_pilot.py \
   --client "$UNCHANGED_CLIENT" --workers 2 --scene qualification --pending-term
 ```
 
-Run untimed qualification separately for 1 and 2 workers before authorizing timed
-scenes. Warm remains 10 bootstrap + 128 c32 requests, with actual completed work
+Append `--profile c200` for the c200 profile; omitting it preserves c32. Run
+untimed qualification separately for 1 and 2 workers **for the selected profile**
+before authorizing timed scenes. Warm remains 10 bootstrap + 128 c32 requests,
+never a c200 warmup, with actual completed work
 on every owner, exact fees/usage, financial and TPM drain, and a 1s minimum gap.
-Ordinary qualification adds 256 JSON and 32 SSE requests in both arms, checking
-complete native terminals and the same usage/fees. The pending-TERM
+Ordinary qualification adds 256 JSON at the selected profile's concurrency and
+32 SSE at c32 in both arms, checking complete native terminals and the same
+usage/fees. The pending-TERM
 qualification briefly holds a disposable receipt-table SHARE
 lock: 32 paid clients complete while their durable intents retain M and receipts
 remain queued. Native snapshots and owner census prove pending work before
 TERM; both children must stay alive until explicit rollback, then exit
 naturally with exact ledger/receipt/job/TPM reconciliation. Rollback occurs in
 `finally`; the normal receipt timeout and financial policy are not relaxed.
+Separate mock counter boundaries cover ordinary JSON, SSE and held requests;
+a pre-warm to post-shutdown counter proof covers the whole fresh fixture,
+including any late sends. This added proof is prospective: original GEN32/33
+artifacts lack a separate held-work mock delta and must not be relabeled as
+proving upstream-send uniqueness for all 458 qualification requests.
 
-Timed `--scene timed` runs use the unchanged c32/60s client and forbid
-`--pending-term`. Report client EOF and client-plus-financial/TPM-drain endpoints,
+Timed `--scene timed` runs use the unchanged client and the selected fixed load
+(c32/60s or finite 10,000/c200), and forbid `--pending-term`. Report client EOF and
+client-plus-financial/TPM-drain endpoints,
 all statuses, per-owner work, summed business CPU and separate primary CPU.
 Repeat/reverse fresh-fixture arms before drawing conclusions. A profile's
 nonidle share and process CPU above one core do not prove spare CPU quota or

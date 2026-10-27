@@ -32,20 +32,20 @@ try {
 """
 
 
-def generated():
+def generated(profile="c32"):
     with patch("async_receipt_launcher_adapter.BASE_SHA256", hashlib.sha256(BASE.encode()).hexdigest()):
-        return adapt(BASE, base_directory=Path.cwd(), observer_directory=Path.cwd())
+        return adapt(BASE, base_directory=Path.cwd(), observer_directory=Path(__file__).parent, profile=profile)
 
 
-def select(env):
-    script = generated()
+def select(env, profile="c32"):
+    script = generated(profile)
     hook = script[script.index("  // DIAGNOSTIC ONLY. The primary splits"):
                   script.index("  const log = createWriteStream")]
     prelude = """import assert from 'node:assert/strict'; import {join} from 'node:path';
 const env={MODEL_ROUTER_FAST_RECEIPT_MODE:'memory-queue'}; const out='/workspace/fixture';
 const faultEnabled=process.env.PAIR_ASYNC_FAULTS==='1', metricsEnabled=process.env.PAIR_ASYNC_METRICS==='1',
 cpuProfileEnabled=process.env.PAIR_ASYNC_CPU_PROFILE==='1', gatewayNodeArgs=[];
-const fastMode=true,fixtureCap=64,builtinEstimator=true;
+const fastMode=true,fixtureCap=Number(process.env.PAIR_CONCURRENCY_CAP ??64),builtinEstimator=true;
 const stopping=process.env.TEST_STOPPING==='1';
 async function mkdir(){}
 """
@@ -75,6 +75,29 @@ class AdapterTests(unittest.TestCase):
         self.assertIn("clusterPrimaryPid: gateway.pid", source)
         self.assertIn("await waitForExit(child, 65000)", source)
         self.assertNotIn("await waitForExit(child, 45000)", source)
+
+    def test_c200_profile_forwards_cap256_without_growing_queue_or_pool(self):
+        for workers in (1, 2):
+            result = select({"BOUNDED_CLUSTER_WORKERS": str(workers), "BOUNDED_CLUSTER_PROFILE": "c200",
+                             "PAIR_CONCURRENCY_CAP": "256"}, "c200")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            env = json.loads(result.stdout)["env"]
+            self.assertEqual(env["BOUNDED_CLUSTER_PROFILE"], "c200")
+            self.assertEqual(env["MODEL_ROUTER_SAAS_GATEWAY_MAX_HTTP_IN_FLIGHT"], "256")
+            self.assertEqual(env["MODEL_ROUTER_SAAS_DB_POOL_MAX"], "16")
+            self.assertEqual(env["MODEL_ROUTER_FAST_RECEIPT_MAX_ENTRIES"], "256")
+            self.assertEqual(env["MODEL_ROUTER_FAST_RECEIPT_MAX_BYTES"], "2097152")
+            self.assertEqual(env["MODEL_ROUTER_FAST_RECEIPT_MAX_PER_TENANT"], "64")
+        for env in ({"BOUNDED_CLUSTER_PROFILE": "unknown", "PAIR_CONCURRENCY_CAP": "256"},
+                    {"BOUNDED_CLUSTER_PROFILE": "c32", "PAIR_CONCURRENCY_CAP": "256"},
+                    {"BOUNDED_CLUSTER_PROFILE": "c200", "PAIR_CONCURRENCY_CAP": "64"}):
+            result = select({"BOUNDED_CLUSTER_WORKERS": "2", **env}, "c200")
+            self.assertNotEqual(result.returncode, 0, env)
+        source = generated("c200")
+        self.assertIn("boundedClusterState?.profile, boundedClusterProfile", source)
+        self.assertIn("proof.profile, boundedClusterProfile", source)
+        with self.assertRaises(ValueError):
+            generated("unknown")
 
     def test_nested_replicas_wrong_count_observers_and_explicit_money_cap_rejected(self):
         for extra in ({"PAIR_INSTANCES": "2"}, {"BOUNDED_CLUSTER_WORKERS": "3"},

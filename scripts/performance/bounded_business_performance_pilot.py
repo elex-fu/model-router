@@ -22,14 +22,14 @@ from async_receipt_performance_pilot import (
 )
 from bounded_business_launcher_adapter import adapt
 
-MAXIMUM = 524480
-TOTAL_CREDIT_TARGET = 67133440
-TOTAL_BUDGETS = {
-    "databasePoolMax": 16, "httpInFlight": 64, "receiptEntries": 256,
-    "receiptBytes": 2097152, "receiptPerTenant": 64, "receiptWorkers": 8,
-    "reconciliationWorkers": 8, "creditStripes": 8,
-    "automaticCreditTarget": TOTAL_CREDIT_TARGET,
-}
+from bounded_business_profiles import (
+    MAXIMUM, PROFILE_NAMES, aggregate_budgets, expected_budgets, get_profile, scene_parameters,
+)
+
+# Backward-compatible default-profile exports; every execution uses its explicit
+# selected profile, never these aliases for c200 accounting.
+TOTAL_BUDGETS = aggregate_budgets()
+TOTAL_CREDIT_TARGET = TOTAL_BUDGETS["automaticCreditTarget"]
 
 # All allocations, including retired epochs, are included. Nothing here mutates
 # financial authority, creates jobs, repairs state, or waits for TTL expiry.
@@ -59,14 +59,9 @@ SELECT jsonb_build_object(
 """
 
 
-def expected_budgets(workers):
-    if workers not in (1, 2):
-        raise ValueError("BOUNDED_BUSINESS_EXPECT_ONE_OR_TWO_WORKERS")
-    return {key: value // workers for key, value in TOTAL_BUDGETS.items()}
-
-
-def verify_bootstrap(state, proofs, workers):
-    budgets = expected_budgets(workers)
+def verify_bootstrap(state, proofs, workers, profile="c32"):
+    budgets = expected_budgets(workers, profile)
+    assert state["profile"] == profile, "BOUNDED_BUSINESS_STATE_PROFILE_MISMATCH"
     assert state["businessWorkersStarted"] == workers and state["restartEnabled"] is False
     assert state["phase"] == "ready"
     assert len(state["workers"]) == len(proofs) == workers
@@ -75,13 +70,14 @@ def verify_bootstrap(state, proofs, workers):
     assert len(set(pids)) == len(set(owners)) == workers
     assert state["primaryPid"] not in pids
     assert {item["slot"] for item in state["workers"]} == set(range(workers))
-    expected_pools = sorted([16 // workers - 2, 2])
+    expected_pools = sorted([budgets["databasePoolMax"] - 2, 2])
     for item, proof in zip(state["workers"], proofs):
         assert item["ready"] is True
         assert item.get("exitCode") is None and item.get("signal") is None
         assert not item.get("forcedKill", False)
         assert proof["pid"] == item["pid"] and proof["owner"] == item["owner"]
         assert proof["slot"] == item["slot"]
+        assert proof["profile"] == profile, "BOUNDED_BUSINESS_PROOF_PROFILE_MISMATCH"
         assert proof["readyStatus"] == 200 and proof["readinessListenerClosed"] is True
         assert proof["poolObserverRemoved"] is True and proof["nativePoolPrototypes"] is True
         assert proof["nativeFastPrototypes"] is True
@@ -95,12 +91,15 @@ def verify_bootstrap(state, proofs, workers):
                                           "maxPerTenant": budgets["receiptPerTenant"], "workers": budgets["receiptWorkers"],
                                           "maxAgeMs": 5000, "drainTimeoutMs": 10000}]
     return {"verified": True, "business_workers": workers, "pids": pids, "owners": owners,
-            "per_child": budgets, "aggregate": TOTAL_BUDGETS,
+            "profile": profile, "per_child": budgets, "aggregate": aggregate_budgets(profile),
             "actual_pool_maxima": [pool["max"] for proof in proofs for pool in proof["pools"]],
             "proof_scope": "Each child: native Pool.options.max at construction, real private /readyz=200, readiness listener closed before warm."}
 
 
-def verify_owner_bounds(census, owners, workers, *, epochs=None, require_work=True, postshutdown=False):
+def verify_owner_bounds(census, owners, workers, *, epochs=None, require_work=True, postshutdown=False, profile="c32"):
+    totals = aggregate_budgets(profile)
+    target = totals["automaticCreditTarget"]
+    stripes = totals["creditStripes"]
     assert len(owners) == workers and len(set(owners)) == workers
     records = census["owners"]
     assert len(records) == workers and {row["owner"] for row in records} == set(owners), "BOUNDED_BUSINESS_UNEXPECTED_OWNER"
@@ -116,7 +115,7 @@ def verify_owner_bounds(census, owners, workers, *, epochs=None, require_work=Tr
         assert row["state"] in ("active", "retired")
         if not postshutdown:
             assert row["state"] == "active", "BOUNDED_BUSINESS_UNEXPECTED_RETIREMENT"
-        assert isinstance(row["stripe"], int) and 0 <= row["stripe"] < 8 // workers
+        assert isinstance(row["stripe"], int) and 0 <= row["stripe"] < stripes // workers
         identity = (row["owner"], row["epoch"], row["stripe"])
         assert identity not in seen
         seen.add(identity)
@@ -131,23 +130,23 @@ def verify_owner_bounds(census, owners, workers, *, epochs=None, require_work=Tr
         group[row["state"] + "_stripes"] += 1
     assert sum(row["backing"] for row in result.values()) == int(census["all_backing"])
     assert sum(row["available"] for row in result.values()) == int(census["all_available"])
-    assert int(census["all_backing"]) <= TOTAL_CREDIT_TARGET, "BOUNDED_BUSINESS_TOTAL_BACKING_EXCEEDED"
+    assert int(census["all_backing"]) <= target, "BOUNDED_BUSINESS_TOTAL_BACKING_EXCEEDED"
     for row in result.values():
-        assert row["backing"] <= TOTAL_CREDIT_TARGET // workers
+        assert row["backing"] <= target // workers
         assert row["settled_charge"] == row["completed"] * 35, "BOUNDED_BUSINESS_PER_OWNER_CHARGE_MISMATCH"
         if require_work:
             assert row["completed"] > 0, "BOUNDED_BUSINESS_WORKER_TRAFFIC_UNPROVEN"
-            assert row["active_stripes"] + row["retired_stripes"] == 8 // workers
+            assert row["active_stripes"] + row["retired_stripes"] == stripes // workers
             if not postshutdown:
-                assert row["backing"] + row["settled_charge"] >= TOTAL_CREDIT_TARGET // workers, "BOUNDED_BUSINESS_COLD_TARGET_UNPROVEN"
+                assert row["backing"] + row["settled_charge"] >= target // workers, "BOUNDED_BUSINESS_COLD_TARGET_UNPROVEN"
         if postshutdown:
             assert row["backing"] == row["available"] == row["active_stripes"] == 0
     if require_work:
         assert len(census["maxima"]) == 1 and int(census["maxima"][0]["maximum"]) == MAXIMUM
         assert census["maxima"][0]["intents"] == sum(row["intents"] for row in result.values())
-    return {"verified": True, "epochs": current_epochs, "by_owner": result,
+    return {"verified": True, "profile": profile, "epochs": current_epochs, "by_owner": result,
             "all_active_and_retired_backing": int(census["all_backing"]),
-            "expected_initial_target_per_owner": TOTAL_CREDIT_TARGET // workers,
+            "expected_initial_target_per_owner": target // workers,
             "cold_target_floor_required": require_work and not postshutdown,
             "target_interval": "Before retirement: target - own completed charges <= backing <= target. Warm fixed35-fee proof establishes cold target; later refill can replace spent credit, never increase the target.",
             "scope": "Read-only boundary census of all allocations, not a sampled peak. Fresh fixed-M fixture, unchanged owners/epochs and no respawn are required; restart does not have a lifetime aggregate T guarantee."}
@@ -191,6 +190,7 @@ def aggregate_resources(before, after, primary_pid, business_pids, successes):
 
 def verify_cluster_cleanup(state, bootstrap, outer):
     assert outer["allExited"] and outer["allGraceful"], "BOUNDED_BUSINESS_PRIMARY_CLEAN_EXIT_REQUIRED"
+    assert state["profile"] == bootstrap["profile"]
     assert state["primaryPid"] == bootstrap["primaryPid"]
     assert state["businessWorkersStarted"] == bootstrap["businessWorkersStarted"]
     assert state["restartEnabled"] is False
@@ -205,8 +205,8 @@ def verify_cluster_cleanup(state, bootstrap, outer):
             "scope": "Both business children and primary exited normally with no restart or forced kill; native application lifecycle owns receipt and ledger drain."}
 
 
-def router_environment(env, workers):
-    expected_budgets(workers)
+def router_environment(env, workers, profile="c32"):
+    budgets = expected_budgets(workers, profile)
     result = dict(env)
     for key in list(result):
         if key.startswith("MODEL_ROUTER_FAST_RECEIPT_") or key.startswith("BOUNDED_CLUSTER_"):
@@ -214,17 +214,19 @@ def router_environment(env, workers):
     assert not result.get("PAIR_GATEWAY_NODE_OPTIONS") and not result.get("NODE_OPTIONS")
     result.update(PAIR_INSTANCES="1", PAIR_ASYNC_FAULTS="0", PAIR_ASYNC_METRICS="0",
                   PAIR_ASYNC_CPU_PROFILE="0", MODEL_ROUTER_FAST_RECEIPT_MODE="memory-queue",
-                  BOUNDED_CLUSTER_WORKERS=str(workers))
+                  BOUNDED_CLUSTER_WORKERS=str(workers), BOUNDED_CLUSTER_PROFILE=profile,
+                  PAIR_CONCURRENCY_CAP=str(budgets["httpInFlight"] * workers))
     return result
 
 
-def verify_pending_term_observation(before, held, owner_before, owner_held, expected, bootstrap, stopping):
+def verify_pending_term_observation(before, held, owner_before, owner_held, expected, bootstrap, stopping, profile="c32"):
     """Completed clients are backed by durable intents, not yet by receipts."""
     assert expected > 0
     assert held["intent_count"] - before["intent_count"] == expected
     assert held["receipt_count"] == before["receipt_count"]
     assert held["completed_jobs"] == before["completed_jobs"]
-    assert int(held["allocation_backing_minor_units"]) <= TOTAL_CREDIT_TARGET
+    assert int(held["allocation_backing_minor_units"]) <= aggregate_budgets(profile)["automaticCreditTarget"]
+    assert stopping["profile"] == bootstrap["profile"] == profile
     deltas = {owner: owner_held[owner]["intents"] - row["intents"] for owner, row in owner_before.items()}
     assert sum(deltas.values()) == expected and all(delta > 0 for delta in deltas.values())
     assert stopping["phase"] == "stopping" and stopping["businessWorkersStarted"] == bootstrap["businessWorkersStarted"]
@@ -236,8 +238,9 @@ def verify_pending_term_observation(before, held, owner_before, owner_held, expe
             "scope": "Actual successful clients, durable intents on both owners, receipts held by one admin table lock, and both original processes alive after TERM. No synthetic receipt or liability release."}
 
 
-def verify_queue_snapshots(values, bootstrap, workers, *, empty=False, pending_by_owner=None):
-    budgets = expected_budgets(workers)
+def verify_queue_snapshots(values, bootstrap, workers, *, empty=False, pending_by_owner=None, profile="c32"):
+    budgets = expected_budgets(workers, profile)
+    assert bootstrap["profile"] == profile
     assert len(values) == len(bootstrap["workers"]) == workers
     for value, child in zip(values, bootstrap["workers"]):
         assert value["pid"] == child["pid"] and value["slot"] == child["slot"]
@@ -270,6 +273,32 @@ def verify_sse_qualification(raw, count):
         assert sample["Mode"] == "fast-reserved-max" and sample["Fallback"] == ""
     return {"verified": True, "requests": count,
             "scope": "Unchanged native client reads complete body and requires data: [DONE] in SSE mode; every retained sample is200, complete, nonempty and fast-reserved-max. Exact35 fee and15-token reconciliation are separately checked in financial/TPM census."}
+
+
+def verify_main_client(raw, profile, scene):
+    plan = scene_parameters(profile, scene)
+    assert raw["concurrency"] == plan["concurrency"]
+    assert raw["requests"] == len(raw["samples"]), "BOUNDED_BUSINESS_ALL_ATTEMPTS_REQUIRED"
+    if plan["duration"] == 0:
+        assert raw["requests"] == plan["count"], "BOUNDED_BUSINESS_FINITE_REQUEST_COUNT_REQUIRED"
+    assert raw["requests"] > 0
+    return {"verified": True, "plan": plan, "retained_attempts": len(raw["samples"]),
+            "scope": "All native client attempts retained, including errors and finite-run tails; no warm, status, duration or outlier filtering."}
+
+
+def verify_mock_counts(before, after, expected, *, fresh=False):
+    """Counter evidence, not an inferred per-request deduplication identity."""
+    assert type(expected) is int and expected >= 0
+    for name in ("received", "completed"):
+        assert type(before[name]) is int and type(after[name]) is int
+        assert 0 <= before[name] <= after[name]
+        if fresh:
+            assert before[name] == 0, "BOUNDED_BUSINESS_MOCK_NOT_FRESH"
+        assert after[name] - before[name] == expected, "BOUNDED_BUSINESS_MOCK_COUNT_MISMATCH"
+    return {"verified": True, "before": before, "after": after, "expected_requests": expected,
+            "received_delta": after["received"] - before["received"],
+            "completed_delta": after["completed"] - before["completed"], "fresh_fixture": fresh,
+            "scope": "Actual mock received/completed counter deltas; whole-fixture proof starts at zero before gateway startup and ends after real shutdown. Counters alone are not per-request identity evidence."}
 
 
 def cleanup_owned_cluster(discover, snapshot, send_signal, *, monotonic=time.monotonic, sleep=time.sleep,
@@ -414,11 +443,15 @@ def main():
     parser.add_argument("--label", required=True)
     parser.add_argument("--generation", type=int, required=True)
     parser.add_argument("--client", type=Path, required=True)
+    parser.add_argument("--profile", choices=PROFILE_NAMES, default="c32")
     parser.add_argument("--workers", type=int, choices=(1, 2), required=True)
     parser.add_argument("--scene", choices=("qualification", "timed"), required=True)
     parser.add_argument("--pending-term", action="store_true",
                         help="Untimed qualification only: prove native queue drain while receipt INSERT is temporarily locked")
     args = parser.parse_args()
+    selected = get_profile(args.profile)
+    totals = aggregate_budgets(args.profile)
+    scene = scene_parameters(args.profile, args.scene)
     if not args.execute:
         parser.error("--execute requires root quiet-window GO")
     if args.pending_term and args.scene != "qualification":
@@ -430,7 +463,7 @@ def main():
     generated = args.harness / ("router-launch-" + args.label + ".mjs")
     assert not generated.exists(), "BOUNDED_BUSINESS_REFUSE_LAUNCHER_OVERWRITE"
     generated.write_text(adapt((args.harness / "router-launch.mjs").read_text(),
-                               base_directory=args.harness, observer_directory=here))
+                               base_directory=args.harness, observer_directory=here, profile=args.profile))
     subprocess.run(["node", "--check", str(generated)], check=True)
     sys.path.insert(0, str(args.harness.resolve()))
     from evaluate import Evaluation, A, PG, ROUTERPORT
@@ -439,7 +472,7 @@ def main():
     from quiet_window import capture, wait_active
     from release_quiet import release
     from redis_counter_capture import capture as capture_redis
-    os.environ.update(PAIR_CONCURRENCY_CAP="64", PAIR_PREPARED="off", PAIR_CONNECTION_REUSE="auto",
+    os.environ.update(PAIR_CONCURRENCY_CAP=str(selected["httpInFlight"]), PAIR_PREPARED="off", PAIR_CONNECTION_REUSE="auto",
                       PAIR_BUILTIN_ESTIMATOR="1", PAIR_TRANCHE_MINOR_UNITS="auto", PAIR_EXPECT_COLD_SUCCESS="1",
                       PAIR_SEED_HEALTH="0", PAIR_MOCK_DELAY_MS="5", PAIR_WARM_PROTOCOL="matched-v2",
                       PAIR_WINDOW_GENERATION=str(args.generation), PAIR_QUIET_WINDOW_CONFIRMED="1")
@@ -453,7 +486,7 @@ def main():
         def spawn(self, name, command, env=None):
             if name == "router-launch":
                 command = ["node", generated]
-                env = router_environment(env, args.workers)
+                env = router_environment(env, args.workers, args.profile)
                 log = (A / "logs" / f"{self.label}-{name}.log").open("w")
                 self.logs.append(log)
                 process = subprocess.Popen([str(value) for value in command], env=env,
@@ -483,7 +516,7 @@ def main():
 
         def owner_census(self, name, **kwargs):
             value = json.loads(self.sql(self.db, OWNER_CENSUS_SQL))
-            proof = verify_owner_bounds(value, self.owners, args.workers, **kwargs)
+            proof = verify_owner_bounds(value, self.owners, args.workers, profile=args.profile, **kwargs)
             return self.save(name + "-owner-census", {"census": value, "proof": proof})
 
         def tpm_drain(self, name):
@@ -526,9 +559,9 @@ def main():
             deadline = time.monotonic() + 5
             while True:
                 values = self.queue_snapshots(bootstrap, state_file)
-                verify_queue_snapshots(values, bootstrap, args.workers)
+                verify_queue_snapshots(values, bootstrap, args.workers, profile=args.profile)
                 if all(value["snapshot"]["pending"] == 0 for value in values):
-                    return self.save(name + "-queue-empty", verify_queue_snapshots(values, bootstrap, args.workers, empty=True))
+                    return self.save(name + "-queue-empty", verify_queue_snapshots(values, bootstrap, args.workers, empty=True, profile=args.profile))
                 if time.monotonic() >= deadline:
                     raise TimeoutError("BOUNDED_BUSINESS_QUALIFICATION_QUEUE_NOT_EMPTY")
                 time.sleep(.01)
@@ -548,6 +581,8 @@ def main():
         def pending_term(self, name, bootstrap, epochs, state_file):
             before = self.census()
             owner_before = self.owner_census(name + "-before", epochs=epochs)["proof"]["by_owner"]
+            mock_before = self.metrics()
+            self.save(name + "-mock-before", mock_before)
             log = (A / "logs" / f"{self.label}-{name}-receipt-lock.log").open("w")
             self.logs.append(log)
             lock = subprocess.Popen([str(PG / "psql"), "-XqAt", "-v", "ON_ERROR_STOP=1", "-d", self.db],
@@ -572,13 +607,17 @@ def main():
                 assert pending["requests"] == pending["success"] == 32 and pending["status_counts"] == {"200": 32}
                 assert pending["execution_modes"].get("fast-reserved-max", 0) == 32 and not pending["fallback_reasons"]
                 self.total += 32
+                mock_after = self.metrics()
+                self.save(name + "-mock-after", mock_after)
+                mock_proof = verify_mock_counts(mock_before, mock_after, 32)
+                self.save(name + "-mock-proof", mock_proof)
                 held = self.census()
                 owner_held = self.owner_census(name + "-held", epochs=epochs)["proof"]["by_owner"]
                 pending_by_owner = {owner: owner_held[owner]["intents"] - row["intents"]
                                     for owner, row in owner_before.items()}
                 queues = self.queue_snapshots(bootstrap, state_file, timeout=1)
                 queue_proof = verify_queue_snapshots(queues, bootstrap, args.workers,
-                                                    pending_by_owner=pending_by_owner)
+                                                    pending_by_owner=pending_by_owner, profile=args.profile)
                 self.gateway.terminate()
                 self.gateway_term_sent = True
                 deadline = time.monotonic() + 1.5
@@ -593,7 +632,7 @@ def main():
                 assert lock.poll() is None, "BOUNDED_BUSINESS_RECEIPT_LOCK_EXPIRED"
                 stopping = json.loads(state_file.read_text())
                 proof = verify_pending_term_observation(before, held, owner_before, owner_held,
-                                                        32, bootstrap, stopping)
+                                                        32, bootstrap, stopping, args.profile)
                 assert proof["pending_intents_by_owner"] == pending_by_owner
                 assert lock.poll() is None, "BOUNDED_BUSINESS_RECEIPT_LOCK_EXPIRED"
                 alive = [process_snapshot(row["pid"]) for row in bootstrap["workers"]]
@@ -625,22 +664,23 @@ def main():
                 self.gateway.wait()
                 raise RuntimeError("BOUNDED_BUSINESS_PENDING_TERM_DRAIN_TIMEOUT")
             return {"requested": True, "successful_clients": 32, "both_owners_pending_after_TERM": True,
-                    "lock_released_by_rollback": True, "lock_exit_code": lock.returncode}
+                    "lock_released_by_rollback": True, "lock_exit_code": lock.returncode,
+                    "mock_counts": mock_proof}
 
     fixture = Pilot(args)
     owned_identities = []
     bootstrap = None
     result = {"passed": False, "stage": "incomplete"}
-    name = f"{args.scene}-c32-business{args.workers}"
+    name = f"{args.scene}-{args.profile}-business{args.workers}"
     try:
         wait_active(fixture)
         fixture.save("manifest", {
             "source_commit": args.expected_source, "generation": args.generation,
-            "scene": args.scene, "business_workers": args.workers, "diagnostic_only": True,
+            "scene": args.scene, "profile": args.profile, "client_plan": scene, "business_workers": args.workers, "diagnostic_only": True,
             "pending_TERM_qualification_requested": args.pending_term,
             "not_full_performance_acceptance": True, "production_changes": False,
             "topology": "same RR primary and public port; one or two actual business workers",
-            "aggregate_budgets": TOTAL_BUDGETS, "per_child_budgets": expected_budgets(args.workers),
+            "aggregate_budgets": totals, "per_child_budgets": expected_budgets(args.workers, args.profile),
             "M": MAXIMUM, "fee_per_success": 35, "actual_usage": {"input": 10, "output": 5},
             "fresh_fixture_required": True, "restart_enabled": False,
             "queue_observer": False, "cpu_profiler": False, "timed_driver_hooks": False,
@@ -659,14 +699,17 @@ def main():
                         "One arm per invocation; use matched reversed/repeated runs before claiming a performance effect."],
         })
         fixture.start_services()
+        mock_initial = fixture.metrics()
+        fixture.save(name + "-mock-fresh", verify_mock_counts(mock_initial, mock_initial, 0, fresh=True))
         fixture.start_router(observer=False)
         state_file = Path(fixture.info["clusterStateFile"])
         bootstrap = json.loads(state_file.read_text())
         proofs = [json.loads(Path(row["bootstrapProofFile"]).read_text()) for row in bootstrap["workers"]]
-        bootstrap_proof = verify_bootstrap(bootstrap, proofs, args.workers)
+        bootstrap_proof = verify_bootstrap(bootstrap, proofs, args.workers, args.profile)
         fixture.owners = bootstrap_proof["owners"]
         primary_pid = bootstrap["primaryPid"]
         business_pids = bootstrap_proof["pids"]
+        assert fixture.info["profile"] == args.profile
         assert fixture.info["gatewayPids"] == business_pids and fixture.info["clusterPrimaryPid"] == primary_pid
         all_pids = [primary_pid, *business_pids]
         owned_identities = [process_snapshot(pid) for pid in all_pids]
@@ -688,6 +731,8 @@ def main():
         warm_drained = time.monotonic()
         before = fixture.census()
         mock_before = fixture.metrics()
+        fixture.save(name + "-warm-mock-after", mock_before)
+        fixture.save(name + "-warm-mock", verify_mock_counts(mock_initial, mock_before, 138, fresh=True))
         time.sleep(max(0, warm_drained + 1 - time.monotonic()))
         fixture.sql(fixture.db, "SELECT pg_stat_statements_reset()")
         quiet_before = capture(fixture)
@@ -704,12 +749,11 @@ def main():
         thread = threading.Thread(target=guard, daemon=True)
         thread.start()
         try:
-            raw = fixture.client(name, 256 if args.scene == "qualification" else 1000000,
-                                 32, duration=0 if args.scene == "qualification" else 60)
+            raw = fixture.client(name, scene["count"], scene["concurrency"], duration=scene["duration"])
             fixture.total += raw["success"]
             immediate = fixture.census()
             fixture.save(name + "-immediate", immediate)
-            assert int(immediate["allocation_backing_minor_units"]) <= TOTAL_CREDIT_TARGET
+            assert int(immediate["allocation_backing_minor_units"]) <= totals["automaticCreditTarget"]
             final = fixture.drain(name, fixture.total, raise_on_error=False)
             tpm_proof = fixture.tpm_drain(name)
             financial_tpm_end_wall_ns = time.time_ns()
@@ -725,6 +769,7 @@ def main():
         reserve_calls = sum(row["calls"] for row in sql_rows if "fast-journal:reserve-intent" in row["query"] or row["query"].startswith("WITH current_owner AS MATERIALIZED"))
         lookup_calls = sum(row["calls"] for row in sql_rows if row["query"].startswith("SELECT i.request_id, i.intent_digest, COALESCE("))
         mock_after = fixture.metrics()
+        client_proof = verify_main_client(raw, args.profile, args.scene)
         client_start, client_end = int(raw["started_at_unix_ns"]), int(raw["completed_at_unix_ns"])
         clock_error_ns = abs((client_end - client_start) - round(raw["duration_s"] * 1e9))
         clock_stable = clock_error_ns <= 1000000 and abs(clock_after - clock_before) <= 1000000
@@ -733,8 +778,9 @@ def main():
         owner_deltas = {owner: {key: owners_after["proof"]["by_owner"][owner][key] - owners_before["proof"]["by_owner"][owner][key]
                                 for key in ("intents", "completed")} for owner in fixture.owners}
         summary = {
-            "scene": name, "source_commit": args.expected_source, "business_workers": args.workers,
+            "scene": name, "profile": args.profile, "client_plan": scene, "source_commit": args.expected_source, "business_workers": args.workers,
             "diagnostic_only": True, "qualification_only": args.scene == "qualification",
+            "all_attempt_client_proof": client_proof,
             "client": {key: value for key, value in raw.items() if key != "samples"},
             "client_completion_success_rps": raw["throughput_success_rps"],
             "client_plus_financial_and_tpm_drain_seconds": financial_duration,
@@ -778,6 +824,7 @@ def main():
             fixture.qualification_queue_empty(name + "-after", bootstrap, state_file)
             sse_before = fixture.census()
             sse_mock_before = fixture.metrics()
+            fixture.save(name + "-SSE-mock-before", sse_mock_before)
             sse = fixture.client(name + "-SSE", 32, 32, stream=True)
             sse_proof = verify_sse_qualification(sse, 32)
             fixture.total += 32
@@ -785,12 +832,14 @@ def main():
             sse_tpm = fixture.tpm_drain(name + "-SSE")
             fixture.qualification_queue_empty(name + "-SSE", bootstrap, state_file)
             sse_mock_after = fixture.metrics()
-            assert sse_mock_after["received"] - sse_mock_before["received"] == 32
-            assert sse_mock_after["completed"] - sse_mock_before["completed"] == 32
+            fixture.save(name + "-SSE-mock-after", sse_mock_after)
+            sse_mock_proof = verify_mock_counts(sse_mock_before, sse_mock_after, 32)
+            fixture.save(name + "-SSE-mock-proof", sse_mock_proof)
             assert sse_final["intent_count"] - sse_before["intent_count"] == 32
             fixture.owner_census(name + "-SSE", epochs=epochs)
             fixture.save(name + "-SSE-qualification", {"verification": sse_proof, "financial": sse_final["drain"],
-                                                      "TPM": sse_tpm, "total_successes_including_warm": fixture.total})
+                                                      "TPM": sse_tpm, "mock_counts": sse_mock_proof,
+                                                      "total_successes_including_warm": fixture.total})
         pending_term = fixture.pending_term(name + "-pending-term", bootstrap, epochs, state_file) if args.pending_term else None
         if not args.pending_term:
             fixture.stop(fixture.gateway)
@@ -801,12 +850,17 @@ def main():
         fixture.drain(name + "-postshutdown", fixture.total)
         fixture.tpm_drain(name + "-postshutdown")
         fixture.owner_census(name + "-postshutdown", epochs=epochs, postshutdown=True)
+        mock_postshutdown = fixture.metrics()
+        fixture.save(name + "-postshutdown-mock", mock_postshutdown)
+        whole_mock = verify_mock_counts(mock_initial, mock_postshutdown, fixture.total, fresh=True)
+        fixture.save(name + "-whole-fixture-mock", whole_mock)
         if pending_term:
             fixture.save(name + "-pending-term-qualification", {**pending_term, "verified": True,
                          "all_original_children_graceful": True, "postshutdown_finance_and_TPM_exact": True,
                          "total_successes_including_warm_and_pending": fixture.total})
-        result = {"passed": True, "scene": name, "diagnostic_only": True,
+        result = {"passed": True, "scene": name, "profile": args.profile, "diagnostic_only": True,
                   "qualification_only": args.scene == "qualification", "business_workers": args.workers,
+                  "whole_fixture_mock_verified": True, "whole_fixture_successes": fixture.total,
                   "pending_TERM_qualification_verified": bool(pending_term)}
     except BaseException as error:
         result = {"passed": False, "error_category": type(error).__name__, "stage": "experiment"}
