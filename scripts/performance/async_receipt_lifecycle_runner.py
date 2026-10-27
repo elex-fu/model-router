@@ -17,7 +17,7 @@ import time
 import urllib.error
 import urllib.request
 
-from async_receipt_fixture_checks import assert_completed_http, assert_receipt_not_written, assert_conservation, wait_until
+from async_receipt_fixture_checks import assert_completed_http, assert_receipt_not_written, assert_receipt_durable_worker_paused, assert_conservation, wait_until
 from async_receipt_launcher_adapter import adapt
 
 
@@ -38,6 +38,83 @@ def readiness_closed(url):
         return True
 
 
+def pressure_case(fixture, case, before, before_mock, hold, waiting):
+    if case == "receipt-ack-loss":
+        hold.unlink()
+        (fixture.out / "receipt-ack-loss.once").write_text("arm\n")
+        result = fixture.request(); assert_completed_http(result, False)
+        fixture.total += 1
+        final = fixture.drain("receipt-ack-loss-final", fixture.total)
+        fixture.save_observers("receipt-ack-loss-final")
+        events = json.loads((fixture.out / "async-receipt-fault-events.json").read_text())["events"]
+        lost = [event for event in events if event["phase"] == "ack_loss_injected" and event["kind"] == "receipt"]
+        assert len(lost) == 1
+        attempts = [event for event in events if event["phase"] == "query_driver_start" and event["kind"] == "receipt" and event["identityHash"] == lost[0]["identityHash"]]
+        assert len(attempts) == 2 and len({event["inputHash"] for event in attempts}) == 1
+        assert fixture.metrics()["received"] - before_mock["received"] == 1
+        fixture.save("receipt-ack-loss-proof", {"real_driver_success_hidden_once": True,
+            "same_identity_and_full_parameter_hash": True, "receipt_sql_attempts": len(attempts),
+            "raw_upstream_sends": 1, "receipt_delta": final["receipt_count"] - before["receipt_count"],
+            "release_marker_delta": final["receipt_release_count"] - before["receipt_release_count"],
+            "ledger_delta": final["settlement_ledger_count"] - before["settlement_ledger_count"]})
+        return
+    if case == "ledger-pause":
+        hold.unlink()
+        worker_hold = fixture.out / "worker-before-claim.hold"
+        worker_wait = fixture.out / "worker-before-claim.waiting"
+        worker_wait.unlink(missing_ok=True); worker_hold.write_text("hold\n")
+        try:
+            wait_until(worker_wait.exists)
+            result = fixture.request(); assert_completed_http(result, False)
+            def durable_receipt():
+                state = fixture.census()
+                return state if state["receipt_count"] == before["receipt_count"] + 1 else None
+            held = wait_until(durable_receipt)
+            assert_receipt_durable_worker_paused(before, held)
+            fixture.save("ledger-paused-proof", {"external_EOF_complete": True, "before": before, "held": held,
+                "remaining_H": 35, "original_M": 524480, "pause": "worker claim before SQL, not receipt"})
+        finally: worker_hold.unlink(missing_ok=True)
+        fixture.total += 1; fixture.drain("ledger-resumed", fixture.total)
+        return
+    first = fixture.request(); assert_completed_http(first, False)
+    wait_until(waiting.exists)
+    assert_receipt_not_written(before, fixture.census())
+    if case == "queue-age":
+        time.sleep(.2)  # Explicit test-only maxAge100ms, not a performance parameter.
+        denied = fixture.request()
+        assert denied["status"] == 503 and "FAST_RECEIPT_BACKPRESSURE" in denied["body"], denied
+        held = fixture.census(); assert_receipt_not_written(before, held)
+        assert fixture.metrics()["received"] - before_mock["received"] == 1
+        fixture.save("age-preintent-denial-proof", {"response": denied, "before": before, "held": held,
+            "max_age_ms": 100, "new_intent_for_denied_request": False, "new_upstream_for_denied_request": False})
+        hold.unlink(); fixture.total += 1; fixture.drain("age-resumed", fixture.total)
+        return
+    assert case == "queue-full"
+    pool = ThreadPoolExecutor(max_workers=1)
+    try:
+        second = pool.submit(fixture.request)
+        wait_until(lambda: fixture.metrics()["completed"] == before_mock["completed"] + 2)
+        def both_receipts_held():
+            file = fixture.out / "async-receipt-fault-events.json"
+            if not file.exists(): return False
+            events = json.loads(file.read_text())["events"]
+            return sum(event["phase"] == "before_sql_hold" and event["kind"] == "receipt" for event in events) == 2
+        wait_until(both_receipts_held)
+        assert not second.done(), "full queue synchronous fallback must keep terminal gated"
+        held = fixture.census(); assert_receipt_not_written(before, held, count=2)
+        metrics = fixture.save_observers("queue-full-held")
+        assert metrics["latest"]["pending"] == metrics["latest"]["undurable"] == 1
+        assert metrics["latest"]["fallbacks"] == 1
+        fixture.save("queue-full-proof", {"first_external_EOF_complete": True, "second_external_EOF_complete": False,
+            "max_entries": 1, "workers": 1, "queued_pending": 1, "synchronous_fallbacks": 1,
+            "before": before, "held": held})
+    finally:
+        hold.unlink(missing_ok=True); pool.shutdown(wait=True)
+    assert_completed_http(second.result(timeout=10), False)
+    fixture.total += 2; fixture.drain("queue-full-resumed", fixture.total)
+    assert fixture.metrics()["received"] - before_mock["received"] == 2
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--execute", action="store_true")
@@ -46,7 +123,7 @@ def main():
     parser.add_argument("--expected-source", required=True)
     parser.add_argument("--label", required=True)
     parser.add_argument("--window", type=Path, required=True)
-    parser.add_argument("--case", choices=["kill-after-eof", "term-inflight"], required=True)
+    parser.add_argument("--case", choices=["kill-after-eof", "term-inflight", "queue-full", "queue-age", "receipt-ack-loss", "ledger-pause"], required=True)
     args = parser.parse_args()
     if not args.execute:
         parser.error("--execute requires an explicitly authorized local functional scope")
@@ -74,6 +151,10 @@ def main():
                     if key.startswith("MODEL_ROUTER_FAST_RECEIPT_"):
                         del env[key]
                 env["MODEL_ROUTER_FAST_RECEIPT_MODE"] = "memory-queue"
+                if args.case == "queue-full":
+                    env.update(MODEL_ROUTER_FAST_RECEIPT_MAX_ENTRIES="1", MODEL_ROUTER_FAST_RECEIPT_WORKERS="1", MODEL_ROUTER_FAST_RECEIPT_MAX_PER_TENANT="1")
+                if args.case == "queue-age":
+                    env["MODEL_ROUTER_FAST_RECEIPT_MAX_AGE_MS"] = "100"
             return super().spawn(name, command, env)
 
         def stop(self, process):
@@ -164,7 +245,7 @@ def main():
             fixture.save("restart-final-queue-metrics", restart_metrics)
             assert restart_metrics["latest"]["accepted"] == restart_metrics["latest"]["durable"] == restart_metrics["latest"]["completed"] == 0
             fixture.drain("known-unknown-after-restart", fixture.total, allow_unknown=1)
-        else:
+        elif args.case == "term-inflight":
             pool = ThreadPoolExecutor(max_workers=1)
             try:
                 pending = pool.submit(fixture.request)
@@ -204,6 +285,9 @@ def main():
             fixture.save("term-final-queue-metrics", metrics)
             assert metrics["latest"]["pending"] == metrics["latest"]["undurable"] == 0
             assert metrics["latest"]["accepted"] == metrics["latest"]["durable"] == metrics["latest"]["completed"] == 2
+        else:
+            pressure_case(fixture, args.case, before, before_mock, hold, waiting)
+            fixture.save_observers("final")
         fixture.save("result", {"passed": True, "not_performance_acceptance": True,
             "case": args.case, "publication_status": "LOCAL_UNPUBLISHED", "expected_sigkill_pid": expected_killed_pid})
         print("ASYNC_RECEIPT_LIFECYCLE_PASS", args.case, flush=True)
