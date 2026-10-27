@@ -14,6 +14,7 @@ import {
   type FastAdmissionResult,
   openRedisFastGatewayAdmission,
 } from '../../../../src/saas/gateway/fast/redis-admission.js';
+import { createRedisScriptTransport } from '../../../../src/saas/gateway/fast/redis-script-transport.js';
 
 const enabled = process.env.MODEL_ROUTER_FAST_ADMISSION_REDIS_TEST === '1';
 const namespacePrefix = (namespace: string) =>
@@ -1100,4 +1101,109 @@ test('server-clock expiry closes missing/restarted rate-only work without touchi
   } finally {
     inspector.destroy();
   }
+});
+
+test('real Redis script transport uses hashes, survives cache flush, and never replays unknown ACKs', {
+  skip: !enabled,
+  timeout: 10000,
+}, async (t) => {
+  const f = await fixture(t);
+  const counts = async () => {
+    const info = await f.inspector.info('commandstats');
+    const calls = (name: string) => Number(new RegExp(`^cmdstat_${name}:calls=([0-9]+),`, 'm').exec(info)?.[1] ?? 0);
+    return { eval: calls('eval'), evalsha: calls('evalsha') };
+  };
+  const delta = (before: Awaited<ReturnType<typeof counts>>, after: Awaited<ReturnType<typeof counts>>) => ({
+    eval: after.eval - before.eval,
+    evalsha: after.evalsha - before.evalsha,
+  });
+  // EVAL remains allowed here: an EVALSHA ACL denial must still fail closed,
+  // rather than silently downgrading to a body execution.
+  const user = `transport-${randomUUID()}`;
+  const deniedNamespace = randomUUID();
+  const deniedUrl = new URL(f.url);
+  deniedUrl.username = user;
+  await f.inspector.sendCommand(['ACL', 'SETUSER', user, 'on', 'nopass', '~*', '&*', '+@all', '-evalsha']);
+  try {
+    const deniedBefore = await counts();
+    await assert.rejects(f.open(deniedNamespace, { url: deniedUrl.toString() }), /Redis unavailable/);
+    assert.equal((await counts()).eval, deniedBefore.eval, 'NOPERM must not fall back to EVAL');
+    assert.equal(await f.inspector.exists(`${namespacePrefix(deniedNamespace)}:generation`), 0);
+  } finally {
+    await f.inspector.sendCommand(['ACL', 'DELUSER', user]);
+  }
+  const namespace = randomUUID();
+  let before = await counts();
+  const service = await f.open(namespace);
+  assert.deepEqual(delta(before, await counts()), { eval: 1, evalsha: 1 }, 'cold initialization falls back once');
+  before = await counts();
+  assert.equal(await service.checkReady(), true);
+  assert.equal(await service.checkReady(), true);
+  assert.deepEqual(delta(before, await counts()), { eval: 1, evalsha: 2 }, 'readiness body is sent only on its miss');
+  const limits = { account: { concurrency: 5, tpm: 1000 } };
+  before = await counts();
+  const lease = admitted(await service.acquire(input({ limits })));
+  await lease.renew();
+  assert.ok(lease.releaseConcurrency && lease.reconcileDurableUsage);
+  await lease.releaseConcurrency();
+  await lease.reconcileDurableUsage(2);
+  assert.deepEqual(delta(before, await counts()), { eval: 3, evalsha: 4 }, 'split usage reuses the release script');
+  before = await counts();
+  const warm = admitted(await service.acquire(input({ limits })));
+  await warm.release();
+  assert.deepEqual(delta(before, await counts()), { eval: 0, evalsha: 2 }, 'warm acquire/release send no bodies');
+
+  const generationKey = `${namespacePrefix(namespace)}:generation`;
+  const generation = await f.inspector.get(generationKey);
+  await f.inspector.scriptFlush();
+  before = await counts();
+  const results = await Promise.all(Array.from({ length: 20 }, () => service.acquire(input({ limits }))));
+  const leases = results.filter((result) => result.allowed).map(admitted);
+  assert.equal(leases.length, 5, 'cold concurrent retries must not exceed capacity');
+  const cold = delta(before, await counts());
+  assert.equal(cold.evalsha, 20);
+  assert.ok(cold.eval >= 1 && cold.eval <= 20, 'each caller may perform at most one body fallback');
+  await Promise.all(leases.map((item) => item.release()));
+  assert.equal(await f.inspector.get(generationKey), generation, 'cache recovery must not reset authority');
+  before = await counts();
+  const afterFlush = admitted(await service.acquire(input({ limits })));
+  await afterFlush.release();
+  assert.deepEqual(delta(before, await counts()), { eval: 0, evalsha: 2 }, 'cache flush recovery restores hash hits');
+
+  // Exercise the exact transport with real server mutations followed by an
+  // artificially lost ACK. A second execution would increment this counter.
+  const script = "return redis.call('INCR',KEYS[1])";
+  const options = { keys: [`${namespacePrefix(namespace)}:unknown-ack`], arguments: [] };
+  for (const stage of ['EVAL', 'EVALSHA'] as const) {
+    await f.inspector.scriptFlush();
+    await f.inspector.del(options.keys[0]);
+    if (stage === 'EVALSHA') await f.inspector.scriptLoad(script);
+    const attempts: string[] = [];
+    const fault = new Error('simulated unknown ACK after actual server execution');
+    const transport = createRedisScriptTransport(() => {
+      const command = f.inspector.withCommandOptions({ abortSignal: AbortSignal.timeout(2000) });
+      return {
+        evalSha: async (digest, args) => {
+          attempts.push('EVALSHA');
+          const result = await command.evalSha(digest, args);
+          if (stage === 'EVALSHA') throw fault;
+          return result;
+        },
+        eval: async (body, args) => {
+          attempts.push('EVAL');
+          await command.eval(body, args);
+          throw fault;
+        },
+      };
+    }, [script]);
+    await assert.rejects(transport.eval(script, options), (error) => error === fault);
+    assert.deepEqual(attempts, stage === 'EVAL' ? ['EVALSHA', 'EVAL'] : ['EVALSHA']);
+    assert.equal(await f.inspector.get(options.keys[0]), '1', 'unknown ACK must not cause duplicate execution');
+  }
+  // Script absence is recoverable; missing capacity authority is not.
+  await f.inspector.scriptFlush();
+  await f.inspector.del(generationKey);
+  assert.deepEqual(await service.acquire(input({ limits })), { allowed: false, reason: 'unavailable' });
+  assert.equal(await f.inspector.exists(generationKey), 0);
+  assert.equal(await service.checkReady(), false);
 });

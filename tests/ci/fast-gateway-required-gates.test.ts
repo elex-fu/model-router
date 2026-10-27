@@ -11,6 +11,8 @@ const upgrade = 'tests/saas/gateway/fast/populated-upgrade.postgres.integration.
 const resolution = 'tests/saas/gateway/fast/resolution.postgres.integration.test.ts';
 const journalCommand = `node --import tsx --test --test-concurrency=1 ${journal} ${resolution} ${upgrade}`;
 const redis = 'tests/saas/gateway/fast/redis-admission.local.integration.test.ts';
+const redisTransport = 'tests/saas/gateway/fast/redis-script-transport.test.ts';
+const redisCommand = `node --import tsx --test ${redis} ${redisTransport}`;
 const native = 'tests/saas/gateway/fast/native-http.postgres.integration.test.ts';
 const runtime = 'tests/saas/gateway/fast/native-http-runtime-fixture.ts';
 const seed = 'tests/saas/gateway/fast/native-http-seed-fixture.ts';
@@ -36,6 +38,7 @@ const strictRoots = [
   'populated-upgrade.postgres.integration.test.ts',
   'journal-crash-child.ts',
   'redis-admission.test.ts',
+  'redis-script-transport.test.ts',
   'redis-admission.local.integration.test.ts',
   'redis-snapshot-store.test.ts',
   'postgres-snapshot-loader.test.ts',
@@ -124,7 +127,7 @@ function validate(source: string): void {
     ],
     [
       7,
-      `node --import tsx --test ${redis}`,
+      redisCommand,
       {
         NODE_ENV: 'test',
         MODEL_ROUTER_FAST_ADMISSION_REDIS_TEST: '1',
@@ -164,6 +167,8 @@ test('required fast wiring rejects disabled roots, altered roles, missing tools 
     ['--lib ES2023 --strict', '--lib ES2023'],
     ['          tests/saas/gateway/fast/receipt-queue.test.ts\n', ''],
     [receiptUnitCommand, 'echo skipped queue tests'],
+    [`          ${redisTransport}\n`, ''],
+    [redisCommand, `node --import tsx --test ${redis}`],
     [`          ${runtime}\n`, ''],
     [`          ${seed}\n`, ''],
     [`          ${resolution}\n`, ''],

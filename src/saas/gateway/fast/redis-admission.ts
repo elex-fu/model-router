@@ -1,6 +1,7 @@
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { createClient } from '@redis/client';
+import { createRedisScriptTransport } from './redis-script-transport.js';
 
 /** Redis is the authority in this opt-in path, NOT a pre-check for a PG lease. */
 export interface RedisEvalClient {
@@ -676,7 +677,7 @@ export async function openRedisFastGatewayAdmission(options: OpenRedisFastAdmiss
     const admission = new RedisFastGatewayAdmission({
       ...options,
       runId,
-      redis: { eval: (script, input) => command().eval(script, input) },
+      redis: createRedisScriptTransport(command, [INITIALIZE, CHECK_READY, ACQUIRE, RENEW, RELEASE]),
     });
     const { readyInMs } = await admission.initialize({ drained: options.drained });
     return Object.assign(admission, {

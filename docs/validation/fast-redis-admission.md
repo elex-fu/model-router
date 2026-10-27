@@ -17,13 +17,15 @@ queries occur at connection bootstrap, not per request. The managed return value
 also exposes `cacheCommands.sendCommand` for the encrypted metadata snapshot cache
 on the same connection. Bootstrap therefore needs INFO/CONFIG-GET permission in
 addition to the Lua and data commands; CONFIG mutation is not required.
+The managed connection requires **both EVALSHA and EVAL ACL permission**.
+An EVALSHA permission denial fails closed, without falling back to EVAL.
 
-`acquire` performs **one EVAL** for tenant/project/key/user/group/account limits,
+`acquire` normally performs **one EVALSHA** for tenant/project/key/user/group/account limits,
 account/model cooldown and a bound request receipt. No money check is represented
 as a capacity check. `assertValid` is a conservative monotonic local fence and adds
 no Redis command; elapsed command latency is subtracted from its validity.
-`renew` performs one EVAL. `release(feedback?)` performs one EVAL and can atomically
-apply a monotone account/model cooldown. A late success does not erase another
+`renew` normally performs one EVALSHA. `release(feedback?)` normally performs one
+EVALSHA and can atomically apply a monotone account/model cooldown. A late success does not erase another
 request's failure, and success never writes PostgreSQL health state. RPM is never
 refunded: an admitted attempt remains counted even if cancelled. After a durable
 validated successful usage receipt, `actualTokenUnits` reconciles only unused TPM
@@ -31,8 +33,34 @@ reservation in that lease's original request-start bucket. Missing/failed receip
 retain the bound; a missing old bucket never subtracts from a newer window. Rate
 JSON plus the released tombstone use one atomic same-slot MSET, with PEXPIREAT
 restoring TTL afterward. Both commands need Redis ACL permission. A post-MSET TTL
-failure can retain state longer but cannot refund twice on retry. No additional
-roundtrip or PostgreSQL query is introduced.
+failure can retain state longer but cannot refund twice on retry. A script-cache
+hit adds no roundtrip or PostgreSQL query.
+
+### Script transport and cache misses
+
+The managed connection hashes the five unchanged static Lua bodies once at
+bootstrap and sends their 40-byte SHA-1 digests on cache hits. Acquire's script
+argument shrinks from 4,477 to 40 bytes; release and detached usage reconciliation
+share the unchanged 6,461-byte body and each send 40 bytes on a hit. Keys, arguments,
+reply decoding, authority, rate/capacity limits, fences and TTLs are unchanged.
+This removes repeated script-body transport; Redis already caches scripts passed
+to EVAL, so it is **not** a claim of reduced compilation or measured throughput.
+
+Only the exact decoded Redis `SimpleError` reply
+`NOSCRIPT No matching script. Please use EVAL.` permits one EVAL fallback, using
+the same body, argument object and original 2-second command deadline. Cold cache,
+SCRIPT FLUSH or script eviction can therefore add one roundtrip per affected
+operation. Concurrent cold callers each execute their own operation; they do not
+share results or assume that another caller populated the cache. Fallback errors,
+network/timeout/unknown-ACK failures, ACL errors and lookalike application errors
+never trigger automatic replay. No SCRIPT LOAD/EXISTS commands or new connections
+are introduced. A restart still requires explicit managed-client reopening and
+the existing generation/quarantine checks; a cache miss never repairs authority.
+
+This follows the EVALSHA/EVAL pattern in the installed
+[@redis/client 5.12.1 implementation](https://github.com/redis/node-redis/blob/redis%405.12.1/packages/client/lib/client/index.ts),
+with stricter error provenance and exact response matching. See also
+[Redis EVALSHA](https://redis.io/docs/latest/commands/evalsha/).
 
 The gateway must:
 
@@ -142,3 +170,17 @@ Follow-up gate on the same date: **22 passed, 0 failed/skipped**, including a
 after acquire and renew, and real restart quarantine of 120,001 ms for a 90-second
 transport ceiling plus a 30-second send-validity window. Focused strict TypeScript
 and changed-file Biome passed. No additional Redis command was added to admission.
+
+
+Transport correctness gate (2026-10-27): **49 passed, 0 failed/skipped**, across
+the full owned Redis 7.4.2 admission suite and 17 pure contract checks. This includes
+restart/quarantine, natural bucket/tombstone expiry, all five pinned Lua hashes,
+unchanged fallback arguments/deadline, concurrent cold calls and unknown-ACK
+non-replay. The additional owned Redis transport test verifies
+commandstats on cold/hit/flush paths, split release-body reuse, concurrent capacity,
+EVALSHA ACL denial without EVAL downgrade, actual server mutation followed by
+simulated lost EVAL/EVALSHA ACKs, and fail-closed missing authority. This is not a
+performance benchmark. Whole-source and focused-test strict TypeScript and
+changed-file Biome passed. The required fast gateway workflow now both executes
+and strictly typechecks the transport unit tests; the real transport test runs
+inside its existing owned-Redis gate.

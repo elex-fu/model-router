@@ -69,6 +69,7 @@ jobs:
           tests/saas/gateway/fast/populated-upgrade.postgres.integration.test.ts
           tests/saas/gateway/fast/journal-crash-child.ts
           tests/saas/gateway/fast/redis-admission.test.ts
+          tests/saas/gateway/fast/redis-script-transport.test.ts
           tests/saas/gateway/fast/redis-admission.local.integration.test.ts
           tests/saas/gateway/fast/redis-snapshot-store.test.ts
           tests/saas/gateway/fast/postgres-snapshot-loader.test.ts
@@ -100,7 +101,7 @@ jobs:
           NODE_ENV: test
           MODEL_ROUTER_FAST_ADMISSION_REDIS_TEST: "1"
           MODEL_ROUTER_TEST_REDIS_BIN: /usr/bin/redis-server
-        run: node --import tsx --test tests/saas/gateway/fast/redis-admission.local.integration.test.ts
+        run: node --import tsx --test tests/saas/gateway/fast/redis-admission.local.integration.test.ts tests/saas/gateway/fast/redis-script-transport.test.ts
       - name: Run required native estimator and credit scenario with paid JSON and SSE
         env:
           NODE_ENV: test
