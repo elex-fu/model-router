@@ -9,9 +9,11 @@ Status: implemented behind an **off-by-default** flag; paid native integration a
 3. One Redis Lua admission enforces operational rate/token/concurrency limits. Redis is not the money authority. Missing sentinel, lost connection and unsafe eviction policy fail closed; restart quarantine is explicit.
 4. One PostgreSQL autocommit statement reserves a genuine maximum charge from prepaid instance credit and inserts the immutable may-send intent. No global wallet lock, prepared-evidence registration, preflight, claim or dispatch-proof reread occurs here. Duplicate/ambiguous acknowledgement never authorizes another send.
 5. A private one-use ticket drives the existing HTTP transport, including endpoint/DNS/header protections and credential unsealing. Authority expiry is checked after intent acknowledgement and again at ticket/credential consumption.
-6. Exact observed usage is validated against the same journal calculator before a durable receipt acknowledgement. JSON final byte/EOF and SSE terminal DONE/EOF wait for that acknowledgement; preceding SSE events stream normally. The durable billing worker posts an idempotent exact ledger effect asynchronously.
+6. By default, exact observed usage is validated against the same journal calculator before a durable receipt acknowledgement. JSON final byte/EOF and SSE terminal DONE/EOF wait for that acknowledgement; preceding SSE events stream normally. The durable billing worker posts an idempotent exact ledger effect asynchronously.
 
 Target: **0 warm metadata PostgreSQL queries + 1 pre-upstream intent statement**. Cold loads, receipt persistence, asynchronous billing, refill, health polling and legacy fallbacks must be reported separately. Warm paid native HTTP has demonstrated this blocking-path budget; periodic background moderation refresh is still included in whole-window SQL and can inherit request diagnostic context. Initial acceptance goals are serial 15–20 ms and at least 300 RPS in the existing paired local mock conditions, then at least 90% of paired sub2api throughput, with financial drains and crash gates passing.
+
+Final receipt latency can separately be traded against a volatile evidence window via [explicit memory-queue mode](fast-async-receipts.md). The default durability contract above remains in force unless that mode is selected.
 
 ## Enable only in an isolated validation deployment
 

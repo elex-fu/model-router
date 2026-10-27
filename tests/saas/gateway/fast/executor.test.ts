@@ -9,6 +9,7 @@ import {
   type FastReceiptInput,
 } from '../../../../src/saas/gateway/fast/executor.js';
 import { fastJournalCanonicalJson } from '../../../../src/saas/gateway/fast/journal.js';
+import { FastReceiptQueue } from '../../../../src/saas/gateway/fast/receipt-queue.js';
 import { CachedFastGatewaySnapshots } from '../../../../src/saas/gateway/fast/snapshots.js';
 import type { PreparedEvidenceClientStream } from '../../../../src/saas/gateway/prepared-evidence-dispatch-service.js';
 import {
@@ -239,10 +240,8 @@ test('only complete successful paid receipts carry the internal proof and failed
       },
     });
     await assert.rejects(executor.execute(s.input), /uncertain durable receipt ACK/);
-    assert.equal(receipts.length, 2);
+    assert.equal(receipts.length, 1, 'captured final evidence must not be replaced by a conflicting unknown receipt');
     assert.equal(Boolean(receipts[0].verification), paid);
-    assert.equal(receipts[1].outcome, 'unknown');
-    assert.equal(receipts[1].verification, undefined);
     assert.equal(s.ended(), false);
     assert.equal(s.calls.filter((call) => call === 'fetch').length, 1);
   }
@@ -710,5 +709,278 @@ test('TPM reconciliation is attached only after a durable successful usage recei
     else assert.equal(await executor.execute(s.input), true);
     assert.equal((feedback[0] as { actualTokenUnits?: number }).actualTokenUnits, receiptFails ? undefined : 15);
     assert.equal(s.intents[0].maxCostMinorUnits, '144');
+  }
+});
+
+function splitAdmission(s: ReturnType<typeof setup>, reconciled: number[] = []) {
+  return {
+    acquire: async (input: Parameters<typeof s.options.admission.acquire>[0]) => {
+      const result = await s.options.admission.acquire(input);
+      if (!result.allowed) return result;
+      return {
+        ...result,
+        lease: {
+          ...result.lease,
+          releaseConcurrency: async () => {
+            s.calls.push('release-concurrency');
+          },
+          reconcileDurableUsage: async (actual: number) => {
+            reconciled.push(actual);
+            s.calls.push('reconcile');
+          },
+        },
+      };
+    },
+  };
+}
+
+test('explicit async JSON and SSE terminal precede receipt ACK but never pre-send intent or queue ownership', async () => {
+  for (const stream of [false, true]) {
+    const s = setup({}, stream, true);
+    const ack = deferred<void>();
+    const observed = deferred<void>();
+    const reconciled: number[] = [];
+    const queue = new FastReceiptQueue({
+      journal: {
+        appendReceipt: async (receipt) => {
+          await s.options.journal.appendReceipt(receipt);
+          observed.resolve();
+          await ack.promise;
+        },
+      },
+    });
+    const executor = new FastGatewayExecutor({
+      ...s.options,
+      admission: splitAdmission(s, reconciled),
+      receiptQueue: queue,
+    });
+    const pending = executor.execute(s.input);
+    await observed.promise;
+    assert.equal(await pending, true);
+    assert.equal(s.ended(), true);
+    if (stream) assert.match(s.text(), /\[DONE\]/);
+    else assert.doesNotThrow(() => JSON.parse(s.text()));
+    assert.ok(s.calls.indexOf('intent') < s.calls.indexOf('fetch'));
+    assert.equal(queue.snapshot().pending, 1);
+    assert.equal(queue.snapshot().durable, 0);
+    assert.deepEqual(reconciled, []);
+    assert.ok(s.calls.includes('release-concurrency'));
+    assert.equal(s.calls.includes('release'), false);
+    ack.resolve();
+    await queue.close();
+    assert.deepEqual(reconciled, [15]);
+    assert.equal(s.receipts.length, 1);
+    assert.equal(s.receipts[0].chargeMinorUnits, '15');
+  }
+});
+
+test('queue byte/count fallback and missing split capability preserve durable ACK terminal barrier', async () => {
+  for (const reason of ['bytes', 'count', 'capability'] as const) {
+    const s = setup({}, true, true);
+    const ack = deferred<void>();
+    const observed = deferred<void>();
+    const journal = {
+      ...s.options.journal,
+      appendReceipt: async (receipt: FastReceiptInput) => {
+        observed.resolve();
+        await ack.promise;
+        await s.options.journal.appendReceipt(receipt);
+      },
+    };
+    const queue = new FastReceiptQueue({ journal, maxBytes: reason === 'bytes' ? 1 : undefined, maxEntries: 1 });
+    if (reason === 'count') {
+      queue.tryEnqueue(
+        {
+          intentId: 'occupied',
+          requestId: 'occupied',
+          tenantId: 'another',
+          outcome: 'unknown',
+          chargeMinorUnits: null,
+          usage: {},
+          usageDigest: 'a'.repeat(64),
+          httpStatus: null,
+        },
+        { retainedLiabilityMinorUnits: '0', currency: null },
+      );
+    }
+    const executor = new FastGatewayExecutor({
+      ...s.options,
+      journal,
+      receiptQueue: queue,
+      admission: reason === 'capability' ? s.options.admission : splitAdmission(s),
+    });
+    const pending = executor.execute(s.input);
+    await observed.promise;
+    // Let the second request reach its append when the count fixture occupied the first worker.
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(s.ended(), false);
+    assert.doesNotMatch(s.text(), /\[DONE\]/);
+    ack.resolve();
+    assert.equal(await pending, true);
+    assert.equal(s.ended(), true);
+    assert.equal(queue.snapshot().fallbacks, 1);
+    assert.ok(s.calls.includes('release'));
+    await queue.close();
+  }
+});
+
+test('async uncertain ACK retries frozen success after HTTP completion without unknown receipt or second send', async () => {
+  const s = setup({}, false, true);
+  const receipts: FastReceiptInput[] = [];
+  const ack = deferred<void>();
+  const queue = new FastReceiptQueue({
+    retryBaseMs: 1,
+    retryMaxMs: 1,
+    journal: {
+      appendReceipt: async (receipt) => {
+        receipts.push(receipt);
+        await ack.promise;
+        if (receipts.length === 1) throw new Error('uncertain ACK');
+      },
+    },
+  });
+  const executor = new FastGatewayExecutor({ ...s.options, receiptQueue: queue, admission: splitAdmission(s) });
+  assert.equal(await executor.execute(s.input), true);
+  assert.equal(s.ended(), true);
+  ack.resolve();
+  await queue.close();
+  assert.equal(receipts.length, 2);
+  assert.equal(receipts[0], receipts[1]);
+  assert.equal(receipts[0].outcome, 'succeeded');
+  assert.equal(s.calls.filter((c) => c === 'fetch').length, 1);
+});
+
+test('client terminal failure after queue ownership cannot replace complete evidence', async () => {
+  const s = setup({}, true, true);
+  const ack = deferred<void>();
+  const queue = new FastReceiptQueue({
+    journal: {
+      appendReceipt: async (receipt) => {
+        await s.options.journal.appendReceipt(receipt);
+        await ack.promise;
+      },
+    },
+  });
+  const executor = new FastGatewayExecutor({ ...s.options, receiptQueue: queue, admission: splitAdmission(s) });
+  await assert.rejects(
+    executor.execute({
+      ...s.input,
+      client: {
+        ...s.input.client,
+        end: () => {
+          s.controller.abort();
+          throw new Error('client terminal failed');
+        },
+      },
+    }),
+    /client terminal failed/,
+  );
+  assert.equal(s.receipts.length, 1);
+  assert.equal(s.receipts[0].outcome, 'succeeded');
+  assert.equal(queue.snapshot().pending, 1);
+  ack.resolve();
+  await queue.close();
+});
+
+test('async mode keeps fragmented DONE until complete usage capture and rejects incomplete success evidence', async () => {
+  for (const complete of [false, true]) {
+    const s = setup({}, true, true);
+    const queue = new FastReceiptQueue({ journal: s.options.journal });
+    const chunks = [
+      'data: {"choices":[{"delta":{"content":"hello"}}]}\n\n',
+      ...(complete ? ['data: {"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5}}\n\n'] : []),
+      'data: [DO',
+      'NE]\n',
+      '\n',
+    ];
+    const executor = new FastGatewayExecutor({
+      ...s.options,
+      receiptQueue: queue,
+      admission: splitAdmission(s),
+      transport: {
+        ...s.options.transport,
+        fetch: async () =>
+          new Response(
+            new ReadableStream({
+              start(controller) {
+                for (const chunk of chunks) controller.enqueue(Buffer.from(chunk));
+                controller.close();
+              },
+            }),
+            { headers: { 'content-type': 'text/event-stream' } },
+          ),
+      },
+    });
+    if (complete) {
+      assert.equal(await executor.execute(s.input), true);
+      assert.match(s.text(), /\[DONE\]/);
+      assert.equal(s.ended(), true);
+      assert.equal(queue.snapshot().accepted, 1);
+    } else {
+      await assert.rejects(executor.execute(s.input));
+      assert.doesNotMatch(s.text(), /\[DONE\]/);
+      assert.equal(s.ended(), false);
+      assert.equal(queue.snapshot().accepted, 0);
+      assert.equal(s.receipts[0].outcome, 'unknown');
+    }
+    await queue.close();
+  }
+});
+
+test('prolonged undurable receipt age stops new Redis admission and intents', async () => {
+  const s = setup({}, false, true);
+  const ack = deferred<void>();
+  let now = 0;
+  const queue = new FastReceiptQueue({
+    now: () => now,
+    maxAgeMs: 5,
+    journal: { appendReceipt: async () => ack.promise },
+  });
+  queue.tryEnqueue(
+    {
+      intentId: 'occupied',
+      requestId: 'occupied',
+      tenantId: 'another',
+      outcome: 'unknown',
+      chargeMinorUnits: null,
+      usage: {},
+      usageDigest: 'a'.repeat(64),
+      httpStatus: null,
+    },
+    { retainedLiabilityMinorUnits: '0', currency: null },
+  );
+  now = 6;
+  const executor = new FastGatewayExecutor({ ...s.options, receiptQueue: queue, admission: splitAdmission(s) });
+  await assert.rejects(executor.execute(s.input), { code: 'FAST_RECEIPT_BACKPRESSURE' });
+  assert.equal(s.intents.length, 0);
+  assert.equal(s.calls.includes('admit'), false);
+  assert.equal(s.calls.includes('fetch'), false);
+  ack.resolve();
+  await queue.close();
+});
+
+test('default captured receipt failure stays conservative on definite failure and commit-then-lost-ACK alike', async () => {
+  for (const committed of [false, true]) {
+    const s = setup({}, false, true);
+    const attempts: FastReceiptInput[] = [];
+    const durable: FastReceiptInput[] = [];
+    const executor = new FastGatewayExecutor({
+      ...s.options,
+      journal: {
+        ...s.options.journal,
+        appendReceipt: async (receipt) => {
+          attempts.push(receipt);
+          if (committed) durable.push(receipt);
+          throw new Error(committed ? 'lost receipt commit ACK' : 'receipt rejected before commit');
+        },
+      },
+    });
+    await assert.rejects(executor.execute(s.input));
+    assert.equal(attempts.length, 1);
+    assert.equal(attempts[0].outcome, 'succeeded');
+    assert.equal(attempts[0].chargeMinorUnits, '15');
+    assert.equal(durable.length, committed ? 1 : 0);
+    assert.equal(s.ended(), false);
+    assert.equal(s.calls.filter((c) => c === 'fetch').length, 1);
   }
 });

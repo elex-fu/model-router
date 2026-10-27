@@ -16,9 +16,12 @@ export interface FastReceiptQueueSnapshot {
   readonly pending: number;
   readonly bytes: number;
   readonly running: number;
+  readonly receiptRunning: number;
+  readonly reconciliationRunning: number;
   readonly oldestAgeMs: number;
   readonly undurable: number;
-  readonly undurableLiabilityMinorUnits: string;
+  readonly oldestUndurableAgeMs: number;
+  readonly undurableLiabilityByCurrency: Readonly<Record<string, string>>;
   readonly accepted: number;
   readonly durable: number;
   readonly completed: number;
@@ -39,6 +42,7 @@ export interface FastReceiptQueueOptions extends FastReceiptQueueLimits {
 }
 export interface FastReceiptQueueCompletion {
   readonly retainedLiabilityMinorUnits: string;
+  readonly currency: string | null;
   readonly actualTokenUnits?: number;
   /** A scalar-bound capability supplied by admission, NOT a request closure. */
   readonly reconcileDurableUsage?: (actualTokenUnits: number) => Promise<void>;
@@ -49,6 +53,7 @@ interface Entry {
   readonly bytes: number;
   readonly acceptedAt: number;
   readonly liability: bigint;
+  readonly currency: string | null;
   readonly actualTokenUnits?: number;
   readonly reconcileDurableUsage?: (actualTokenUnits: number) => Promise<void>;
   durable: boolean;
@@ -195,6 +200,8 @@ export class FastReceiptQueue {
   #accepting = true;
   #bytes = 0;
   #running = 0;
+  #receiptRunning = 0;
+  #reconciliationRunning = 0;
   #timer: ReturnType<typeof setTimeout> | undefined;
   #changed: (() => void) | undefined;
   #draining: Promise<void> | undefined;
@@ -207,6 +214,7 @@ export class FastReceiptQueue {
   #conflicts = 0;
   #lastDurableLagMs = 0;
   #maxDurableLagMs = 0;
+  #lastFailureReportAt = -Infinity;
   constructor(options: FastReceiptQueueOptions) {
     this.#options = options;
     this.#limits = {
@@ -224,13 +232,16 @@ export class FastReceiptQueue {
   snapshot(): FastReceiptQueueSnapshot {
     let oldestAgeMs = 0,
       undurable = 0,
-      liability = 0n;
+      oldestUndurableAgeMs = 0;
+    const liabilities: Record<string, bigint> = {};
     const now = this.#now();
     for (const entry of this.#entries.values()) {
       oldestAgeMs = Math.max(oldestAgeMs, now - entry.acceptedAt);
       if (!entry.durable) {
         undurable++;
-        liability += entry.liability;
+        oldestUndurableAgeMs = Math.max(oldestUndurableAgeMs, now - entry.acceptedAt);
+        if (entry.currency !== null)
+          liabilities[entry.currency] = (liabilities[entry.currency] ?? 0n) + entry.liability;
       }
     }
     return Object.freeze({
@@ -238,9 +249,14 @@ export class FastReceiptQueue {
       pending: this.#entries.size,
       bytes: this.#bytes,
       running: this.#running,
+      receiptRunning: this.#receiptRunning,
+      reconciliationRunning: this.#reconciliationRunning,
       oldestAgeMs,
       undurable,
-      undurableLiabilityMinorUnits: liability.toString(),
+      oldestUndurableAgeMs,
+      undurableLiabilityByCurrency: Object.freeze(
+        Object.fromEntries(Object.entries(liabilities).map(([currency, amount]) => [currency, amount.toString()])),
+      ),
       accepted: this.#accepted,
       durable: this.#durable,
       completed: this.#completed,
@@ -258,7 +274,12 @@ export class FastReceiptQueue {
   }
   /** A prolonged outage/conflict stops new upstream attempts, not just the readiness probe. */
   canAdmit(): boolean {
-    return this.#accepting && this.#conflicts === 0 && this.snapshot().oldestAgeMs < this.#limits.maxAgeMs;
+    if (!this.#accepting || this.#conflicts !== 0) return false;
+    // Map insertion order is acceptance order; do not build money metrics on the hot path.
+    for (const entry of this.#entries.values()) {
+      if (!entry.durable) return this.#now() - entry.acceptedAt < this.#limits.maxAgeMs;
+    }
+    return true;
   }
   noteFallback(): void {
     this.#fallbacks++;
@@ -268,6 +289,9 @@ export class FastReceiptQueue {
     const { receipt, canonical } = capture(input);
     if (
       !decimal(completion.retainedLiabilityMinorUnits) ||
+      (completion.currency !== null && !/^[A-Z]{3}$/.test(completion.currency)) ||
+      (completion.currency === null && completion.retainedLiabilityMinorUnits !== '0') ||
+      (receipt.verification && receipt.verification.priceSnapshot.customerPrice.currency !== completion.currency) ||
       (completion.actualTokenUnits !== undefined &&
         (!Number.isSafeInteger(completion.actualTokenUnits) ||
           completion.actualTokenUnits < 0 ||
@@ -283,6 +307,7 @@ export class FastReceiptQueue {
       if (
         previous.canonical !== canonical ||
         previous.actualTokenUnits !== completion.actualTokenUnits ||
+        previous.currency !== completion.currency ||
         previous.liability !== BigInt(completion.retainedLiabilityMinorUnits)
       )
         throw new Error('FAST_JOURNAL_RECEIPT_CONFLICT');
@@ -306,6 +331,7 @@ export class FastReceiptQueue {
       bytes,
       acceptedAt: this.#now(),
       liability: BigInt(completion.retainedLiabilityMinorUnits),
+      currency: completion.currency,
       actualTokenUnits: completion.actualTokenUnits,
       reconcileDurableUsage: completion.reconcileDurableUsage,
       durable: false,
@@ -367,43 +393,53 @@ export class FastReceiptQueue {
     let next = Infinity;
     for (const entry of this.#entries.values()) {
       if (entry.running || entry.conflict) continue;
-      if (this.#running >= this.#limits.workers) break;
+      // A hung Redis reconciliation must never occupy a receipt SQL slot.
+      const running = entry.durable ? this.#reconciliationRunning : this.#receiptRunning;
+      if (running >= this.#limits.workers) continue;
       if (entry.retryAt > now) {
         next = Math.min(next, entry.retryAt);
         continue;
       }
       entry.running = true;
       this.#running++;
-      void this.#run(entry);
+      if (entry.durable) this.#reconciliationRunning++;
+      else this.#receiptRunning++;
+      void this.#run(entry, entry.durable);
     }
-    if (Number.isFinite(next) && this.#running < this.#limits.workers) {
+    if (Number.isFinite(next)) {
       this.#timer = setTimeout(() => this.#pump(), Math.max(1, next - this.#now()));
       this.#timer.unref();
     }
   }
-  async #run(entry: Entry): Promise<void> {
+  #complete(entry: Entry): void {
+    this.#entries.delete(entry.receipt.intentId);
+    const remaining = (this.#tenants.get(entry.receipt.tenantId) ?? 1) - 1;
+    if (remaining === 0) this.#tenants.delete(entry.receipt.tenantId);
+    else this.#tenants.set(entry.receipt.tenantId, remaining);
+    this.#bytes -= entry.bytes;
+    this.#completed++;
+  }
+  async #run(entry: Entry, reconciliation: boolean): Promise<void> {
     try {
-      if (!entry.durable) {
+      if (!reconciliation) {
         await this.#options.journal.appendReceipt(entry.receipt);
         entry.durable = true;
         entry.failures = 0;
+        entry.retryAt = 0;
         this.#durable++;
         this.#lastDurableLagMs = Math.max(0, this.#now() - entry.acceptedAt);
         this.#maxDurableLagMs = Math.max(this.#maxDurableLagMs, this.#lastDurableLagMs);
+        if (entry.actualTokenUnits === undefined) this.#complete(entry);
+      } else {
+        if (entry.actualTokenUnits !== undefined) await entry.reconcileDurableUsage?.(entry.actualTokenUnits);
+        this.#complete(entry);
       }
-      if (entry.actualTokenUnits !== undefined) await entry.reconcileDurableUsage?.(entry.actualTokenUnits);
-      this.#entries.delete(entry.receipt.intentId);
-      const remaining = (this.#tenants.get(entry.receipt.tenantId) ?? 1) - 1;
-      if (remaining === 0) this.#tenants.delete(entry.receipt.tenantId);
-      else this.#tenants.set(entry.receipt.tenantId, remaining);
-      this.#bytes -= entry.bytes;
-      this.#completed++;
     } catch (error) {
-      if (!entry.durable && error instanceof Error && error.message === 'FAST_JOURNAL_RECEIPT_CONFLICT') {
+      if (!reconciliation && error instanceof Error && error.message === 'FAST_JOURNAL_RECEIPT_CONFLICT') {
         entry.conflict = true;
         this.#conflicts++;
       } else {
-        if (entry.durable) this.#reconciliationRetries++;
+        if (reconciliation) this.#reconciliationRetries++;
         else this.#retries++;
         const delay = Math.min(
           this.#options.retryMaxMs ?? 1000,
@@ -411,9 +447,17 @@ export class FastReceiptQueue {
         );
         entry.retryAt = this.#now() + delay * (0.75 + Math.random() * 0.5);
       }
+      // No raw exception or receipt reaches logs. Rate-limit the default
+      // operational warning; deployments may install their own aggregate metrics sink.
+      if (!this.#options.observe && this.#now() - this.#lastFailureReportAt >= 1000) {
+        this.#lastFailureReportAt = this.#now();
+        console.error('FAST_RECEIPT_QUEUE_RETAINED_FAILURE', JSON.stringify(this.snapshot()));
+      }
     } finally {
       entry.running = false;
       this.#running--;
+      if (reconciliation) this.#reconciliationRunning--;
+      else this.#receiptRunning--;
       this.#notify();
       this.#pump();
     }

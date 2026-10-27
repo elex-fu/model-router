@@ -2,8 +2,8 @@ import type { PreparedEvidenceClientStream } from '../prepared-evidence-dispatch
 
 /**
  * Holds the terminal SSE event (including fragmented DONE) or the last JSON
- * byte. Content-Length therefore cannot announce completion before the durable
- * receipt ACK. Earlier complete SSE events flow without a whole-body buffer.
+ * byte. Content-Length cannot announce completion before evidence ownership:
+ * durable receipt ACK by default, bounded queue acceptance in explicit memory mode. Earlier complete SSE events flow without a whole-body buffer.
  */
 export class FastTerminalGate {
   private pending = Buffer.alloc(0);
@@ -40,7 +40,7 @@ export class FastTerminalGate {
     }
     if (this.pending.byteLength > this.maximumPendingBytes) throw new Error('Fast response terminal buffer exceeded');
   }
-  /** Called only after durable receipt acknowledgement. */
+  /** Called only after durable ACK or explicit memory-queue ownership; never before handoff. */
   async finish(): Promise<void> {
     if (this.pending.byteLength) await this.client.write(this.pending);
     this.pending = Buffer.alloc(0);

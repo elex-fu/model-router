@@ -17,6 +17,7 @@ const SAFE_CODES = new Set([
   'FAST_CREDIT_NOT_READY',
   'FAST_CREDIT_UNAVAILABLE',
   'FAST_LEASE_UNAVAILABLE',
+  'FAST_RECEIPT_BACKPRESSURE',
   // PostgreSQL SQLSTATEs relevant to a closed reserve/read, never SQL or parameters.
   '08000',
   '08001',
@@ -58,6 +59,7 @@ const SAFE_SOURCES = [
   'saas/gateway/fast/redis-admission',
   'saas/gateway/fast/journal',
   'saas/gateway/fast/credit-wait',
+  'saas/gateway/fast/receipt-queue',
   'saas/gateway/hold-calculator',
   'saas/gateway/provider-payload-compiler',
   'saas/gateway/provider-http-transport',

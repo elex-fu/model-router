@@ -19,6 +19,7 @@ import {
 import { observeRequestDiagnosticPhase } from '../request-diagnostic-trace.js';
 import type { RequestPreparationPayloadCompiler } from '../request-preparation-service.js';
 import { calculateFastReceiptCharge, type FastPriceSnapshot } from './journal.js';
+import type { FastReceiptQueue } from './receipt-queue.js';
 import type { FastGatewayAdmission } from './redis-admission.js';
 import {
   authorizeFastGatewaySnapshot,
@@ -98,6 +99,8 @@ export interface FastGatewayExecutorOptions {
   readonly snapshots: FastGatewaySnapshotProvider;
   readonly admission: FastGatewayAdmission;
   readonly journal: FastGatewayJournalPort;
+  /** Explicit opt-in only. Default preserves durable receipt acknowledgement before terminal. */
+  readonly receiptQueue?: FastReceiptQueue;
   readonly payload: (candidate: FastGatewayCandidate) => RequestPreparationPayloadCompiler;
   readonly transport: Omit<ProviderHttpTransportOptions, 'resolveCredential' | 'consumeFastTicket'>;
   readonly unsealer: Pick<GatewayProviderCredentialUnsealer, 'withCredential'>;
@@ -378,6 +381,8 @@ export class FastGatewayExecutor implements FastGatewayExecutorPort {
       throw new FastGatewayExecutionError(503, 'FAST_AUTHORITY_EXPIRED');
     }
     assertFresh();
+    if (this.#options.receiptQueue && !this.#options.receiptQueue.canAdmit())
+      throw new FastGatewayExecutionError(503, 'FAST_RECEIPT_BACKPRESSURE');
     const admitted = await observeRequestDiagnosticPhase('fast-redis', () =>
       this.#options.admission.acquire({
         requestId: input.requestId,
@@ -410,7 +415,7 @@ export class FastGatewayExecutor implements FastGatewayExecutorPort {
       );
     const lease = admitted.lease;
     let intentId: string | undefined;
-    let terminalReceipt = false;
+    let receiptState: 'none' | 'captured' | 'queued' | 'durable' = 'none';
     let actualTokenUnits: number | undefined;
     let upstreamStarted = false;
     let upstreamComplete = false;
@@ -579,32 +584,56 @@ export class FastGatewayExecutor implements FastGatewayExecutorPort {
         if (calculated > maxCost) throw new Error('Fast usage exceeds frozen price bound');
         charge = calculated;
       }
-      const receiptIntentId = intentId;
-      await observeRequestDiagnosticPhase('fast-receipt', () =>
-        this.#options.journal.appendReceipt({
-          intentId: receiptIntentId,
-          requestId: input.requestId,
-          tenantId: snapshot.caller.tenantId,
-          outcome: succeeded ? 'succeeded' : 'failed',
-          chargeMinorUnits: charge.toString(),
-          usage,
-          usageDigest: hash(canonical({ status, usage, charge: charge.toString() })),
-          httpStatus: status,
-          ...(succeeded && priceSnapshot ? { verification: { priceSnapshot } } : {}),
-        }),
-      );
-      terminalReceipt = true;
-      // Rate windows track actual completed tokens plus conservative inflight
-      // reservations. Only the durable receipt transaction may compact financial
-      // liability; this rate feedback never releases money on a missing ACK.
+      // Capture complete scalar evidence before any terminal write. A failed or
+      // ambiguous append must never be replaced by a conflicting unknown receipt.
+      const receipt: FastReceiptInput = deepFreeze({
+        intentId,
+        requestId: input.requestId,
+        tenantId: snapshot.caller.tenantId,
+        outcome: succeeded ? 'succeeded' : 'failed',
+        chargeMinorUnits: charge.toString(),
+        usage,
+        usageDigest: hash(canonical({ status, usage, charge: charge.toString() })),
+        httpStatus: status,
+        ...(succeeded && priceSnapshot ? { verification: { priceSnapshot } } : {}),
+      });
+      receiptState = 'captured';
+      let completedTokenUnits: number | undefined;
       if (succeeded && usage.inputTotal != null && usage.outputTotal != null) {
         const total = BigInt(usage.inputTotal) + BigInt(usage.outputTotal);
-        if (total >= 0n && total <= maxInput + maxOutput) actualTokenUnits = Number(total);
+        if (total >= 0n && total <= maxInput + maxOutput) completedTokenUnits = Number(total);
+      }
+      const queue = this.#options.receiptQueue;
+      // The queue gets only an admission-owned scalar capability, never a
+      // callback closing over this request, candidate, credentials or client.
+      if (
+        queue &&
+        lease.releaseConcurrency &&
+        lease.reconcileDurableUsage &&
+        queue.tryEnqueue(receipt, {
+          retainedLiabilityMinorUnits: maxCost.toString(),
+          currency: price?.currency ?? null,
+          ...(completedTokenUnits === undefined
+            ? {}
+            : {
+                actualTokenUnits: completedTokenUnits,
+                reconcileDurableUsage: lease.reconcileDurableUsage,
+              }),
+        })
+      ) {
+        receiptState = 'queued';
+      } else {
+        if (queue && (!lease.releaseConcurrency || !lease.reconcileDurableUsage)) queue.noteFallback();
+        await observeRequestDiagnosticPhase('fast-receipt', () => this.#options.journal.appendReceipt(receipt));
+        receiptState = 'durable';
+        // Only durable, validated successful evidence may reconcile TPM. Queue
+        // mode performs this in its worker, independently of concurrency release.
+        actualTokenUnits = completedTokenUnits;
       }
       await gate.finish();
       return true;
     } catch (error) {
-      if (intentId && !terminalReceipt) {
+      if (intentId && receiptState === 'none') {
         const outcome = upstreamStarted ? 'unknown' : 'failed';
         await this.#options.journal
           .appendReceipt({
@@ -624,22 +653,30 @@ export class FastGatewayExecutor implements FastGatewayExecutorPort {
       if (heartbeat) clearInterval(heartbeat);
       if (heartbeatPending) await heartbeatPending;
       input.client.signal.removeEventListener('abort', abort);
-      if (!upstreamStarted || upstreamComplete)
-        await lease
-          .release(
-            responseStatus === undefined
-              ? undefined
-              : {
-                  outcome: responseStatus === 429 ? 'rate_limited' : responseStatus >= 500 ? 'failure' : 'success',
-                  ...(actualTokenUnits === undefined ? {} : { actualTokenUnits }),
-                  ...(responseStatus === 429
-                    ? { cooldownMs: 1000, modelOnly: true }
+      if (!upstreamStarted || upstreamComplete) {
+        const feedback =
+          responseStatus === undefined
+            ? undefined
+            : {
+                outcome:
+                  responseStatus === 429
+                    ? ('rate_limited' as const)
                     : responseStatus >= 500
-                      ? { cooldownMs: 1000 }
-                      : {}),
-                },
-          )
-          .catch(() => undefined);
+                      ? ('failure' as const)
+                      : ('success' as const),
+                ...(actualTokenUnits === undefined ? {} : { actualTokenUnits }),
+                ...(responseStatus === 429
+                  ? { cooldownMs: 1000, modelOnly: true }
+                  : responseStatus >= 500
+                    ? { cooldownMs: 1000 }
+                    : {}),
+              };
+        if (receiptState === 'queued' && lease.releaseConcurrency) {
+          await lease.releaseConcurrency(feedback).catch(() => undefined);
+        } else {
+          await lease.release(feedback).catch(() => undefined);
+        }
+      }
     }
   }
 }

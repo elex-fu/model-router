@@ -49,3 +49,25 @@ test('an outage during an awaited health probe cannot return healthy', async () 
   });
   assert.equal(await check(), false);
 });
+
+test('receipt budget/age pressure fails readiness before and after awaited probes', async () => {
+  let ready = false;
+  let probes = 0;
+  const check = createFastGatewayReadiness({
+    receipts: { isReady: () => ready },
+    snapshots: { isAvailable: () => true },
+    journal: { checkReady: async () => {} },
+    admission: {
+      checkReady: async () => {
+        probes++;
+        ready = false;
+        return true;
+      },
+    },
+  });
+  assert.equal(await check(), false);
+  assert.equal(probes, 0);
+  ready = true;
+  assert.equal(await check(), false);
+  assert.equal(probes, 1);
+});

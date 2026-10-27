@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { resolveManagedSaasFastGatewayConfiguration } from '../../../../src/server/managed-saas-gateway.js';
+
 const environment = {
   MODEL_ROUTER_FAST_GATEWAY: 'reserved-max',
   MODEL_ROUTER_FAST_REDIS_URL: 'redis://127.0.0.1:6379',
@@ -73,4 +74,38 @@ test('an untyped composition caller cannot coerce a numeric credit cap', () => {
       {},
     ),
   );
+});
+
+test('final receipt memory mode is explicit and all queue budgets are validated', () => {
+  assert.equal(resolveManagedSaasFastGatewayConfiguration({}, environment)?.receiptMode, 'durable');
+  const configured = resolveManagedSaasFastGatewayConfiguration(
+    {},
+    {
+      ...environment,
+      MODEL_ROUTER_FAST_RECEIPT_MODE: 'memory-queue',
+      MODEL_ROUTER_FAST_RECEIPT_MAX_ENTRIES: '16',
+      MODEL_ROUTER_FAST_RECEIPT_MAX_BYTES: '65536',
+      MODEL_ROUTER_FAST_RECEIPT_WORKERS: '2',
+      MODEL_ROUTER_FAST_RECEIPT_MAX_PER_TENANT: '8',
+      MODEL_ROUTER_FAST_RECEIPT_MAX_AGE_MS: '100',
+      MODEL_ROUTER_FAST_RECEIPT_DRAIN_TIMEOUT_MS: '1000',
+    },
+  );
+  assert.equal(configured?.receiptMode, 'memory-queue');
+  assert.deepEqual(configured.receiptQueue, {
+    maxEntries: 16,
+    maxBytes: 65536,
+    workers: 2,
+    maxPerTenant: 8,
+    maxAgeMs: 100,
+    drainTimeoutMs: 1000,
+  });
+  for (const changed of [
+    { MODEL_ROUTER_FAST_RECEIPT_MODE: 'async' },
+    { MODEL_ROUTER_FAST_RECEIPT_MAX_ENTRIES: '1' },
+    { MODEL_ROUTER_FAST_RECEIPT_MODE: 'memory-queue', MODEL_ROUTER_FAST_RECEIPT_WORKERS: '33' },
+    { MODEL_ROUTER_FAST_RECEIPT_MODE: 'memory-queue', MODEL_ROUTER_FAST_RECEIPT_MAX_BYTES: '0' },
+    { MODEL_ROUTER_FAST_RECEIPT_MODE: 'memory-queue', MODEL_ROUTER_FAST_RECEIPT_MAX_AGE_MS: '1e3' },
+  ])
+    assert.throws(() => resolveManagedSaasFastGatewayConfiguration({}, { ...environment, ...changed }));
 });

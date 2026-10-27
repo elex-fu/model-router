@@ -35,7 +35,7 @@ function receipt(id = 'intent-a', tenant = 'tenant-a'): FastReceiptInput {
     verification: { priceSnapshot: priceFixture('80', '64') },
   };
 }
-const completion = { retainedLiabilityMinorUnits: '144' };
+const completion = { retainedLiabilityMinorUnits: '144', currency: 'USD' };
 
 test('queue bounds running + pending entries and per-tenant shares; drain owns in-flight work', async () => {
   const ack = deferred();
@@ -58,7 +58,7 @@ test('queue bounds running + pending entries and per-tenant shares; drain owns i
   assert.equal(calls, 1);
   assert.equal(queue.snapshot().pending, 2);
   assert.equal(queue.snapshot().running, 1);
-  assert.equal(queue.snapshot().undurableLiabilityMinorUnits, '288');
+  assert.equal(queue.snapshot().undurableLiabilityByCurrency.USD, '288');
   assert.equal(queue.isReady(), false);
   let drained = false;
   const draining = queue.close().then(() => {
@@ -122,7 +122,8 @@ test('lost ACK retries the identical frozen receipt; successful ACK alone unlock
     true,
   );
   Object.assign(original.usage, { inputTotal: '900' });
-  Object.assign(original.verification!.priceSnapshot.customerPrice, { currency: 'changed' });
+  assert.ok(original.verification);
+  Object.assign(original.verification.priceSnapshot.customerPrice, { currency: 'changed' });
   await queue.close();
   assert.equal(observed.length, 2);
   assert.equal(observed[0], observed[1]);
@@ -169,7 +170,7 @@ test('conflict retains evidence and liability, fails readiness and drain without
   queue.tryEnqueue(receipt(), completion);
   await assert.rejects(queue.close(), /DRAIN_CONFLICT/);
   assert.equal(queue.snapshot().pending, 1);
-  assert.equal(queue.snapshot().undurableLiabilityMinorUnits, '144');
+  assert.equal(queue.snapshot().undurableLiabilityByCurrency.USD, '144');
   assert.equal(queue.canAdmit(), false);
   assert.equal(calls, 1);
 });
@@ -218,7 +219,8 @@ test('queue excludes arbitrary evidence extensions and request AsyncLocalStorage
   assert.doesNotMatch(serialized, /private|candidate|credential|body/);
   assert.doesNotMatch(JSON.stringify(queue.snapshot()), /tenant|intent-a|request/);
   const unsafePrice = receipt('other');
-  Object.assign(unsafePrice.verification!.priceSnapshot.customerPrice, { credential: 'private-fixture' });
+  assert.ok(unsafePrice.verification);
+  Object.assign(unsafePrice.verification.priceSnapshot.customerPrice, { credential: 'private-fixture' });
   assert.throws(() => queue.tryEnqueue(unsafePrice, completion), /INVALID_PROOF/);
 });
 
@@ -238,5 +240,51 @@ test('invalid proof, usage and reconciliation cannot be queued or observed as su
     /COMPLETION/,
   );
   assert.equal(queue.snapshot().pending, 0);
+  await queue.close();
+});
+
+test('hung reconciliation cannot starve receipt SQL slots or claim financial backlog', async () => {
+  const redis = deferred();
+  let now = 0;
+  let receipts = 0;
+  const queue = new FastReceiptQueue({
+    workers: 1,
+    now: () => now,
+    maxAgeMs: 5,
+    journal: {
+      appendReceipt: async () => {
+        receipts++;
+      },
+    },
+  });
+  queue.tryEnqueue(receipt(), {
+    ...completion,
+    actualTokenUnits: 15,
+    reconcileDurableUsage: async () => redis.promise,
+  });
+  await delay(1);
+  now = 6;
+  assert.equal(queue.snapshot().undurable, 0);
+  assert.equal(queue.canAdmit(), true);
+  queue.tryEnqueue(receipt('b'), completion);
+  await delay(1);
+  assert.equal(receipts, 2);
+  assert.equal(queue.snapshot().pending, 1);
+  assert.equal(queue.snapshot().undurable, 0);
+  redis.resolve();
+  await queue.close();
+});
+
+test('pending liabilities remain separated by currency and metadata cannot override frozen price', async () => {
+  const ack = deferred();
+  const queue = new FastReceiptQueue({ journal: { appendReceipt: async () => ack.promise } });
+  queue.tryEnqueue(receipt(), completion);
+  const yen = receipt('yen');
+  assert.ok(yen.verification);
+  Object.assign(yen.verification.priceSnapshot.customerPrice, { currency: 'JPY' });
+  queue.tryEnqueue(yen, { ...completion, currency: 'JPY' });
+  assert.deepEqual(queue.snapshot().undurableLiabilityByCurrency, { USD: '144', JPY: '144' });
+  assert.throws(() => queue.tryEnqueue(receipt('invalid'), { ...completion, currency: 'JPY' }), /COMPLETION/);
+  ack.resolve();
   await queue.close();
 });

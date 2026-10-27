@@ -1213,7 +1213,7 @@ class LifecycleResponse extends EventEmitter {
 }
 
 /** Real preparation and dispatch, with an explicit post-EOF settlement barrier and no sockets or database. */
-function lifecycleComposition(options: { close?: () => Promise<void>; maxHttpInFlight?: number } = {}) {
+function lifecycleComposition(options: { close?: () => Promise<void>; stopAdmission?: () => void; handoffTimeoutMs?: number; maxHttpInFlight?: number } = {}) {
   const events: string[] = [];
   const executor: SqlExecutor = { query: async () => ({ rows: [], rowCount: 0 }) };
   const evidence = new Map<string, PreparedRequestEvidenceRecord>();
@@ -1393,6 +1393,8 @@ function lifecycleComposition(options: { close?: () => Promise<void>; maxHttpInF
       },
     },
     lifecycle: {
+      stopAdmission: options.stopAdmission,
+      handoffTimeoutMs: options.handoffTimeoutMs,
       async close() {
         closeCalls += 1;
         events.push('lifecycle-closed');
@@ -3017,4 +3019,46 @@ test('standard composition mounts its own WS executor and repeats proxy-key auth
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
   assert.equal(closed, 1);
+});
+
+test('closing stops new admission before pending post-EOF handoff, then waits for detached lifecycle drain', async () => {
+  const drain = lifecycleDeferred();
+  const stopped: string[] = [];
+  const graph = lifecycleComposition({ stopAdmission: () => stopped.push('stop'), close: () => drain.promise });
+  const first = graph.start();
+  try {
+    await first.entered;
+    assert.equal(first.response.writableEnded, true);
+    let closed = false;
+    const closing = graph.composition.close().then(() => { closed = true; });
+    await lifecycleTurn();
+    assert.deepEqual(stopped, ['stop']);
+    const before = { ...graph.counters };
+    const denied = graph.start();
+    void denied.entered.catch(() => undefined);
+    await denied.pending;
+    assert.equal(denied.response.statusCode, 429);
+    assert.deepEqual(graph.counters, before);
+    assert.equal(graph.closeCalls, 0);
+    first.state.release.resolve();
+    await first.pending;
+    await lifecycleTurn();
+    assert.equal(graph.closeCalls, 1);
+    assert.equal(closed, false, 'detached evidence drain remains owned after handler settlement');
+    drain.resolve();
+    await closing;
+    assert.equal(closed, true);
+  } finally { drain.resolve(); await graph.cleanup(); }
+});
+
+test('handoff timeout is explicit and never closes financial dependencies under pending post-EOF work', async () => {
+  const graph = lifecycleComposition({ handoffTimeoutMs: 5 });
+  const first = graph.start();
+  try {
+    await first.entered;
+    assert.equal(first.response.writableEnded, true);
+    await assert.rejects(graph.composition.close(), /FAST_RECEIPT_HANDOFF_TIMEOUT/);
+    assert.equal(graph.closeCalls, 0);
+    assert.equal(first.state.handlerSettled, false);
+  } finally { await graph.cleanup(); }
 });

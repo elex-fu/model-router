@@ -5,6 +5,7 @@ import { FastGatewayExecutor, type FastGatewayExecutorPort } from '../saas/gatew
 import { createFastGatewayJournal } from '../saas/gateway/fast/journal.js';
 import { createPostgresFastGatewaySnapshotLoader } from '../saas/gateway/fast/postgres-snapshot-loader.js';
 import { createFastGatewayReadiness } from '../saas/gateway/fast/readiness.js';
+import { FastReceiptQueue, type FastReceiptQueueLimits, type FastReceiptQueueSnapshot } from '../saas/gateway/fast/receipt-queue.js';
 import { openRedisFastGatewayAdmission } from '../saas/gateway/fast/redis-admission.js';
 import { createRedisFastGatewaySnapshotCacheStore } from '../saas/gateway/fast/redis-snapshot-store.js';
 import {
@@ -262,6 +263,10 @@ export class ManagedSaasGatewayCompositionError extends Error {
 }
 
 export interface ManagedSaasGatewayLifecycle {
+  /** Stop new admission before awaiting active handler-to-queue handoffs. */
+  stopAdmission?(): void;
+  /** Optional bounded handoff wait. Timeout reports failure without closing financial resources. */
+  readonly handoffTimeoutMs?: number;
   /** Closes resources owned by the gateway composition exactly once. */
   close(): Promise<void>;
 }
@@ -915,8 +920,13 @@ export function createManagedSaasGatewayComposition(
   const pendingHttpHandlers = new Set<Promise<boolean>>();
   const maxHttpInFlight = dependencies.maxHttpInFlight;
   let httpInFlight = 0;
+  let closing = false;
   const handler: SaasGatewayHttpHandler = (req, res) => {
     const currentRequestId = requestId();
+    if (closing && isSaasGatewayInferenceRequest(req)) {
+      rejectSaasGatewayCapacityRequest(req, res, currentRequestId);
+      return Promise.resolve(true);
+    }
     let limited = false;
     if (maxHttpInFlight !== undefined && isSaasGatewayInferenceRequest(req)) {
       if (httpInFlight >= maxHttpInFlight) {
@@ -949,11 +959,23 @@ export function createManagedSaasGatewayComposition(
   };
   const close = closeOnce({
     close: async () => {
+      closing = true;
+      dependencies.lifecycle.stopAdmission?.();
       await responsesWs.close();
       // The listener owner stops new requests before closing this composition.
       // HTTP EOF can precede settlement and fenced lease cleanup.
-      while (pendingHttpHandlers.size > 0) {
-        await Promise.allSettled([...pendingHttpHandlers]);
+      if (dependencies.lifecycle.handoffTimeoutMs !== undefined && pendingHttpHandlers.size > 0) {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([
+            Promise.allSettled([...pendingHttpHandlers]),
+            new Promise<never>((_resolve, reject) => {
+              timer = setTimeout(() => reject(new Error('FAST_RECEIPT_HANDOFF_TIMEOUT')), dependencies.lifecycle.handoffTimeoutMs);
+            }),
+          ]);
+        } finally { if (timer) clearTimeout(timer); }
+      } else {
+        while (pendingHttpHandlers.size > 0) await Promise.allSettled([...pendingHttpHandlers]);
       }
       await dependencies.lifecycle.close();
     },
@@ -1010,9 +1032,13 @@ export interface ManagedSaasFastGatewayOptions {
   readonly snapshotEncryptionKey?: Uint8Array;
   /** Pinned direct-HTTPS reuse defaults on inside opt-in fast mode; false is the rollback control. */
   readonly reuseConnections?: boolean;
+  /** memory-queue explicitly trades final evidence durability at terminal for lower tail latency. */
+  readonly receiptMode?: 'durable' | 'memory-queue';
+  readonly receiptQueue?: FastReceiptQueueLimits;
 }
 
 export interface ManagedSaasGatewayProductionOptions {
+  readonly fastReceiptQueueObserver?: (snapshot: FastReceiptQueueSnapshot) => void;
   readonly fastGateway?: ManagedSaasFastGatewayOptions;
   readonly fastGatewayDiagnostic?: FastGatewayDiagnosticObserver;
   readonly continuationHistoryResolver?: PersistentResponsesContinuationResolver;
@@ -2077,13 +2103,25 @@ export function resolveManagedSaasFastGatewayConfiguration(
       !value.namespace ||
       !value.allocationOwner ||
       (value.reuseConnections !== undefined && typeof value.reuseConnections !== 'boolean') ||
+      (value.receiptMode !== undefined && !['durable', 'memory-queue'].includes(value.receiptMode)) ||
+      (value.receiptQueue !== undefined && value.receiptMode !== 'memory-queue') ||
       (value.allocationTrancheMinorUnits !== undefined &&
         (typeof value.allocationTrancheMinorUnits !== 'string' || !/^[1-9][0-9]*$/.test(value.allocationTrancheMinorUnits))) ||
       (value.allocationStripes !== undefined &&
         (!Number.isSafeInteger(value.allocationStripes) || value.allocationStripes < 1 || value.allocationStripes > 8))
     )
       invalid();
-    return { ...value, reuseConnections: value.reuseConnections ?? true };
+    if (value.receiptQueue) {
+      const bounds: Record<keyof FastReceiptQueueLimits, number> = {
+        maxEntries: 65536, maxBytes: 256 * 1024 * 1024, workers: 32, maxPerTenant: 65536,
+        maxAgeMs: 3600000, drainTimeoutMs: 3600000,
+      };
+      for (const [key, limit] of Object.entries(value.receiptQueue)) {
+        const maximum = bounds[key as keyof FastReceiptQueueLimits];
+        if (!maximum || !Number.isSafeInteger(limit) || limit < 1 || limit > maximum) invalid();
+      }
+    }
+    return { ...value, reuseConnections: value.reuseConnections ?? true, receiptMode: value.receiptMode ?? 'durable' };
   };
   if (options.fastGateway) return validate(options.fastGateway);
   const mode = environment.MODEL_ROUTER_FAST_GATEWAY;
@@ -2093,6 +2131,18 @@ export function resolveManagedSaasFastGatewayConfiguration(
   const namespace = environment.MODEL_ROUTER_FAST_NAMESPACE;
   const allocationOwner = environment.MODEL_ROUTER_FAST_OWNER;
   const reuse = environment.MODEL_ROUTER_FAST_CONNECTION_REUSE;
+  const receiptMode = environment.MODEL_ROUTER_FAST_RECEIPT_MODE;
+  const receiptQueue: Record<string, number> = {};
+  for (const [key, suffix] of Object.entries({
+    maxEntries: 'MAX_ENTRIES', maxBytes: 'MAX_BYTES', workers: 'WORKERS', maxPerTenant: 'MAX_PER_TENANT',
+    maxAgeMs: 'MAX_AGE_MS', drainTimeoutMs: 'DRAIN_TIMEOUT_MS',
+  })) {
+    const raw = environment[`MODEL_ROUTER_FAST_RECEIPT_${suffix}`];
+    if (raw !== undefined) {
+      if (!/^[1-9][0-9]*$/.test(raw)) return invalid();
+      receiptQueue[key] = Number(raw);
+    }
+  }
   if (!redisUrl || !namespace || !allocationOwner || (reuse !== undefined && reuse !== '0' && reuse !== '1'))
     return invalid();
   return validate({
@@ -2108,6 +2158,8 @@ export function resolveManagedSaasFastGatewayConfiguration(
       : { allocationStripes: Number(environment.MODEL_ROUTER_FAST_CREDIT_STRIPES) }),
     redisDrained: environment.MODEL_ROUTER_FAST_REDIS_DRAINED === '1',
     reuseConnections: reuse !== '0',
+    ...(receiptMode === undefined ? {} : { receiptMode: receiptMode as 'durable' | 'memory-queue' }),
+    ...(Object.keys(receiptQueue).length === 0 ? {} : { receiptQueue }),
     ...(environment.MODEL_ROUTER_FAST_SNAPSHOT_KEY_BASE64
       ? { snapshotEncryptionKey: Buffer.from(environment.MODEL_ROUTER_FAST_SNAPSHOT_KEY_BASE64, 'base64') }
       : {}),
@@ -2674,6 +2726,7 @@ export function createManagedSaasGatewayProductionComposition(
   let closeFastResources: (() => Promise<void>) | undefined;
   let fastGateway: FastGatewayExecutorPort | undefined;
   let fastReadiness: (() => Promise<boolean>) | undefined;
+  let fastStopping = false;
   if (fastConfig) {
     fastReadiness = async () => false;
     if (fastConfig.mode !== 'reserved-max') throw new ManagedSaasGatewayCompositionError('INVALID_CONFIGURATION');
@@ -2725,7 +2778,13 @@ export function createManagedSaasGatewayProductionComposition(
           : { allocationTrancheMinorUnits: fastConfig.allocationTrancheMinorUnits }),
         ...(fastConfig.allocationStripes === undefined ? {} : { allocationStripes: fastConfig.allocationStripes }),
       });
-      fastReadiness = createFastGatewayReadiness({ admission, journal, snapshots });
+      // Two workers share the DB pool with durable admission and ledger work;
+      // do not copy a large goroutine pool or treat capacity as usable credit.
+      const receipts = fastConfig.receiptMode === 'memory-queue'
+        ? new FastReceiptQueue({ journal, ...fastConfig.receiptQueue, observe: options.fastReceiptQueueObserver })
+        : undefined;
+      const checkFastReady = createFastGatewayReadiness({ admission, journal, snapshots, receipts });
+      fastReadiness = async () => !fastStopping && await checkFastReady();
       const connectorPool = fastConfig.reuseConnections ? new FastPinnedConnectorPool({
         createConnector: options.providerHttpTestAddressCapability ? createPinnedProviderHttpTestConnectorFactory(options.providerHttpTestAddressCapability) : createPinnedProviderHttpConnector,
         maximumEntries: Math.min(4096, Math.max(64, options.maxHttpInFlight ?? 256)),
@@ -2733,6 +2792,9 @@ export function createManagedSaasGatewayProductionComposition(
       closeFastResources = async () => {
         snapshots.markUnavailable();
         fastReadiness = async () => false;
+        // All active handlers have handed off before lifecycle.close. On a
+        // drain failure retain evidence/M and do NOT retire or close dependencies.
+        await receipts?.close();
         await connectorPool?.close();
         await journal.close();
         await admission.close();
@@ -2741,6 +2803,7 @@ export function createManagedSaasGatewayProductionComposition(
         snapshots,
         admission,
         journal,
+        ...(receipts ? { receiptQueue: receipts } : {}),
         unsealer,
         payload: (candidate) =>
           createProviderPayloadCompiler({
@@ -2768,7 +2831,10 @@ export function createManagedSaasGatewayProductionComposition(
       });
     });
     void ready.catch(() => undefined); // requests/readiness observe the same failure, not an unhandled rejection
-    fastGateway = { execute: async (input) => (await ready).execute(input) };
+    fastGateway = { execute: async (input) => {
+      if (fastStopping) throw new ManagedSaasGatewayCompositionError('UNAVAILABLE');
+      return (await ready).execute(input);
+    } };
     fastClose = async () => {
       await ready.catch(() => undefined);
       await closeFastResources?.();
@@ -2867,6 +2933,9 @@ export function createManagedSaasGatewayProductionComposition(
       ...(options.dispatchObserver ? { observer: options.dispatchObserver } : {}),
     },
     lifecycle: {
+      stopAdmission: () => { fastStopping = true; },
+      ...(fastConfig?.receiptMode === 'memory-queue'
+        ? { handoffTimeoutMs: Math.max(options.timeoutMs, fastConfig.receiptQueue?.drainTimeoutMs ?? 10000) } : {}),
       close: async () => {
         // G-A1: stop the media recovery loops before the KMS (their PG
         // leases expire on their own; an in-flight cycle finishes first).
