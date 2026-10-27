@@ -188,6 +188,7 @@ test('OPS-01 I3: dual-instance SIGKILL failover keeps gates green and PostgreSQL
   const children: Array<{ child: ChildProcess }> = [];
   let diagnosticStage = 'startup';
   let survivorStopRequestedAt: number | undefined;
+  let lastLeaseSnapshot: { wallTimeMs: number; monotonicMs: number; rows: LeaseRow[] } | undefined;
   let continuity: { instanceId: string; token: string; sequence: number } | undefined;
   function assertContinuity(observed: readonly Marker[] = markers(progressPath)): void {
     if (!continuity) return;
@@ -203,6 +204,8 @@ test('OPS-01 I3: dual-instance SIGKILL failover keeps gates green and PostgreSQL
   t.after(async () => {
     // Observe before killing children/removing scratch. Never emit raw errors.
     try {
+      const assertionSnapshot = lastLeaseSnapshot;
+      const rows = await leaseRows().catch(() => null);
       const observed = markers(progressPath);
       const selected = observed.slice(-120).map((entry) => ({
         kind: entry.kind, instanceId: entry.instanceId, sequence: entry.sequence,
@@ -212,9 +215,9 @@ test('OPS-01 I3: dual-instance SIGKILL failover keeps gates green and PostgreSQL
         gate: entry.gate, ok: entry.ok, clean: entry.clean, stage: entry.stage,
         code: entry.code && /^[A-Z][A-Z0-9_]{0,63}$/.test(entry.code) ? entry.code : undefined,
       }));
-      const rows = await leaseRows().catch(() => null);
       t.diagnostic('failover evidence ' + JSON.stringify({
         stage: diagnosticStage, leaseTtlMs: LEASE_TTL_MS, survivorStopRequestedAt,
+        assertionSnapshot,
         markerCount: observed.length, markerTail: selected, databaseRows: rows,
         authorityEvents: observed.filter((entry) =>
           ['lease-acquired', 'lease-lost', 'failed', 'shutdown'].includes(entry.kind))
@@ -333,6 +336,7 @@ test('OPS-01 I3: dual-instance SIGKILL failover keeps gates green and PostgreSQL
           ORDER BY fencing_token`,
         [accountId],
       );
+      lastLeaseSnapshot = { wallTimeMs: Date.now(), monotonicMs: performance.now(), rows: result.rows };
       return result.rows;
     });
   }
