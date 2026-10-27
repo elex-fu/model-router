@@ -1,18 +1,3 @@
-import type { FastGatewayDiagnosticObserver } from '../saas/gateway/fast/failure-diagnostic.js';
-import { FastPinnedConnectorPool } from '../saas/gateway/fast/pinned-connector-pool.js';
-import { createPinnedProviderHttpConnector, createPinnedProviderHttpTestConnectorFactory } from '../saas/gateway/provider-http-address.js';
-import { FastGatewayExecutor, type FastGatewayExecutorPort } from '../saas/gateway/fast/executor.js';
-import { createFastGatewayJournal } from '../saas/gateway/fast/journal.js';
-import { createPostgresFastGatewaySnapshotLoader } from '../saas/gateway/fast/postgres-snapshot-loader.js';
-import { createFastGatewayReadiness } from '../saas/gateway/fast/readiness.js';
-import { FastReceiptQueue, type FastReceiptQueueLimits, type FastReceiptQueueSnapshot } from '../saas/gateway/fast/receipt-queue.js';
-import { openRedisFastGatewayAdmission } from '../saas/gateway/fast/redis-admission.js';
-import { createRedisFastGatewaySnapshotCacheStore } from '../saas/gateway/fast/redis-snapshot-store.js';
-import {
-  createRuntimeFastGatewaySnapshotSource,
-  fastGatewayModelCompatibility,
-} from '../saas/gateway/fast/runtime-snapshot.js';
-import { CachedFastGatewaySnapshots } from '../saas/gateway/fast/snapshots.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import { SaasBillingGroupsService } from '../saas/billing/groups/service.js';
@@ -44,6 +29,24 @@ import {
   DispatchUsageSettlementCoordinator,
   type NormalSuccessSettlementPort,
 } from '../saas/gateway/dispatch-usage-settlement.js';
+import { FastGatewayExecutor, type FastGatewayExecutorPort } from '../saas/gateway/fast/executor.js';
+import type { FastGatewayDiagnosticObserver } from '../saas/gateway/fast/failure-diagnostic.js';
+import { createFastGatewayJournal } from '../saas/gateway/fast/journal.js';
+import { FastPinnedConnectorPool } from '../saas/gateway/fast/pinned-connector-pool.js';
+import { createPostgresFastGatewaySnapshotLoader } from '../saas/gateway/fast/postgres-snapshot-loader.js';
+import { createFastGatewayReadiness } from '../saas/gateway/fast/readiness.js';
+import {
+  FastReceiptQueue,
+  type FastReceiptQueueLimits,
+  type FastReceiptQueueSnapshot,
+} from '../saas/gateway/fast/receipt-queue.js';
+import { openRedisFastGatewayAdmission } from '../saas/gateway/fast/redis-admission.js';
+import { createRedisFastGatewaySnapshotCacheStore } from '../saas/gateway/fast/redis-snapshot-store.js';
+import {
+  createRuntimeFastGatewaySnapshotSource,
+  fastGatewayModelCompatibility,
+} from '../saas/gateway/fast/runtime-snapshot.js';
+import { CachedFastGatewaySnapshots } from '../saas/gateway/fast/snapshots.js';
 import { GEMINI_ENDPOINT } from '../saas/gateway/gemini/catalog-identity.js';
 import { GROK_ENDPOINT } from '../saas/gateway/grok/catalog-identity.js';
 import type { GrokCredentialResolver } from '../saas/gateway/grok/transport.js';
@@ -113,10 +116,6 @@ import {
 } from '../saas/gateway/preparation-failure-observer.js';
 import type { PreparedEvidenceDispatchObserver } from '../saas/gateway/prepared-evidence-dispatch-observer.js';
 import {
-  RequestDiagnosticTrace,
-  withRequestDiagnosticTrace,
-} from '../saas/gateway/request-diagnostic-trace.js';
-import {
   type PreparedEvidenceLeaseProvider,
   type PreparedEvidenceMeteringPort,
   type PreparedEvidenceTransport,
@@ -140,6 +139,8 @@ import {
   getAccountWindowCostFactsBatch,
 } from '../saas/gateway/provider-account-window-cost-gate.js';
 import {
+  createPinnedProviderHttpConnector,
+  createPinnedProviderHttpTestConnectorFactory,
   isProviderHttpTestAddressCapability,
   type ProviderHttpEgressAllowlist,
   type ProviderHttpTestAddressCapability,
@@ -164,6 +165,7 @@ import {
   createRedisStickyProviderAccountAffinity,
   type RedisStickyAffinityOptions,
 } from '../saas/gateway/redis-sticky-provider-account-affinity.js';
+import { RequestDiagnosticTrace, withRequestDiagnosticTrace } from '../saas/gateway/request-diagnostic-trace.js';
 import {
   type GatewayRequestIdempotencyClaimResult,
   GatewayRequestIdempotencyStore,
@@ -189,10 +191,10 @@ import {
   SaasRequestPreparationService,
 } from '../saas/gateway/request-preparation-service.js';
 import { createNativeResponsesCompactRoutingTransport } from '../saas/gateway/responses-compact-transport.js';
+import type { PersistentResponsesContinuationResolver } from '../saas/gateway/responses-continuation-resolver.js';
 import { createResponsesWsServer } from '../saas/gateway/responses-ws-connection.js';
 import { ResponsesWsEngine } from '../saas/gateway/responses-ws-engine.js';
 import { createResponsesWsRoundExecutor, responsesWsProxyKey } from '../saas/gateway/responses-ws-executor.js';
-import type { PersistentResponsesContinuationResolver } from '../saas/gateway/responses-continuation-resolver.js';
 import { SaasRouteConfigService } from '../saas/gateway/route-config-service.js';
 import { VERTEX_ENDPOINT } from '../saas/gateway/vertex/catalog-identity.js';
 import { GrokVideoUpstreamForwarder } from '../saas/gateway/videos/grok-video-upstream.js';
@@ -207,9 +209,9 @@ import {
   SaasGatewayVideosQueryPort,
 } from '../saas/gateway/videos/videos-query-port.js';
 import { createKeyBudgetResolution } from '../saas/keys/budget-resolution.js';
+import { CachedKeyAuthenticator } from '../saas/keys/cached-authenticator.js';
 import { PostgresSupplyProfileResolver } from '../saas/keys/resolver.js';
 import { KeyService } from '../saas/keys/service.js';
-import { CachedKeyAuthenticator } from '../saas/keys/cached-authenticator.js';
 import type { AuthenticatedApiKey } from '../saas/keys/types.js';
 import {
   DurableConditionalSettlementPort,
@@ -356,7 +358,10 @@ export interface ManagedSaasGatewayCompositionDependencies {
   /** Opt-in diagnostic sampling. Observer must enqueue without blocking or awaiting persistence. */
   readonly requestDiagnostics?: {
     readonly select: (requestId: string) => boolean;
-    readonly observe: (sample: { readonly requestId: string; readonly trace: ReturnType<RequestDiagnosticTrace['snapshot']> }) => void;
+    readonly observe: (sample: {
+      readonly requestId: string;
+      readonly trace: ReturnType<RequestDiagnosticTrace['snapshot']>;
+    }) => void;
   };
   /**
    * Override the built-in per-connection Responses round executor. The
@@ -757,15 +762,23 @@ export function createManagedSaasGatewayComposition(
   const requestIdContext = new AsyncLocalStorage<string>();
   const runWithDiagnostics = <T>(id: string, work: () => Promise<T>): Promise<T> => {
     let selected = false;
-    try { selected = dependencies.requestDiagnostics?.select(id) === true; } catch { /* Diagnostic only. */ }
+    try {
+      selected = dependencies.requestDiagnostics?.select(id) === true;
+    } catch {
+      /* Diagnostic only. */
+    }
     if (!selected) return work();
     const trace = new RequestDiagnosticTrace();
     return withRequestDiagnosticTrace(trace, async () => {
-      try { return await work(); }
-      finally {
+      try {
+        return await work();
+      } finally {
         // No await, queue flush, or persistent write in the request path.
-        try { dependencies.requestDiagnostics?.observe({ requestId: id, trace: trace.snapshot() }); }
-        catch { /* Diagnostic failure cannot change a financial outcome. */ }
+        try {
+          dependencies.requestDiagnostics?.observe({ requestId: id, trace: trace.snapshot() });
+        } catch {
+          /* Diagnostic failure cannot change a financial outcome. */
+        }
       }
     });
   };
@@ -841,7 +854,9 @@ export function createManagedSaasGatewayComposition(
         executor:
           dependencies.responsesWsRoundExecutor ??
           createResponsesWsRoundExecutor({
-            ...(dependencies.continuationHistoryResolver ? { continuationHistoryResolver: dependencies.continuationHistoryResolver } : {}),
+            ...(dependencies.continuationHistoryResolver
+              ? { continuationHistoryResolver: dependencies.continuationHistoryResolver }
+              : {}),
             request: upgradeRequest,
             authenticator: dependencies.authenticator,
             preparation,
@@ -852,13 +867,15 @@ export function createManagedSaasGatewayComposition(
             trustedProxyCidrs: dependencies.trustedProxyCidrs,
             contentModeration: dependencies.contentModeration,
             runWithRequestId: (roundRequestId, work) =>
-              requestIdContext.run(roundRequestId, () => runWithDiagnostics(roundRequestId, async () => {
-                try {
-                  return await work();
-                } finally {
-                  await dependencies.capacityCompletion?.(roundRequestId).catch(() => {});
-                }
-              })),
+              requestIdContext.run(roundRequestId, () =>
+                runWithDiagnostics(roundRequestId, async () => {
+                  try {
+                    return await work();
+                  } finally {
+                    await dependencies.capacityCompletion?.(roundRequestId).catch(() => {});
+                  }
+                }),
+              ),
           }),
         send: () => {},
         close: () => {},
@@ -869,7 +886,9 @@ export function createManagedSaasGatewayComposition(
   const httpHandler = createSaasGatewayHandler({
     ...(dependencies.fastGateway ? { fastGateway: dependencies.fastGateway } : {}),
     ...(dependencies.fastGatewayDiagnostic ? { fastGatewayDiagnostic: dependencies.fastGatewayDiagnostic } : {}),
-    ...(dependencies.continuationHistoryResolver ? { continuationHistoryResolver: dependencies.continuationHistoryResolver } : {}),
+    ...(dependencies.continuationHistoryResolver
+      ? { continuationHistoryResolver: dependencies.continuationHistoryResolver }
+      : {}),
     authenticator: dependencies.authenticator,
     preparation,
     dispatch,
@@ -939,7 +958,9 @@ export function createManagedSaasGatewayComposition(
     let pending: Promise<boolean>;
     try {
       pending = requestIdContext
-        .run(currentRequestId, () => runWithDiagnostics(currentRequestId, () => httpHandler(req, res, { requestId: currentRequestId })))
+        .run(currentRequestId, () =>
+          runWithDiagnostics(currentRequestId, () => httpHandler(req, res, { requestId: currentRequestId })),
+        )
         .finally(async () => {
           await dependencies.capacityCompletion?.(currentRequestId).catch(() => {});
         });
@@ -970,10 +991,15 @@ export function createManagedSaasGatewayComposition(
           await Promise.race([
             Promise.allSettled([...pendingHttpHandlers]),
             new Promise<never>((_resolve, reject) => {
-              timer = setTimeout(() => reject(new Error('FAST_RECEIPT_HANDOFF_TIMEOUT')), dependencies.lifecycle.handoffTimeoutMs);
+              timer = setTimeout(
+                () => reject(new Error('FAST_RECEIPT_HANDOFF_TIMEOUT')),
+                dependencies.lifecycle.handoffTimeoutMs,
+              );
             }),
           ]);
-        } finally { if (timer) clearTimeout(timer); }
+        } finally {
+          if (timer) clearTimeout(timer);
+        }
       } else {
         while (pendingHttpHandlers.size > 0) await Promise.allSettled([...pendingHttpHandlers]);
       }
@@ -1452,10 +1478,14 @@ function createProductionIdempotencyAdmission(
       const authorized = await admission.revalidateAuthorization(input, sqlOptions);
       if (authorized.decision !== 'allow') return authorized;
       try {
-        return allowRequestPreparation(await store.readCanonicalCompilation(sqlOptions.executor, {
-          tenantId: input.caller.tenantId, projectId: input.caller.projectId, proxyKeyId: input.caller.proxyKeyId,
-          clientKey: input.clientKey,
-        }));
+        return allowRequestPreparation(
+          await store.readCanonicalCompilation(sqlOptions.executor, {
+            tenantId: input.caller.tenantId,
+            projectId: input.caller.projectId,
+            proxyKeyId: input.caller.proxyKeyId,
+            clientKey: input.clientKey,
+          }),
+        );
       } catch {
         return blockRequestPreparation('storage_failure', 'The canonical compilation identity is unavailable.');
       }
@@ -1468,16 +1498,27 @@ function createProductionIdempotencyAdmission(
       if (authorized.decision !== 'allow') return authorized;
       try {
         const existing = await store.lookupExisting(sqlOptions.executor, {
-          tenantId: input.caller.tenantId, projectId: input.caller.projectId, proxyKeyId: input.caller.proxyKeyId,
-          clientKey: input.clientKey, requestId: input.requestId,
-          requestFingerprint: input.requestFingerprint, requestFingerprintVersion: input.requestFingerprintVersion,
+          tenantId: input.caller.tenantId,
+          projectId: input.caller.projectId,
+          proxyKeyId: input.caller.proxyKeyId,
+          clientKey: input.clientKey,
+          requestId: input.requestId,
+          requestFingerprint: input.requestFingerprint,
+          requestFingerprintVersion: input.requestFingerprintVersion,
         });
-        if (existing.kind === 'missing') return blockRequestPreparation('storage_failure', 'The canonical idempotency binding disappeared.');
+        if (existing.kind === 'missing')
+          return blockRequestPreparation('storage_failure', 'The canonical idempotency binding disappeared.');
         if (existing.kind === 'fingerprint_conflict') {
-          return rejectRequestPreparation('idempotency_conflict', 'The idempotency key is already bound to a different request fingerprint.');
+          return rejectRequestPreparation(
+            'idempotency_conflict',
+            'The idempotency key is already bound to a different request fingerprint.',
+          );
         }
-        return rejectRequestPreparation('idempotency_replay', 'The existing canonical request is returned without replaying its response.',
-          { requestId: existing.canonicalRequestId, status: existing.canonicalRequestStatus });
+        return rejectRequestPreparation(
+          'idempotency_replay',
+          'The existing canonical request is returned without replaying its response.',
+          { requestId: existing.canonicalRequestId, status: existing.canonicalRequestStatus },
+        );
       } catch {
         return blockRequestPreparation('storage_failure', 'The canonical idempotency binding is unavailable.');
       }
@@ -1491,11 +1532,23 @@ function createProductionIdempotencyAdmission(
         );
       }
       if (!admission.revalidateAuthorization) {
-        return blockRequestPreparation('capability_unavailable', 'Transactional admission authorization is unavailable.');
+        return blockRequestPreparation(
+          'capability_unavailable',
+          'Transactional admission authorization is unavailable.',
+        );
       }
-      const authorized = await admission.revalidateAuthorization({ caller: input.caller, entitlement: input.entitlement,
-        publicModel: input.authority.route.publicModel, protocol: input.authority.route.protocol,
-        clientAddress: input.clientAddress, clientKey: input.idempotencyKey, requestId: input.requestId }, { executor });
+      const authorized = await admission.revalidateAuthorization(
+        {
+          caller: input.caller,
+          entitlement: input.entitlement,
+          publicModel: input.authority.route.publicModel,
+          protocol: input.authority.route.protocol,
+          clientAddress: input.clientAddress,
+          clientKey: input.idempotencyKey,
+          requestId: input.requestId,
+        },
+        { executor },
+      );
       if (authorized.decision !== 'allow') return authorized;
       let claim: GatewayRequestIdempotencyClaimResult;
       try {
@@ -1518,9 +1571,18 @@ function createProductionIdempotencyAdmission(
         );
       }
       if (claim.kind === 'existing') {
-        const freshAuthorization = await admission.revalidateAuthorization({ caller: input.caller, entitlement: input.entitlement,
-          publicModel: input.authority.route.publicModel, protocol: input.authority.route.protocol,
-          clientAddress: input.clientAddress, clientKey: input.idempotencyKey, requestId: input.requestId }, { executor });
+        const freshAuthorization = await admission.revalidateAuthorization(
+          {
+            caller: input.caller,
+            entitlement: input.entitlement,
+            publicModel: input.authority.route.publicModel,
+            protocol: input.authority.route.protocol,
+            clientAddress: input.clientAddress,
+            clientKey: input.idempotencyKey,
+            requestId: input.requestId,
+          },
+          { executor },
+        );
         if (freshAuthorization.decision !== 'allow') return freshAuthorization;
         return rejectRequestPreparation(
           'idempotency_replay',
@@ -1531,14 +1593,17 @@ function createProductionIdempotencyAdmission(
       if (claim.canonicalRequestId !== input.requestId) {
         return rejectRequestPreparation('binding_mismatch', 'SaaS request admission could not be authorized.');
       }
-      const admitted = await admission.authorizeAndReserve({
-        ...input,
-        idempotencyClaim: claim,
-        // revalidateAuthorization above already ran on this executor in this
-        // transaction (fence before claim); pass its fresh result so admission
-        // skips the redundant entry revalidation.
-        prevalidatedAuthorization: authorized.value,
-      }, sqlOptions);
+      const admitted = await admission.authorizeAndReserve(
+        {
+          ...input,
+          idempotencyClaim: claim,
+          // revalidateAuthorization above already ran on this executor in this
+          // transaction (fence before claim); pass its fresh result so admission
+          // skips the redundant entry revalidation.
+          prevalidatedAuthorization: authorized.value,
+        },
+        sqlOptions,
+      );
       if (admitted.decision !== 'allow') return admitted;
       const binding = admitted.value.idempotencyBinding;
       if (
@@ -2104,17 +2169,26 @@ export function resolveManagedSaasFastGatewayConfiguration(
       !value.allocationOwner ||
       (value.reuseConnections !== undefined && typeof value.reuseConnections !== 'boolean') ||
       (value.receiptMode !== undefined && !['durable', 'memory-queue'].includes(value.receiptMode)) ||
-      (value.receiptQueue !== undefined && value.receiptMode !== 'memory-queue') ||
+      (value.receiptQueue !== undefined &&
+        (value.receiptMode !== 'memory-queue' ||
+          !value.receiptQueue ||
+          typeof value.receiptQueue !== 'object' ||
+          Array.isArray(value.receiptQueue))) ||
       (value.allocationTrancheMinorUnits !== undefined &&
-        (typeof value.allocationTrancheMinorUnits !== 'string' || !/^[1-9][0-9]*$/.test(value.allocationTrancheMinorUnits))) ||
+        (typeof value.allocationTrancheMinorUnits !== 'string' ||
+          !/^[1-9][0-9]*$/.test(value.allocationTrancheMinorUnits))) ||
       (value.allocationStripes !== undefined &&
         (!Number.isSafeInteger(value.allocationStripes) || value.allocationStripes < 1 || value.allocationStripes > 8))
     )
       invalid();
     if (value.receiptQueue) {
       const bounds: Record<keyof FastReceiptQueueLimits, number> = {
-        maxEntries: 65536, maxBytes: 256 * 1024 * 1024, workers: 32, maxPerTenant: 65536,
-        maxAgeMs: 3600000, drainTimeoutMs: 3600000,
+        maxEntries: 65536,
+        maxBytes: 256 * 1024 * 1024,
+        workers: 32,
+        maxPerTenant: 65536,
+        maxAgeMs: 3600000,
+        drainTimeoutMs: 3600000,
       };
       for (const [key, limit] of Object.entries(value.receiptQueue)) {
         const maximum = bounds[key as keyof FastReceiptQueueLimits];
@@ -2134,8 +2208,12 @@ export function resolveManagedSaasFastGatewayConfiguration(
   const receiptMode = environment.MODEL_ROUTER_FAST_RECEIPT_MODE;
   const receiptQueue: Record<string, number> = {};
   for (const [key, suffix] of Object.entries({
-    maxEntries: 'MAX_ENTRIES', maxBytes: 'MAX_BYTES', workers: 'WORKERS', maxPerTenant: 'MAX_PER_TENANT',
-    maxAgeMs: 'MAX_AGE_MS', drainTimeoutMs: 'DRAIN_TIMEOUT_MS',
+    maxEntries: 'MAX_ENTRIES',
+    maxBytes: 'MAX_BYTES',
+    workers: 'WORKERS',
+    maxPerTenant: 'MAX_PER_TENANT',
+    maxAgeMs: 'MAX_AGE_MS',
+    drainTimeoutMs: 'DRAIN_TIMEOUT_MS',
   })) {
     const raw = environment[`MODEL_ROUTER_FAST_RECEIPT_${suffix}`];
     if (raw !== undefined) {
@@ -2780,15 +2858,20 @@ export function createManagedSaasGatewayProductionComposition(
       });
       // Two workers share the DB pool with durable admission and ledger work;
       // do not copy a large goroutine pool or treat capacity as usable credit.
-      const receipts = fastConfig.receiptMode === 'memory-queue'
-        ? new FastReceiptQueue({ journal, ...fastConfig.receiptQueue, observe: options.fastReceiptQueueObserver })
-        : undefined;
+      const receipts =
+        fastConfig.receiptMode === 'memory-queue'
+          ? new FastReceiptQueue({ journal, ...fastConfig.receiptQueue, observe: options.fastReceiptQueueObserver })
+          : undefined;
       const checkFastReady = createFastGatewayReadiness({ admission, journal, snapshots, receipts });
-      fastReadiness = async () => !fastStopping && await checkFastReady();
-      const connectorPool = fastConfig.reuseConnections ? new FastPinnedConnectorPool({
-        createConnector: options.providerHttpTestAddressCapability ? createPinnedProviderHttpTestConnectorFactory(options.providerHttpTestAddressCapability) : createPinnedProviderHttpConnector,
-        maximumEntries: Math.min(4096, Math.max(64, options.maxHttpInFlight ?? 256)),
-      }) : undefined;
+      fastReadiness = async () => !fastStopping && (await checkFastReady());
+      const connectorPool = fastConfig.reuseConnections
+        ? new FastPinnedConnectorPool({
+            createConnector: options.providerHttpTestAddressCapability
+              ? createPinnedProviderHttpTestConnectorFactory(options.providerHttpTestAddressCapability)
+              : createPinnedProviderHttpConnector,
+            maximumEntries: Math.min(4096, Math.max(64, options.maxHttpInFlight ?? 256)),
+          })
+        : undefined;
       closeFastResources = async () => {
         snapshots.markUnavailable();
         fastReadiness = async () => false;
@@ -2831,16 +2914,17 @@ export function createManagedSaasGatewayProductionComposition(
       });
     });
     void ready.catch(() => undefined); // requests/readiness observe the same failure, not an unhandled rejection
-    fastGateway = { execute: async (input) => {
-      if (fastStopping) throw new ManagedSaasGatewayCompositionError('UNAVAILABLE');
-      return (await ready).execute(input);
-    } };
+    fastGateway = {
+      execute: async (input) => {
+        if (fastStopping) throw new ManagedSaasGatewayCompositionError('UNAVAILABLE');
+        return (await ready).execute(input);
+      },
+    };
     fastClose = async () => {
       await ready.catch(() => undefined);
       await closeFastResources?.();
     };
   }
-
 
   const keyService = new KeyService(database, {
     resolver: new PostgresSupplyProfileResolver(database),
@@ -2879,7 +2963,9 @@ export function createManagedSaasGatewayProductionComposition(
   return createManagedSaasGatewayComposition({
     ...(fastGateway ? { fastGateway } : {}),
     ...(options.fastGatewayDiagnostic ? { fastGatewayDiagnostic: options.fastGatewayDiagnostic } : {}),
-    ...(options.continuationHistoryResolver ? { continuationHistoryResolver: options.continuationHistoryResolver } : {}),
+    ...(options.continuationHistoryResolver
+      ? { continuationHistoryResolver: options.continuationHistoryResolver }
+      : {}),
     ...(options.requestDiagnostics ? { requestDiagnostics: options.requestDiagnostics } : {}),
     authenticator: new CachedKeyAuthenticator(keyService),
     ...(options.capacityCompletion ? { capacityCompletion: options.capacityCompletion } : {}),
@@ -2933,9 +3019,12 @@ export function createManagedSaasGatewayProductionComposition(
       ...(options.dispatchObserver ? { observer: options.dispatchObserver } : {}),
     },
     lifecycle: {
-      stopAdmission: () => { fastStopping = true; },
+      stopAdmission: () => {
+        fastStopping = true;
+      },
       ...(fastConfig?.receiptMode === 'memory-queue'
-        ? { handoffTimeoutMs: Math.max(options.timeoutMs, fastConfig.receiptQueue?.drainTimeoutMs ?? 10000) } : {}),
+        ? { handoffTimeoutMs: Math.max(options.timeoutMs, fastConfig.receiptQueue?.drainTimeoutMs ?? 10000) }
+        : {}),
       close: async () => {
         // G-A1: stop the media recovery loops before the KMS (their PG
         // leases expire on their own; an in-flight cycle finishes first).
@@ -2991,7 +3080,9 @@ export function createManagedSaasGatewayProductionComposition(
           migrationHead,
           dependencies: {
             'provider-credential-kms': kmsReady,
-            ...(fastReadiness ? { 'fast-data-plane': (await fastReadiness()) ? 'ok' as const : 'error' as const } : {}),
+            ...(fastReadiness
+              ? { 'fast-data-plane': (await fastReadiness()) ? ('ok' as const) : ('error' as const) }
+              : {}),
             ...(capabilityFactsReady ? { 'provider-capability-facts': capabilityFactsReady } : {}),
           },
           ...(providerCapabilities ? { providerCapabilities } : {}),

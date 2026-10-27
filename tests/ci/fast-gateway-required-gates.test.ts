@@ -14,9 +14,23 @@ const redis = 'tests/saas/gateway/fast/redis-admission.local.integration.test.ts
 const native = 'tests/saas/gateway/fast/native-http.postgres.integration.test.ts';
 const runtime = 'tests/saas/gateway/fast/native-http-runtime-fixture.ts';
 const seed = 'tests/saas/gateway/fast/native-http-seed-fixture.ts';
+const receiptUnits = [
+  'tests/saas/gateway/fast/receipt-queue.test.ts',
+  'tests/saas/gateway/fast/executor.test.ts',
+  'tests/saas/gateway/fast/configuration.test.ts',
+  'tests/saas/gateway/fast/readiness.test.ts',
+  'tests/saas/gateway/fast/terminal-gate.test.ts',
+  'tests/saas/gateway/fast/failure-diagnostic.test.ts',
+  'tests/server/managed-saas-gateway-composition.test.ts',
+  'tests/server/managed-saas-shutdown.test.ts',
+];
+const receiptUnitCommand = `node --import tsx --test ${receiptUnits.join(' ')}`;
 const provision = 'bash tests/saas/db/managed-postgres-runtime-privileges.integration.sh';
 const strictRoots = [
   'executor.test.ts',
+  'receipt-queue.test.ts',
+  'configuration.test.ts',
+  'readiness.test.ts',
   'journal.test.ts',
   'journal.postgres.integration.test.ts',
   'populated-upgrade.postgres.integration.test.ts',
@@ -77,7 +91,7 @@ function validate(source: string): void {
     /\b(?:if|continue-on-error|needs|paths|paths-ignore):|\|\|\s*true|upload-artifact|\bFLUSHALL\b|pg_stat_statements|run-current-r9|managed-postgres-commercial-gateway/,
   );
   const actual = steps(source);
-  assert.equal(actual.length, 9, 'no hidden bootstrap, preseed, or secret-artifact steps');
+  assert.equal(actual.length, 10, 'no hidden bootstrap, preseed, or secret-artifact steps');
   assert.equal(actual[0]?.block.split('\n')[0], 'uses: actions/checkout@v4');
   assert.equal(actual[2]?.run, 'npm ci');
   assert.equal(actual[3]?.run, 'node --import tsx --test tests/ci/fast-gateway-required-gates.test.ts');
@@ -101,6 +115,7 @@ function validate(source: string): void {
     ].join(' '),
   );
   assert.equal(actual[5]?.run, provision);
+  assert.equal(actual[9]?.run, receiptUnitCommand, 'queue and lifecycle assertions must execute, not just compile');
   for (const [index, command, env] of [
     [
       6,
@@ -147,6 +162,8 @@ test('required fast wiring rejects disabled roots, altered roles, missing tools 
     ],
     ['postgresql-client openssl redis-server', 'postgresql-client openssl'],
     ['--lib ES2023 --strict', '--lib ES2023'],
+    ['          tests/saas/gateway/fast/receipt-queue.test.ts\n', ''],
+    [receiptUnitCommand, 'echo skipped queue tests'],
     [`          ${runtime}\n`, ''],
     [`          ${seed}\n`, ''],
     [`          ${resolution}\n`, ''],

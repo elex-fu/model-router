@@ -1213,7 +1213,14 @@ class LifecycleResponse extends EventEmitter {
 }
 
 /** Real preparation and dispatch, with an explicit post-EOF settlement barrier and no sockets or database. */
-function lifecycleComposition(options: { close?: () => Promise<void>; stopAdmission?: () => void; handoffTimeoutMs?: number; maxHttpInFlight?: number } = {}) {
+function lifecycleComposition(
+  options: {
+    close?: () => Promise<void>;
+    stopAdmission?: () => void;
+    handoffTimeoutMs?: number;
+    maxHttpInFlight?: number;
+  } = {},
+) {
   const events: string[] = [];
   const executor: SqlExecutor = { query: async () => ({ rows: [], rowCount: 0 }) };
   const evidence = new Map<string, PreparedRequestEvidenceRecord>();
@@ -2427,7 +2434,8 @@ test('production builder binds the real database transaction and does not alloca
         assert.equal(input.protocol, authority().route.protocol);
         assert.equal(input.clientKey, 'client-retry-key');
         assert.ok([REQUEST_A_ID, REQUEST_B_ID].includes(input.requestId));
-        if (authorizationDenied) return rejectRequestPreparation('entitlement_denied', 'Fixture authority is no longer active.');
+        if (authorizationDenied)
+          return rejectRequestPreparation('entitlement_denied', 'Fixture authority is no longer active.');
         return allowRequestPreparation(input.entitlement);
       },
       authorizeAndReserve: async (input) => {
@@ -2893,13 +2901,20 @@ test('production builder binds the real database transaction and does not alloca
   const beforeLateDenial = structuredClone([...persisted.entries()]);
   const eventsBeforeLateDenial = admissionEvents.length;
   denyAfterExistingRead = true;
-  const lateDenied = await dependencies.admission.authorizeAndReserve(wrappedAdmissionInput(REQUEST_B_ID, 'attempt-after-existing-read'), {
-    executor: claimExecutor,
-  });
+  const lateDenied = await dependencies.admission.authorizeAndReserve(
+    wrappedAdmissionInput(REQUEST_B_ID, 'attempt-after-existing-read'),
+    {
+      executor: claimExecutor,
+    },
+  );
   assert.equal(lateDenied.decision, 'reject');
   if (lateDenied.decision === 'reject') {
     assert.equal(lateDenied.code, 'entitlement_denied');
-    assert.equal(lateDenied.canonicalRequest, undefined, 'a post-wait authorization refusal cannot expose a canonical request');
+    assert.equal(
+      lateDenied.canonicalRequest,
+      undefined,
+      'a post-wait authorization refusal cannot expose a canonical request',
+    );
   }
   assert.deepEqual(admissionEvents.slice(eventsBeforeLateDenial), ['revalidate', 'claim', 'lookup', 'revalidate']);
   assert.equal(downstreamAdmissionInputs.length, 1, 'a late authorization refusal never reaches financial admission');
@@ -3030,7 +3045,9 @@ test('closing stops new admission before pending post-EOF handoff, then waits fo
     await first.entered;
     assert.equal(first.response.writableEnded, true);
     let closed = false;
-    const closing = graph.composition.close().then(() => { closed = true; });
+    const closing = graph.composition.close().then(() => {
+      closed = true;
+    });
     await lifecycleTurn();
     assert.deepEqual(stopped, ['stop']);
     const before = { ...graph.counters };
@@ -3048,7 +3065,10 @@ test('closing stops new admission before pending post-EOF handoff, then waits fo
     drain.resolve();
     await closing;
     assert.equal(closed, true);
-  } finally { drain.resolve(); await graph.cleanup(); }
+  } finally {
+    drain.resolve();
+    await graph.cleanup();
+  }
 });
 
 test('handoff timeout is explicit and never closes financial dependencies under pending post-EOF work', async () => {
@@ -3060,5 +3080,7 @@ test('handoff timeout is explicit and never closes financial dependencies under 
     await assert.rejects(graph.composition.close(), /FAST_RECEIPT_HANDOFF_TIMEOUT/);
     assert.equal(graph.closeCalls, 0);
     assert.equal(first.state.handlerSettled, false);
-  } finally { await graph.cleanup(); }
+  } finally {
+    await graph.cleanup();
+  }
 });

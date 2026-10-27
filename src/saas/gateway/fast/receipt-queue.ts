@@ -289,7 +289,8 @@ export class FastReceiptQueue {
     const { receipt, canonical } = capture(input);
     if (
       !decimal(completion.retainedLiabilityMinorUnits) ||
-      (completion.currency !== null && !/^[A-Z]{3}$/.test(completion.currency)) ||
+      (completion.currency !== null &&
+        (typeof completion.currency !== 'string' || !/^[A-Z]{3}$/.test(completion.currency))) ||
       (completion.currency === null && completion.retainedLiabilityMinorUnits !== '0') ||
       (receipt.verification && receipt.verification.priceSnapshot.customerPrice.currency !== completion.currency) ||
       (completion.actualTokenUnits !== undefined &&

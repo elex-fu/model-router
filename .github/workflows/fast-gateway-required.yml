@@ -61,6 +61,9 @@ jobs:
           --lib ES2023 --strict --esModuleInterop --skipLibCheck --types node
           src/types/busboy.d.ts
           tests/saas/gateway/fast/executor.test.ts
+          tests/saas/gateway/fast/receipt-queue.test.ts
+          tests/saas/gateway/fast/configuration.test.ts
+          tests/saas/gateway/fast/readiness.test.ts
           tests/saas/gateway/fast/journal.test.ts
           tests/saas/gateway/fast/journal.postgres.integration.test.ts
           tests/saas/gateway/fast/populated-upgrade.postgres.integration.test.ts
@@ -111,3 +114,5 @@ jobs:
         run: node --import tsx --test tests/saas/gateway/fast/native-http.postgres.integration.test.ts
       # Secrets exist only in an owned mode-0700 temporary fixture directory and
       # child environment; cleanup runs on success and failure. Never upload it.
+      - name: Run required receipt queue, terminal, lifecycle and configuration contracts
+        run: node --import tsx --test tests/saas/gateway/fast/receipt-queue.test.ts tests/saas/gateway/fast/executor.test.ts tests/saas/gateway/fast/configuration.test.ts tests/saas/gateway/fast/readiness.test.ts tests/saas/gateway/fast/terminal-gate.test.ts tests/saas/gateway/fast/failure-diagnostic.test.ts tests/server/managed-saas-gateway-composition.test.ts tests/server/managed-saas-shutdown.test.ts

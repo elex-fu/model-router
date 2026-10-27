@@ -984,3 +984,36 @@ test('default captured receipt failure stays conservative on definite failure an
     assert.equal(s.calls.filter((c) => c === 'fetch').length, 1);
   }
 });
+
+test('async mode never enqueues incomplete upstream cancellation/error as a successful receipt', async () => {
+  const s = setup({}, true, true);
+  const queue = new FastReceiptQueue({ journal: s.options.journal });
+  const executor = new FastGatewayExecutor({
+    ...s.options,
+    receiptQueue: queue,
+    admission: splitAdmission(s),
+    transport: {
+      ...s.options.transport,
+      fetch: async () => {
+        s.calls.push('fetch');
+        return new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(Buffer.from('data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'));
+              queueMicrotask(() => controller.error(new Error('upstream interrupted')));
+            },
+          }),
+          { headers: { 'content-type': 'text/event-stream' } },
+        );
+      },
+    },
+  });
+  await assert.rejects(executor.execute(s.input));
+  assert.equal(queue.snapshot().accepted, 0);
+  assert.equal(s.ended(), false);
+  assert.equal(s.receipts.length, 1);
+  assert.equal(s.receipts[0].outcome, 'unknown');
+  assert.equal(s.calls.filter((c) => c === 'fetch').length, 1);
+  assert.equal(s.calls.includes('release-concurrency'), false);
+  await queue.close();
+});

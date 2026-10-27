@@ -109,3 +109,23 @@ test('final receipt memory mode is explicit and all queue budgets are validated'
   ])
     assert.throws(() => resolveManagedSaasFastGatewayConfiguration({}, { ...environment, ...changed }));
 });
+
+test('untyped callers cannot pass null, scalar or array queue settings', () => {
+  for (const receiptQueue of [null, 5, []]) {
+    assert.throws(() =>
+      resolveManagedSaasFastGatewayConfiguration(
+        {
+          fastGateway: {
+            mode: 'reserved-max',
+            redisUrl: environment.MODEL_ROUTER_FAST_REDIS_URL,
+            namespace: 'fixture',
+            allocationOwner: 'gateway-a',
+            receiptMode: 'memory-queue',
+            receiptQueue: receiptQueue as never,
+          },
+        },
+        {},
+      ),
+    );
+  }
+});
