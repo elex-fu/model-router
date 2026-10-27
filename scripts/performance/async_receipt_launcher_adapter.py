@@ -64,16 +64,17 @@ def adapt(source, *, base_directory, observer_directory):
         "for(const child of gateways)assert.equal(child.exitCode,null,'Gateway exited during paired benchmark');",
         "for(const child of gateways)assert.ok(child.exitCode===null && child.signalCode===null,'Gateway exited during async functional fixture');")
     old_cleanup = "  for(const child of gateways)if(child.exitCode===null){child.kill('SIGTERM');await Promise.race([new Promise(resolve=>child.once('exit',resolve)),delay(10000)]);if(child.exitCode===null)child.kill('SIGKILL');}"
-    new_cleanup = r'''  const gatewayCleanup = [];
+    new_cleanup = r'''  const { waitForExit } = await import(EXIT_HELPER);
+  const gatewayCleanup = [];
   const active = child => child.exitCode === null && child.signalCode === null;
   for (const child of gateways) {
     let forcedKill = false;
     if (active(child)) {
       child.kill('SIGTERM');
-      await Promise.race([new Promise(resolve => child.once('exit', resolve)), delay(45000)]);
+      await waitForExit(child, 45000);
       if (active(child)) {
         forcedKill = true; child.kill('SIGKILL');
-        await Promise.race([new Promise(resolve => child.once('exit', resolve)), delay(5000)]);
+        await waitForExit(child, 5000);
       }
     }
     gatewayCleanup.push({ pid: child.pid, exitCode: child.exitCode, signal: child.signalCode, forcedKill, exited: !active(child) });
@@ -82,7 +83,7 @@ def adapt(source, *, base_directory, observer_directory):
     allExited: gatewayCleanup.every(item => item.exited),
     allGraceful: gatewayCleanup.every(item => item.exited && item.exitCode === 0 && item.signal === null && !item.forcedKill),
     children: gatewayCleanup,
-  }, null, 2) + '\n', { mode: 0o600 });'''
+  }, null, 2) + '\n', { mode: 0o600 });'''.replace("EXIT_HELPER", json.dumps((observers / "async-receipt-child-exit.cjs").as_uri()))
     source = replace_once(source, old_cleanup, new_cleanup)
     return "// GENERATED functional async adapter; original GEN17 launcher remains untouched.\n" + source
 
