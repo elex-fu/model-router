@@ -113,6 +113,9 @@ function install() {
     fs.renameSync(`${output}.tmp`, output);
   }
   process.on('SIGUSR2', dump);
+  // Dedicated metrics-only signal: the historical fixture's SIGUSR2 handler
+  // also queries prepared-statement diagnostics. Pilot telemetry must not.
+  process.on('SIGHUP', dump);
   process.on('SIGWINCH', () => { metrics.reset(); dump(); });
   process.on('exit', dump);
   return metrics;
