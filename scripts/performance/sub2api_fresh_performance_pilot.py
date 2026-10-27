@@ -1,4 +1,4 @@
-"""Fresh pinned Sub2api c32/60s arm; diagnostic, never a cross-run parity claim.
+"""Pinned Sub2api c32/60s or finite c200 arm; diagnostic, never a parity claim.
 
 Reuses the external GEN17 start_sub/sub_drain fixture, not its periodic SQL
 sampler. Importing this module starts nothing. --execute AND the root-owned
@@ -37,6 +37,10 @@ HARNESS_SHA256 = {
 }
 WARM_SUCCESSES = 138
 FEE = Decimal("0.0000045")
+PROFILES = {
+    "c32": {"count": 1000000, "concurrency": 32, "duration": 60, "cap": 64},
+    "c200": {"count": 10000, "concurrency": 200, "duration": 0, "cap": 256},
+}
 SHARED_ENV_FORBIDDEN = (
     "GOMAXPROCS", "GODEBUG", "GOGC", "GOMEMLIMIT", "LD_PRELOAD", "LD_AUDIT", "LD_LIBRARY_PATH",
     "PGOPTIONS", "PGSERVICE", "PGSERVICEFILE", "PGSYSCONFDIR", "PAIR_RECOVER_AUTHORITY_DBS",
@@ -46,6 +50,20 @@ SHARED_ENV_FORBIDDEN = (
 def require(condition, message):
     if not condition:
         raise AssertionError(message)
+
+
+def profile_config(name="c32"):
+    require(name in PROFILES, "SUB_FRESH_PROFILE")
+    return dict(PROFILES[name])
+
+
+def verify_profile(raw, profile):
+    require(raw["concurrency"] == profile["concurrency"], "SUB_FRESH_PROFILE_CONCURRENCY")
+    require(math.isfinite(raw["duration_s"]) and raw["duration_s"] > 0, "SUB_FRESH_PROFILE_DURATION")
+    if profile["duration"]:
+        require(60 <= raw["duration_s"] <= 120, "SUB_FRESH_C32_DURATION")
+    else:
+        require(raw["requests"] == profile["count"], "SUB_FRESH_FINITE_REQUEST_COUNT")
 
 
 def sha256_file(path):
@@ -264,11 +282,13 @@ def main(argv=None):
     parser.add_argument("--label", required=True)
     parser.add_argument("--generation", type=int, required=True)
     parser.add_argument("--node-summary", type=Path)
+    parser.add_argument("--profile", choices=tuple(PROFILES), default="c32")
     args = parser.parse_args(argv)
     if not args.execute:
         parser.error("--execute and root quiet-window GO required; no service was started")
     require(re.fullmatch(r"sub2api-fresh-pilot-[a-z0-9-]+", args.label) is not None, "SUB_FRESH_LABEL")
     require(args.generation > 0, "SUB_FRESH_GENERATION")
+    profile = profile_config(args.profile)
     shared_environment = verify_shared_environment(os.environ)
     require(args.source.resolve() == Path(__file__).resolve().parents[2], "SUB_FRESH_RUNNER_SOURCE_IDENTITY")
     revision(args.source, args.expected_source)
@@ -287,9 +307,9 @@ def main(argv=None):
     require(args.sub_source.resolve() == Path("/workspace/scratch/381a7e57e000/sub2api-comparison"),
             "SUB_FRESH_BUNDLED_PRICING_SOURCE")
     require(not list((A / "results").glob(args.label + "-*")), "SUB_FRESH_REFUSE_OVERWRITE")
-    os.environ.update(PAIR_CONCURRENCY_CAP="64", PAIR_MOCK_DELAY_MS="5", PAIR_WINDOW_GENERATION=str(args.generation),
+    os.environ.update(PAIR_CONCURRENCY_CAP=str(profile["cap"]), PAIR_MOCK_DELAY_MS="5", PAIR_WINDOW_GENERATION=str(args.generation),
                       PAIR_QUIET_WINDOW_CONFIRMED="1", PAIR_WARM_PROTOCOL="matched-v2")
-    args.mode, args.replicates = "sustained", 1
+    args.mode, args.replicates = "sustained" if args.profile == "c32" else "c200", 1
 
     class Pilot(Evaluation):
         def __init__(self, options):
@@ -322,7 +342,7 @@ def main(argv=None):
     fixture = Pilot(args)
     admitted = False
     result = {"passed": False, "stage": "incomplete"}
-    name = "timed-c32-sub"
+    name = "timed-" + args.profile + "-sub"
     previous_handlers = {}
     try:
         wait_active(fixture)
@@ -344,7 +364,9 @@ def main(argv=None):
             "generation": args.generation, "harness_hashes": HARNESS_SHA256,
             "runner_sha256": sha256_file(__file__),
             "source_provenance": "Exact GEN17 recorded binary hash plus pinned clean source checkout; not a fresh reproducible build proof.",
-            "database_pool_max_idle": [16, 16], "user_and_each_account_cap": 64, "provider_accounts": 4,
+            "profile": args.profile, "timed_profile": profile,
+            "database_pool_max_idle": [16, 16], "user_and_each_account_cap": profile["cap"], "provider_accounts": 4,
+            "runtime_worker_pool_sizes": None, "runtime_worker_pool_scope": "Not observed; source defaults are not substituted for runtime evidence.",
             "run_mode": "standard", "model": "gpt-4o-mini", "max_tokens": 64,
             "actual_tokens": {"input": 10, "output": 5}, "actual_fee": str(FEE),
             "key_quota_and_5h_1d_7d_limits": 1000000, "initial_balance": 1000000,
@@ -397,7 +419,7 @@ def main(argv=None):
         guard = threading.Thread(target=quiet_guard, daemon=True)
         guard.start()
         try:
-            raw = fixture.client(name, 1000000, 32, 60)
+            raw = fixture.client(name, profile["count"], profile["concurrency"], profile["duration"])
             total = WARM_SUCCESSES + raw["success"]
             fixture.save(name + "-immediate", sub_census(fixture, db))
             final = sub_drain(fixture, name, db, total)
@@ -415,7 +437,8 @@ def main(argv=None):
         clock = clock_proof(raw, finish_wall, offset_before, offset_after)
         checks = financial_checks(final, total)
         summary = {"diagnostic_only": True, "implementation": "sub2api", "source_commit": SUB_COMMIT,
-            "runner_source_commit": args.expected_source, "client": {k: v for k, v in raw.items() if k != "samples"},
+            "runner_source_commit": args.expected_source, "profile": args.profile, "timed_profile": profile,
+            "client": {k: v for k, v in raw.items() if k != "samples"},
             "client_completion_success_rps": raw["throughput_success_rps"],
             "client_plus_DB_financial_drain_seconds": clock["financial_seconds"],
             "client_plus_DB_financial_drain_success_rps": raw["success"] / clock["financial_seconds"] if clock["stable_within_1ms"] else None,
@@ -433,7 +456,7 @@ def main(argv=None):
             "node_comparison": "Independent Node result only; CPU must include both business workers plus RR primary. No ratio is computed."}
         fixture.save(name + "-summary", summary)
         verify_raw(raw)
-        require(raw["concurrency"] == 32 and 60 <= raw["duration_s"] <= 120, "SUB_FRESH_C32_DURATION")
+        verify_profile(raw, profile)
         mock_proof = verify_mock(mock_before, mock_after, raw["success"])
         fixture.save(name + "-mock-proof", mock_proof)
         require(all(checks.values()) and clock["stable_within_1ms"] and summary["quiet"]["valid"], "SUB_FRESH_FINAL_GATE")

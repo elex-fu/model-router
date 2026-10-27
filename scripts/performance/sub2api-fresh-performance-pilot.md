@@ -1,8 +1,21 @@
-# Pinned Sub2api fresh c32 diagnostic arm
+# Pinned Sub2api fresh diagnostic arms
 
 `sub2api_fresh_performance_pilot.py` runs only an explicitly authorized,
-fresh Sub2api JSON c32/60s arm. It is not a production launcher, c200 runner,
+fresh Sub2api JSON arm. It is not a production launcher,
 new upstream version download, or an automatic performance-parity verdict.
+
+Exactly two test profiles are supported:
+
+| `--profile` | Timed requests | Concurrency | User / each account cap |
+| --- | --- | --- | --- |
+| `c32` (default, unchanged) | 60 seconds | 32 | 64 |
+| `c200` | Exactly 10,000 attempts, no duration flag | 200 | 256 |
+
+The c200 cap uses the existing pinned fixture's supported seed path, not a
+product change or performance tuning. Both profiles keep PG pool16, pricing,
+max_tokens64, mock5ms, the pinned client and the same 138-success c32 warm-up.
+There is no extra c200 warm-up or dropped initial/cold-tail sample. Failures are
+registered as failures; they are not replaced or treated as performance parity.
 
 ## Before execution
 
@@ -33,6 +46,9 @@ python3 scripts/performance/sub2api_fresh_performance_pilot.py \
   --label sub2api-fresh-pilot-unique-lowercase-label
 ```
 
+For the finite c200 case, add `--profile c200` and use a distinct label and a
+separately authorized quiet generation. Omitting the flag preserves c32/60s.
+
 `--node-summary PATH` optionally records a hash-qualified independent two-business
 Node summary with valid finance and both-business-plus-primary CPU accounting.
 It never computes a cross-run ratio or silently excludes the primary.
@@ -48,11 +64,13 @@ environment is inherited. The Sub process separately uses a minimal allowlist.
 - Existing `/tmp/sub2api-bench-20261026/sub2api`, standard/release mode.
 - Existing paired services PG15462, Redis16399, TLS mock18453; **not** the old
   `sub2api-benchmark-runtime` standalone cluster. Fresh Sub database/config.
-- PG app pool16/idle16; user and each of four active provider accounts cap64;
+- PG app pool16/idle16; user and each of four active provider accounts cap64
+  (`c32`) or cap256 (`c200`);
   original nonzero key quota/monetary windows and bundled gpt-4o-mini pricing.
 - Fixed 10input/5output usage; exact Sub fee0.0000045 per successful response.
 - 10 serial bootstrap, CHECKPOINT,128/c32 warm, exact DB drain, minimum1s gap.
-- One existing timing-client binary, c32/60s, full retained raw samples.
+- One existing timing-client binary; full retained raw samples for either profile.
+- Runtime worker-pool sizes are unknown, not inferred from source defaults.
 - No periodic SQL census, queue observer, profiler or inference hooks; only
   quiet-marker file checks every second during client and financial drain.
 - CPU includes every thread of the Sub process through DB financial drain;

@@ -39,6 +39,54 @@ def process():
             "resident_bytes": 10000}
 
 
+class ProfileTests(unittest.TestCase):
+    def test_default_c32_profile_is_unchanged(self):
+        self.assertEqual(pilot.profile_config(), {"count": 1000000, "concurrency": 32, "duration": 60, "cap": 64})
+        self.assertEqual(pilot.profile_config(), pilot.profile_config("c32"))
+        self.assertEqual(pilot.WARM_SUCCESSES, 138)
+
+    def test_c200_is_finite_10000_with_256_seed_caps(self):
+        self.assertEqual(pilot.profile_config("c200"), {"count": 10000, "concurrency": 200, "duration": 0, "cap": 256})
+        self.assertTrue(all(pilot.financial_checks(census(10138), 10138).values()))
+
+    def test_profiles_are_only_the_two_supported_cases_and_return_independent_values(self):
+        for name in ("serial", "c201", "", None):
+            with self.assertRaisesRegex(AssertionError, "PROFILE"):
+                pilot.profile_config(name)
+        changed = pilot.profile_config("c200")
+        changed["cap"] = 64
+        self.assertEqual(pilot.profile_config("c200")["cap"], 256)
+
+    def test_c32_keeps_original_duration_and_concurrency_gate(self):
+        profile = pilot.profile_config()
+        value = {"requests": 10000, "concurrency": 32, "duration_s": 60.1}
+        pilot.verify_profile(value, profile)
+        for change in ({"concurrency": 200}, {"duration_s": 59.9}, {"duration_s": 120.1}, {"duration_s": float("nan")}):
+            with self.assertRaises(AssertionError):
+                pilot.verify_profile({**value, **change}, profile)
+
+    def test_c200_requires_every_planned_attempt_without_sustained_duration_gate(self):
+        profile = pilot.profile_config("c200")
+        value = {"requests": 10000, "concurrency": 200, "duration_s": 20}
+        pilot.verify_profile(value, profile)
+        for change in ({"requests": 9999}, {"requests": 10001}, {"concurrency": 32}, {"duration_s": 0}, {"duration_s": float("inf")}):
+            with self.assertRaises(AssertionError):
+                pilot.verify_profile({**value, **change}, profile)
+
+    def test_c200_all_attempts_and_cold_tail_survive_even_when_http_gate_fails(self):
+        value = raw(10000)
+        value["samples"][0]["MS"] = 15000
+        self.assertEqual(pilot.verify_raw(value)["attempts"], 10000)
+        value["success"] -= 1
+        value["status_counts"] = {"200": 9999, "429": 1}
+        value["samples"][0]["Status"] = 429
+        distribution = pilot.distribution([row["MS"] for row in value["samples"]])
+        self.assertEqual(distribution["count"], 10000)
+        self.assertEqual(distribution["max"], 15000)
+        with self.assertRaisesRegex(AssertionError, "HTTP_FAILURE"):
+            pilot.verify_raw(value)
+
+
 class PinAndSafetyTests(unittest.TestCase):
     def test_pins_are_complete_sha256_and_sub_revision_is_fixed(self):
         self.assertEqual(pilot.SUB_COMMIT, "ba81c7fd758e425d67f856d601147ef0c5263d3f")
