@@ -103,6 +103,42 @@ test('all scope keys have one namespace hash tag, include no raw identifiers, an
   }
 });
 
+test('denial passthrough validates retryAfterMs and always appends the shared reject key last', async () => {
+  let seenKeys: string[] = [];
+  const denial = async (reply: string) => {
+    const admission = create({
+      eval: async (_script, options) => {
+        seenKeys = options.keys;
+        return reply;
+      },
+    });
+    return admission.acquire(request());
+  };
+  // Well-formed denial with a valid retry hint passes through unchanged.
+  assert.deepEqual(await denial('{"ok":false,"reason":"rate_limited","retryAfterMs":500}'), {
+    allowed: false,
+    reason: 'rate_limited',
+    retryAfterMs: 500,
+  });
+  const last = seenKeys[seenKeys.length - 1] as string;
+  assert.match(last, /^mr:fast:\{[0-9a-f]{64}\}:reject:[0-9a-f]{64}$/);
+  // Out-of-range or non-integer retry hints are dropped; the denial still passes.
+  assert.deepEqual(await denial('{"ok":false,"reason":"quota_exceeded","retryAfterMs":0}'), {
+    allowed: false,
+    reason: 'quota_exceeded',
+  });
+  assert.deepEqual(await denial('{"ok":false,"reason":"quota_exceeded","retryAfterMs":600001}'), {
+    allowed: false,
+    reason: 'quota_exceeded',
+  });
+  // Unavailable denials also carry the retry hint (quarantine readyAt).
+  assert.deepEqual(await denial('{"ok":false,"reason":"unavailable","retryAfterMs":100}'), {
+    allowed: false,
+    reason: 'unavailable',
+    retryAfterMs: 100,
+  });
+});
+
 test('renewal failure invalidates locally without sending an implicit release', async () => {
   let calls = 0;
   const admission = create({

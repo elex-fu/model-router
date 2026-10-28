@@ -8,6 +8,7 @@ import {
   boundedOwnerName,
   ensureBoundedCreditBudget,
   readBoundedOwnerSlots,
+  readGlobalCreditBudgetRemaining,
   registerBoundedDeployment,
   releaseBoundedOwner,
   validateBoundedDeploymentSpec,
@@ -239,6 +240,28 @@ test('slow refill global headroom counts all existing epochs and remains bigint-
   await assert.rejects(ensureBoundedCreditBudget(tx, spec, randomUUID(), 'USD'), /EXISTING_BACKING_EXCEEDS_CAP/);
   cap = '101';
   await assert.rejects(ensureBoundedCreditBudget(tx, spec, randomUUID(), 'USD'), /GLOBAL_CAP_CONFLICT/);
+});
+
+test('namespace budget headroom read never mutates and clamps a broken negative state to zero', async () => {
+  const statements: string[] = [];
+  let rows: unknown[] = [{ credit_cap_minor_units: '160000000', allocated_minor_units: '150000000' }];
+  const tx: SqlExecutor = {
+    query: async <Row>(sql: string): Promise<SqlResult<Row>> => {
+      statements.push(sql);
+      return { rows: rows as Row[], rowCount: rows.length };
+    },
+  };
+  assert.equal(await readGlobalCreditBudgetRemaining(tx, randomUUID(), 'USD'), 10_000_000n);
+  assert.equal(statements.length, 1, 'pure read: no INSERT, no counter mutation');
+  assert.doesNotMatch(statements[0], /INSERT|UPDATE|DELETE/i);
+  rows = [];
+  assert.equal(await readGlobalCreditBudgetRemaining(tx, randomUUID(), 'USD'), null, 'no budget row means no cap');
+  rows = [{ credit_cap_minor_units: '100', allocated_minor_units: '101' }];
+  assert.equal(
+    await readGlobalCreditBudgetRemaining(tx, randomUUID(), 'USD'),
+    0n,
+    'pre-existing over-limit state clamps to zero headroom instead of throwing',
+  );
 });
 
 test('bounded startup retires only prior unused funds before readiness using owner then wallet fencing', async () => {

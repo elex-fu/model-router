@@ -3,6 +3,7 @@ import { Pool } from 'pg';
 import { createSaasDatabase, verifySaasRuntimeDatabasePrivileges } from '../saas/db/index.js';
 import type { SaasDatabase, SaasDatabasePool } from '../saas/db/types.js';
 import { PostgresFastGatewayJournal } from '../saas/gateway/fast/journal.js';
+import { runFastJournalRetention } from '../saas/gateway/fast/retention.js';
 import { validateDatabaseUrl } from './saas-deploy-shared.js';
 
 const DATABASE_ENV = 'MODEL_ROUTER_SAAS_GATEWAY_DATABASE_URL';
@@ -12,6 +13,11 @@ export interface SaasFastBillingWorkerOptions {
   readonly once?: boolean;
   readonly pollMs?: string | number;
   readonly batchSize?: string | number;
+  /**
+   * Enable fast-ledger retention: delete intents settled longer than this many
+   * days. Omit to preserve append-only storage exactly as before.
+   */
+  readonly retentionDays?: string | number;
   readonly allowLocalPlaintext?: boolean;
 }
 export interface SaasFastBillingWorkerDependencies {
@@ -102,6 +108,9 @@ export async function saasFastBillingWorker(
     throw new Error('Invalid fast billing worker command options.');
   const pollMs = boundedInteger(options.pollMs, 250, 10, 60000);
   const batchSize = boundedInteger(options.batchSize, 128, 1, 1000);
+  const retentionDays = boundedInteger(options.retentionDays, 0, 0, 3650);
+  if (options.retentionDays !== undefined && retentionDays < 1)
+    throw new Error('Invalid fast billing worker retention-days.');
   const env = dependencies.env ?? process.env;
   const connectionString = env[DATABASE_ENV];
   validateDatabaseUrl(connectionString, {
@@ -150,16 +159,60 @@ export async function saasFastBillingWorker(
       },
     });
     await journal.checkReady();
+    const retentionMs = retentionDays > 0 ? retentionDays * 24 * 60 * 60 * 1000 : undefined;
+    const runRetention = async () => {
+      if (retentionMs === undefined || !database) return;
+      // Errors surface through the shared failure path: a broken retention
+      // batch must not silently starve while settlement keeps succeeding.
+      const result = await runFastJournalRetention(database, { retentionMs });
+      if (result.deletedIntents > 0 || result.batches > 1)
+        writeLine(
+          JSON.stringify({
+            event: 'retention',
+            deletedIntents: result.deletedIntents,
+            batches: result.batches,
+            exhausted: result.exhausted,
+          }),
+        );
+    };
     if (options.once) {
       while (!stop.signal.aborted) {
         const count = await journal.runOnce(batchSize);
         processed += BigInt(count);
         if (count === 0) break;
       }
+      await runRetention();
     } else {
+      let retentionRunning = false;
+      const retentionTimer = retentionMs
+        ? setInterval(
+            () => {
+              if (retentionRunning || stop.signal.aborted) return;
+              retentionRunning = true;
+              void runRetention()
+                .catch(() => {
+                  failure ??= new Error(FAILURE);
+                  stop.abort();
+                })
+                .finally(() => {
+                  retentionRunning = false;
+                });
+            },
+            Math.max(10_000, pollMs * 40),
+          )
+        : undefined;
+      retentionTimer?.unref();
       if (!stop.signal.aborted) {
         journal.start();
-        writeLine(JSON.stringify({ event: 'ready', mode: 'drain-only', admission: false, redis: false }));
+        writeLine(
+          JSON.stringify({
+            event: 'ready',
+            mode: 'drain-only',
+            admission: false,
+            redis: false,
+            ...(retentionMs !== undefined ? { retentionDays } : {}),
+          }),
+        );
       }
       if (!stop.signal.aborted)
         await new Promise<void>((resolve) => {
@@ -175,6 +228,7 @@ export async function saasFastBillingWorker(
             { once: true },
           );
         });
+      if (retentionTimer) clearInterval(retentionTimer);
     }
   } catch {
     failure = new Error(FAILURE);

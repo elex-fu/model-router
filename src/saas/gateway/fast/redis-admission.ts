@@ -146,6 +146,24 @@ for i=3,4 do
     if health.untilMs>now then return cjson.encode({ok=false,reason='rate_limited',retryAfterMs=health.untilMs-now}) end
   end
 end
+-- Deny-and-stamp: a rate/quota denial records one short-lived shared reject
+-- key so a client retry storm cannot re-scan every rate bucket per retry.
+-- TTL is one bucket second: recovery is never delayed beyond it, and the
+-- stamp is advisory — the full scan still runs once the key expires. Only
+-- deterministic rate-bucket outcomes are stamped; concurrency denials are
+-- not (a release may free a slot immediately) and transient 'unavailable'
+-- failures never are. The key includes tokenUnits, so a differently sized
+-- request always receives a full scan instead of inheriting a denial.
+local rejectKey=KEYS[#KEYS]
+local function deny(reason,retryAfterMs)
+  redis.call('SET',rejectKey,cjson.encode({reason=reason,untilMs=now+1000}),'PX',1000)
+  return cjson.encode({ok=false,reason=reason,retryAfterMs=retryAfterMs or 1000})
+end
+local rawReject=redis.call('GET',rejectKey)
+if rawReject then
+  local reject=cjson.decode(rawReject)
+  if reject.untilMs>now then return cjson.encode({ok=false,reason=reject.reason,retryAfterMs=math.max(1,math.ceil(reject.untilMs-now))}) end
+end
 local rates={}
 for i,limit in ipairs(p.limits) do
   local slotKey=KEYS[3+i*2]
@@ -155,7 +173,11 @@ for i,limit in ipairs(p.limits) do
     if kind~='none' and kind~='zset' then return redis.error_reply('FAST_ADMISSION_STATE') end
     -- Expired members can be cleaned before a rejected admission; this is not a reservation.
     redis.call('ZREMRANGEBYSCORE',slotKey,'-inf',now)
-    if redis.call('ZCARD',slotKey)>=limit.concurrency then return cjson.encode({ok=false,reason='rate_limited'}) end
+    if redis.call('ZCARD',slotKey)>=limit.concurrency then
+      local soonest=redis.call('ZRANGE',slotKey,0,0,'WITHSCORES')
+      local waitMs=soonest[2] and math.max(1,math.ceil(tonumber(soonest[2])-now)) or 1000
+      return cjson.encode({ok=false,reason='rate_limited',retryAfterMs=waitMs})
+    end
   end
   local rawRate=redis.call('GET',rateKey)
   local rate=rawRate and cjson.decode(rawRate) or {buckets={}}
@@ -165,8 +187,8 @@ for i,limit in ipairs(p.limits) do
     if endMs<=now-60000 then rate.buckets[bucket]=nil
     elseif endMs>now-limit.window then requests=requests+counts[1]; tokens=tokens+counts[2] end
   end
-  if limit.rpm>0 and requests+1>limit.rpm then return cjson.encode({ok=false,reason='rate_limited'}) end
-  if limit.tpm>0 and tokens+p.tokenUnits>limit.tpm then return cjson.encode({ok=false,reason='quota_exceeded'}) end
+  if limit.rpm>0 and requests+1>limit.rpm then return deny('rate_limited',1000) end
+  if limit.tpm>0 and tokens+p.tokenUnits>limit.tpm then return deny('quota_exceeded',1000) end
   if requests>9000000000000000-1 or tokens>9000000000000000-p.tokenUnits then return cjson.encode({ok=false,reason='unavailable'}) end
   rates[i]=rate
 end
@@ -493,6 +515,12 @@ export class RedisFastGatewayAdmission implements FastGatewayAdmission {
           `${this.prefix}:slots:${digest(scope)}`,
           `${this.prefix}:rate:${digest(scope)}`,
         ]),
+        // Shared short-lived negative cache (last key, read as KEYS[#KEYS] in
+        // ACQUIRE): identical limit scopes and request size short-circuit
+        // repeated rate/quota rejections for one bucket second instead of
+        // re-scanning every rate bucket. tokenUnits is part of the identity
+        // so a differently sized request always gets a full scan.
+        `${this.prefix}:reject:${digest([scopes.map(([scope]) => scope), input.tokenUnits])}`,
       ];
       const renewInterval = Math.min(this.renewEvery, Math.max(1, Math.floor(input.ttlMs / 4)));
       const renewWindow = Math.min(input.ttlMs, renewInterval * 3);
@@ -529,7 +557,7 @@ export class RedisFastGatewayAdmission implements FastGatewayAdmission {
           allowed: false,
           reason:
             result.reason === 'rate_limited' || result.reason === 'quota_exceeded' ? result.reason : 'unavailable',
-          ...(result.retryAfterMs ? { retryAfterMs: result.retryAfterMs } : {}),
+          ...(integer(result.retryAfterMs ?? 0, 1, 600_000) ? { retryAfterMs: result.retryAfterMs } : {}),
         };
       if (
         result.token !== token ||

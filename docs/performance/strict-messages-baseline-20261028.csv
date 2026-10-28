@@ -1,0 +1,16 @@
+# T5 strict-channel /v1/messages baseline, 2026-10-28 (paired MR-strict vs s2a, same-source TLS mock https://127.0.0.1:18453)
+# MR strict = gateway without MODEL_ROUTER_FAST_GATEWAY; purge+restart between profiles (DELETE saas_redis_quota_state + Redis mr:quota* flush + gateway restart)
+# s2a = sub2api group platform=anthropic -> native Gateway.Messages; account base_url https://127.0.0.1:18453 (same TLS mock as MR strict, item-8 same-caliber pairing)
+# mr-c32-msg-json row is the clean rerun (3500/3500, zero 429, rps 32.42, p50 935.05, p95 1447.34, p99 1814.32, ttfb_p50 934.39, cpu 17.64, dur 107.97, tls_full 3500);
+#   the first attempt carried residual unknown-outcome capacity (2348 ok / 1152 429) and is excluded.
+# c64 MR rows are admission-cap-bound: strict channel holds 64 concurrent slots and per-request p50 is ~2.7-3.7s at saturation,
+#   so only ~64 requests complete per drain wave (rest 429); treat c64 MR rps as drain-wave latency, not sustained throughput.
+name,side,concurrency,stream,n,rps,success,status_200,status_429,p50_ms,p95_ms,p99_ms,ttfb_p50_ms,cpu_ms_per_req,duration_s,mock_tls_full,mock_tls_resumed
+c32-msg-json,mr-strict,32,json,3500,32.42,3500,3500,0,935.05,1447.34,1814.32,934.39,17.64,107.97,3500,0
+c32-msg-json,s2a,32,json,3500,792.86,3500,3500,0,32.16,72.4,164.98,32.13,2.11,4.41,32,0
+c32-msg-sse,mr-strict,32,sse,3500,34.55,3500,3500,0,862.49,1422.0,1722.85,861.47,17.14,101.3,3500,0
+c32-msg-sse,s2a,32,sse,3500,677.09,3500,3500,0,35.14,62.13,142.65,26.92,2.21,5.17,32,0
+c64-msg-json,mr-strict,64,json,6000,19.72,64,64,5936,2745.37,2980.26,3006.18,2744.25,29.06,3.24,64,0
+c64-msg-json,s2a,64,json,6000,670.44,6000,6000,0,87.0,169.81,242.28,86.94,2.05,8.95,7,0
+c64-msg-sse,mr-strict,64,sse,6000,15.77,64,64,5936,3681.41,3891.15,3897.66,3678.58,32.66,4.06,64,0
+c64-msg-sse,s2a,64,sse,6000,637.57,6000,6000,0,85.7,206.42,274.63,63.89,2.2,9.41,0,0

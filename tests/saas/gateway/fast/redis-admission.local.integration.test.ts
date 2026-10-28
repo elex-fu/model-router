@@ -163,6 +163,7 @@ test('real Redis authoritative fast admission', { skip: !enabled, timeout: 30000
       assert.deepEqual(await service.acquire(input({ limits: request.limits })), {
         allowed: false,
         reason: 'rate_limited',
+        retryAfterMs: 1000,
       });
     },
   );
@@ -222,8 +223,70 @@ test('real Redis authoritative fast admission', { skip: !enabled, timeout: 30000
     }
     const service = await f.open();
     const limits = { tenant: { rpm: 1 }, account: { tpm: 5 } };
-    assert.deepEqual(await service.acquire(input({ limits })), { allowed: false, reason: 'quota_exceeded' });
+    assert.deepEqual(await service.acquire(input({ limits })), {
+      allowed: false,
+      reason: 'quota_exceeded',
+      retryAfterMs: 1000,
+    });
     admitted(await service.acquire(input({ limits, tokenUnits: 4 })));
+  });
+  await t.test(
+    'quota denial stamps a one-second shared reject key; recovery and differently sized requests bypass it',
+    async () => {
+      const namespace = randomUUID();
+      const service = await f.open(namespace);
+      const limits = { account: { tpm: 5 } };
+      const request = input({ limits });
+      // tokenUnits 7 exceeds tpm 5: deterministic quota denial, retry hint 1000ms.
+      const denial = await service.acquire(request);
+      assert.deepEqual(denial, { allowed: false, reason: 'quota_exceeded', retryAfterMs: 1000 });
+      const rejectKeys = await f.inspector.keys(`${namespacePrefix(namespace)}:reject:*`);
+      assert.equal(rejectKeys.length, 1);
+      assert.ok((await f.inspector.pTTL(rejectKeys[0] as string)) <= 1000);
+      // Rewrite rate state to a shape that a full scan WOULD admit. The
+      // identical retry must still be denied from the shared reject key —
+      // this distinguishes the cached short-circuit from a fresh scan.
+      const [rateKey] = await f.inspector.keys(`${namespacePrefix(namespace)}:rate:*`);
+      assert.ok(rateKey);
+      await f.inspector.set(rateKey, JSON.stringify({ buckets: {} }), { PX: 61000 });
+      const cached = await service.acquire({ ...request, requestId: randomUUID() });
+      assert.equal(cached.allowed, false);
+      assert.equal(cached.reason, 'quota_exceeded');
+      assert.ok(
+        cached.retryAfterMs !== undefined && cached.retryAfterMs >= 1 && cached.retryAfterMs <= 1000,
+        JSON.stringify(cached),
+      );
+      // A differently sized request never inherits the denial: tokenUnits is
+      // part of the reject-key identity, so it receives a full scan and fits.
+      admitted(await service.acquire(input({ limits, tokenUnits: 1 })));
+      // Once the reject key expires, the identical request gets a full scan
+      // against the rewritten (admitting) rate state.
+      await f.inspector.del(rejectKeys[0] as string);
+      admitted(await service.acquire({ ...request, requestId: randomUUID() }));
+    },
+  );
+  await t.test('rate denial retry hints decay toward zero without re-scanning every bucket', async () => {
+    const namespace = randomUUID();
+    const service = await f.open(namespace);
+    const limits = { account: { rpm: 1 } };
+    await admitted(await service.acquire(input({ limits }))).release();
+    const first = await service.acquire(input({ limits }));
+    assert.deepEqual(first, { allowed: false, reason: 'rate_limited', retryAfterMs: 1000 });
+    // The shared reject key short-circuits the retry storm: each identical
+    // retry reports the remaining TTL instead of rescanning all rate keys.
+    let last = first.retryAfterMs ?? 1001;
+    for (let index = 0; index < 25; index++) {
+      const retry = await service.acquire(input({ limits }));
+      assert.equal(retry.allowed, false);
+      assert.equal(retry.reason, 'rate_limited');
+      assert.ok(retry.retryAfterMs !== undefined && retry.retryAfterMs <= last, JSON.stringify(retry));
+      last = retry.retryAfterMs ?? last;
+    }
+    // A different account scope is a different reject identity: it gets a
+    // full scan and is admitted.
+    admitted(await service.acquire(input({ accountId: 'account-other', limits })));
+    await delay(1050);
+    admitted(await service.acquire(input({ limits })));
   });
   await t.test('durable actual usage reconciles TPM once but never refunds RPM or unknown usage', async () => {
     const service = await f.open();
@@ -866,10 +929,13 @@ test('real Redis authoritative fast admission', { skip: !enabled, timeout: 30000
         });
         const request = input({ ttlMs: 100, limits: { account: { concurrency: 1 } } });
         assert.deepEqual(await broken.acquire(request), { allowed: false, reason: 'unavailable' });
-        assert.deepEqual(await healthy.acquire({ ...request, requestId: randomUUID() }), {
-          allowed: false,
-          reason: 'rate_limited',
-        });
+        const denied = await healthy.acquire({ ...request, requestId: randomUUID() });
+        assert.equal(denied.allowed, false);
+        assert.equal(denied.reason, 'rate_limited');
+        assert.ok(
+          denied.retryAfterMs !== undefined && denied.retryAfterMs >= 1 && denied.retryAfterMs <= 1000,
+          JSON.stringify(denied),
+        );
         await delay(330);
         admitted(await healthy.acquire({ ...request, requestId: randomUUID() }));
       } finally {

@@ -1635,6 +1635,35 @@ test('fast failure diagnostics preserve generic and typed HTTP errors without st
   }
 });
 
+test('fast admission 429 carries the Retry-After hint; other fast errors keep it absent', async () => {
+  const hinted = harness({
+    fastGateway: {
+      execute: async () => {
+        throw new FastGatewayExecutionError(429, 'FAST_RATE_LIMITED', 2);
+      },
+    },
+  });
+  assert.equal(await hinted.handler(asRequest(hinted.request), asResponse(hinted.response)), true);
+  assert.equal(hinted.response.writeHeadCalls[0]?.status, 429);
+  assert.equal(hinted.response.writeHeadCalls[0]?.headers['retry-after'], '2');
+  assert.equal(JSON.parse(String(hinted.response.endBody)).error.code, 'FAST_RATE_LIMITED');
+
+  // A fast error without a hint keeps the header absent exactly as before.
+  const plain = harness({
+    fastGateway: {
+      execute: async () => {
+        throw new FastGatewayExecutionError(503, 'FAST_GATEWAY_UNAVAILABLE');
+      },
+    },
+  });
+  assert.equal(await plain.handler(asRequest(plain.request), asResponse(plain.response)), true);
+  assert.equal(plain.response.writeHeadCalls[0]?.status, 503);
+  assert.equal(
+    Object.keys(plain.response.writeHeadCalls[0]?.headers ?? {}).some((name) => name.toLowerCase() === 'retry-after'),
+    false,
+  );
+});
+
 test('fast diagnostic failure after response start preserves abort and never sends a second response', async () => {
   const seen: FastGatewayFailureDiagnostic[] = [];
   const h = harness({

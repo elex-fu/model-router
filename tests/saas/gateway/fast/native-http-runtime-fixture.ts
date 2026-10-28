@@ -9,7 +9,7 @@ import type {
 } from '../../../../src/saas/runtime/gateway-runtime-module.js';
 
 export interface NativeFastHttpRoute {
-  protocol: 'openai';
+  protocol: 'openai' | 'anthropic';
   providerId: string;
   productId: string;
   providerModel: string;
@@ -116,13 +116,17 @@ export async function createManagedSaasGatewayRuntime(
                 }),
               },
         modelCompatibility: async (input) => {
+          // Match the capability row by the route's own endpoint so
+          // non-OpenAI protocol routes (e.g. anthropic /v1/messages) are
+          // compatible exactly when their seeded capability row says so.
+          const endpoint = input.providerProtocol === 'anthropic' ? '/v1/messages' : '/v1/chat/completions';
           const result = await options.database.query<{
             support_level: string;
             validation_state: string;
             protocol: string;
           }>(
             'SELECT support_level, validation_state, protocol FROM saas_provider_capabilities WHERE provider_id=$1 AND product_id=$2 AND model=$3 AND endpoint=ANY($4::text[]) ORDER BY version DESC LIMIT 1',
-            [input.providerId, input.productId, input.providerModel, ['/v1/chat/completions']],
+            [input.providerId, input.productId, input.providerModel, [endpoint]],
           );
           const row = result.rows[0];
           return (

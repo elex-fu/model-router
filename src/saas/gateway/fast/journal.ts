@@ -7,6 +7,7 @@ import { calculateConservativePriceHold, INPUT_BILLING_BUCKETS } from '../hold-c
 import {
   type BoundedOwnerActivation,
   ensureBoundedCreditBudget,
+  readGlobalCreditBudgetRemaining,
   verifyBoundedOwner,
 } from './bounded-deployment-budget.js';
 import { type FastCreditWaitResult, waitForFastCreditDelay, waitForFastCreditWork } from './credit-wait.js';
@@ -907,6 +908,16 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
       if (this.boundedDeployment) {
         const globalRemaining = await ensureBoundedCreditBudget(tx, this.boundedDeployment, tenantId, currency);
         if (additional > globalRemaining) additional = globalRemaining;
+      } else {
+        // Namespace journals share any registered global budget row: the
+        // migration 147 backing/limit triggers fire for EVERY allocation
+        // write, regardless of owner. Cold-start desired must therefore stay
+        // within cap - allocated; a retired-epoch residual otherwise turns
+        // each replenish commit into a deferred 23514 and every request into
+        // a 503 after a non-graceful restart. No budget row means no global
+        // cap and the pre-fix unbounded behavior is preserved.
+        const globalRemaining = await readGlobalCreditBudgetRemaining(tx, tenantId, currency);
+        if (globalRemaining !== null && additional > globalRemaining) additional = globalRemaining;
       }
       const available = allocations.rows.reduce((sum, row) => sum + BigInt(row.available_minor_units), additional);
       if (available === 0n) return;

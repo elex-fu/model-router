@@ -248,3 +248,30 @@ export async function ensureBoundedCreditBudget(
   if (remaining < 0n) throw new Error('BOUNDED_DEPLOYMENT_EXISTING_BACKING_EXCEEDS_CAP');
   return remaining;
 }
+
+/**
+ * Read-only budget headroom shared with namespace (non-bounded) journals. The
+ * migration 147 backing trigger counts every owner's allocation rows, so a
+ * namespace journal must respect any registered budget row even without a
+ * bounded deployment spec. Never creates or mutates the row; returns null when
+ * no budget row exists (no global cap configured for this tenant/currency).
+ * A pre-existing negative remaining clamps to 0: the namespace journal is not
+ * the authority that created the over-limit state, and additional=0 commits
+ * no allocation writes, so no deferred limit trigger can fire.
+ * Caller MUST hold the wallet fence.
+ */
+export async function readGlobalCreditBudgetRemaining(
+  tx: SqlExecutor,
+  tenantId: string,
+  currency: string,
+): Promise<bigint | null> {
+  const result = await tx.query<{ credit_cap_minor_units: string; allocated_minor_units: string }>(
+    `SELECT credit_cap_minor_units::text,allocated_minor_units::text FROM saas_fast_gateway_credit_budgets
+     WHERE tenant_id=$1 AND currency=$2`,
+    [tenantId, currency],
+  );
+  const budget = result.rows[0];
+  if (!budget) return null;
+  const remaining = BigInt(budget.credit_cap_minor_units) - BigInt(budget.allocated_minor_units);
+  return remaining < 0n ? 0n : remaining;
+}

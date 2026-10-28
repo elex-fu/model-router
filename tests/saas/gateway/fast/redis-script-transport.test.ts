@@ -224,7 +224,7 @@ test('transport optimization preserves all five Lua identities, including shared
   assert.deepEqual(seen, [
     { sha: '6f941e8e4c1243df508434ef4989e3ac51a966b9', bytes: 564 },
     { sha: 'a3fecfcadc58907f62cda8e834a5e0243edbfb46', bytes: 355 },
-    { sha: 'd39e166d0878ccc0e77d89f91802a1fe7787f545', bytes: 4477 },
+    { sha: 'cf994a9be7407a16eb1b895b573d638704a088dc', bytes: 5708 },
     { sha: 'd8c1c1e747e8a4d044ae06392c6aba38284c1bba', bytes: 1995 },
     release,
     release,

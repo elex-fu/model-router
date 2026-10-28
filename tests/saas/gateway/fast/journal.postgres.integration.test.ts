@@ -9,6 +9,7 @@ import { PlatformWalletLedgerService } from '../../../../src/saas/billing/servic
 import { saasAdvisoryKey, WALLET_FENCE_SQL } from '../../../../src/saas/db/advisory-lock-keys.js';
 import { createSaasDatabase } from '../../../../src/saas/db/index.js';
 import type { SaasDatabase, SqlExecutor, SqlResult } from '../../../../src/saas/db/types.js';
+import { registerBoundedDeployment } from '../../../../src/saas/gateway/fast/bounded-deployment-budget.js';
 import {
   createFastGatewayJournal,
   type FastIntent,
@@ -3743,6 +3744,96 @@ test('fast money journal real PostgreSQL: atomic reserve, durable completion, ex
       );
       assert.equal(acl.rows[0]?.allowed, false, 'gateway may read resolutions but cannot create operator evidence');
       await unauthorized.journal.close();
+    },
+  );
+
+  await t.test(
+    'namespace journal restart clamps cold-start refill to the shared global budget (no 503 storm)',
+    async () => {
+      // Incident reproduction (docs/performance/local-ab-sub2api-20261028.md,
+      // fault 2): a namespace-owner journal (no boundedDeployment) restarts
+      // while a retired-epoch residual pins part of a shared global budget row.
+      // Unclamped cold-start desired = max x concurrency x 2 then exceeds
+      // cap - allocated on every replenish commit, so the deferred migration
+      // 147 limit trigger rejects each commit and every request fails.
+      const tenantId = randomUUID();
+      await migrator.query("INSERT INTO saas_tenants(id,name,slug) VALUES ($1,'fast-journal-test',$2)", [
+        tenantId,
+        tenantId,
+      ]);
+      await migrator.transaction((tx) =>
+        billing.postVerifiedFunding(tx, {
+          tenantId,
+          currency: 'USD',
+          amountMinorUnits: '1000000000',
+          sourceOrderRef: randomUUID(),
+          idempotencyKey: randomUUID(),
+        }),
+      );
+      const owner = randomUUID();
+      async function budget() {
+        return (
+          await gateway.query<{ counter: string; cap: string; retired: string; active: string }>(
+            `SELECT allocated_minor_units::text AS counter,credit_cap_minor_units::text AS cap,
+              (SELECT COALESCE(SUM(backing_minor_units),0)::text FROM saas_fast_credit_allocations
+                WHERE tenant_id=$1 AND currency='USD' AND state='retired') AS retired,
+              (SELECT COALESCE(SUM(backing_minor_units),0)::text FROM saas_fast_credit_allocations
+                WHERE tenant_id=$1 AND currency='USD' AND state='active') AS active
+             FROM saas_fast_gateway_credit_budgets WHERE tenant_id=$1 AND currency='USD'`,
+            [tenantId],
+          )
+        ).rows[0];
+      }
+      // Pre-restart journal leaves unresolved (never-settled) credit behind.
+      const first = new PostgresFastGatewayJournal(gateway, {
+        allocationOwner: owner,
+        allocationTrancheMinorUnits: '300000000',
+      });
+      await first.replenish(tenantId, 'USD');
+      const held = await first.reserveIntent(intentFixture(tenantId, owner, priceFixture('150000000')));
+      assert.equal(held.kind, 'created');
+      await first.close(); // Missing receipt stays retired-backed: residual 150000000.
+
+      // A global budget row now exists (bounded deployment registered it);
+      // its counter must already include the namespace residual (150000000).
+      const deployment = {
+        deploymentId: `restart-clamp:${randomUUID()}`,
+        policyDigest: 'd'.repeat(64),
+        creditCapMinorUnits: '160000000',
+      };
+      await registerBoundedDeployment(gateway, deployment);
+      await gateway.query(
+        `INSERT INTO saas_fast_gateway_credit_budgets(tenant_id,currency,deployment_id,credit_cap_minor_units,allocated_minor_units)
+         VALUES($1,'USD',$2,'160000000','150000000')`,
+        [tenantId, deployment.deploymentId],
+      );
+
+      // Restart with no tranche: cold-start desired = 5000000 x 64 x 2 = 640M,
+      // far above cap - allocated = 10M. The unfixed journal would try to move
+      // min(wallet free, 640M) = 640M of backing and fail every commit.
+      const restart = new PostgresFastGatewayJournal(gateway, { allocationOwner: owner });
+      const cold = intentFixture(tenantId, owner, priceFixture('5000000'));
+      cold.allocationTargetConcurrency = 64;
+      const created = await restart.reserveIntent(cold);
+      assert.equal(created.kind, 'created');
+      const firstBudget = await budget();
+      assert.ok(firstBudget, 'shared budget row exists');
+      assert.equal(firstBudget.counter, firstBudget.cap, 'refill fills exactly to the cap');
+      assert.equal(firstBudget.active, '10000000', 'cold refill clamped to cap - allocated');
+      assert.equal(firstBudget.retired, '150000000');
+      assert.ok(BigInt(firstBudget.counter) <= BigInt(firstBudget.cap));
+
+      // Further replenishes converge to a no-op instead of throwing 23514,
+      // and remaining headroom still serves new reserves.
+      const secondInput = intentFixture(tenantId, owner, priceFixture('5000000'));
+      secondInput.allocationTargetConcurrency = 64;
+      const second = await restart.reserveIntent(secondInput);
+      assert.equal(second.kind, 'created');
+      await restart.replenish(tenantId, 'USD');
+      const finalBudget = await budget();
+      assert.ok(BigInt(finalBudget.counter) <= BigInt(finalBudget.cap), 'allocated never exceeds cap');
+      assert.equal(finalBudget.counter, finalBudget.cap);
+      await restart.close();
     },
   );
 });

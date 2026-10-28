@@ -115,6 +115,10 @@ program
   .option('--once', 'Process immediately claimable jobs and exit; unknown liabilities remain backed')
   .option('--poll-ms <milliseconds>', 'Base durable polling interval (10-60000; default 250)')
   .option('--batch-size <count>', 'Atomic settlement batch size (1-1000; default 128)')
+  .option(
+    '--retention-days <days>',
+    'Enable fast-ledger retention: delete intents settled longer than this many days (1-3650)',
+  )
   .option('--allow-local-plaintext', 'Allow explicit sslmode=disable for loopback disposable PostgreSQL')
   .addHelpText(
     'after',
@@ -129,14 +133,22 @@ program
   .description('Opt-in Linux single-host two-worker HTTP/SSE gateway: start, recover, status, stop, roll')
   .requiredOption('--state-directory <path>', 'Private absolute state directory; use a short path for Unix sockets')
   .option('--credit-cap-minor-units <amount>', 'Durable global fast-credit ceiling, separately per tenant/currency')
-  .option('--expected-generation <uuid>', 'Exact recorded supervisor generation for recovery or process-directed actions')
+  .option(
+    '--expected-generation <uuid>',
+    'Exact recorded supervisor generation for recovery or process-directed actions',
+  )
   .option('--http-in-flight <count>', 'Aggregate even HTTP handler cap (default 64)')
   .option('--database-pool-max <count>', 'Aggregate even native PostgreSQL pool maximum (default 16)')
   .option('--maximum-body-bytes <bytes>', 'Streaming ingress body limit (default 16777216)')
   .option('--maximum-connections <count>', 'Public active plus idle connection limit')
   .option('--request-timeout-ms <milliseconds>', 'Request intake deadline (default 120000)')
-  .addHelpText('after', '\nNo automatic respawn. Ordinary start is unchanged. Requires preconfigured Redis, trusted gateway runtime, migration147, and a non-superuser PostgreSQL role with CONNECTION LIMIT at most the declared pool budget. Never changes those settings. WebSocket, HTTP pipelining, Expect: 100-continue and trailers are outside this opt-in scope.\n')
-  .action((action, options) => management(async () => (await import('./saas-bounded-gateway.js')).saasBoundedGateway(action, options)));
+  .addHelpText(
+    'after',
+    '\nNo automatic respawn. Ordinary start is unchanged. Requires preconfigured Redis, trusted gateway runtime, migration147, and a non-superuser PostgreSQL role with CONNECTION LIMIT at most the declared pool budget. Never changes those settings. WebSocket, HTTP pipelining, Expect: 100-continue and trailers are outside this opt-in scope.\n',
+  )
+  .action((action, options) =>
+    management(async () => (await import('./saas-bounded-gateway.js')).saasBoundedGateway(action, options)),
+  );
 
 program
   .command('saas:migrate')

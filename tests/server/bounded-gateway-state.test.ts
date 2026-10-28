@@ -84,7 +84,9 @@ test('state roundtrip preserves recovery epoch history without receipts, credent
     await rm(directory, { recursive: true, force: true });
   }
 });
-test('Linux process identity compares process start ticks, not PID existence alone', () => {
+test('Linux process identity compares process start ticks, not PID existence alone', {
+  skip: process.platform !== 'linux',
+}, () => {
   const identity = boundedGatewayProcessIdentity(process.pid);
   assert.equal(boundedGatewayProcessIsAlive(identity), true);
   assert.equal(boundedGatewayProcessIsAlive({ ...identity, startTicks: `${BigInt(identity.startTicks) + 1n}` }), false);

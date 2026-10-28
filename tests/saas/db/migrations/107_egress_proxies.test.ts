@@ -15,7 +15,7 @@ test('107 remains registered between 106 and 108', () => {
   assert.equal(migration.name, 'egress_proxies');
   assert.deepEqual(Object.keys(migration).sort(), ['name', 'sql', 'version']);
   const registered = SAAS_MIGRATIONS.map(({ version }) => version);
-  assert.deepEqual(registered.slice(-7), [141, 142, 143, 144, 145, 146, 147]);
+  assert.deepEqual(registered.slice(-7), [143, 144, 145, 146, 147, 148, 149]);
   const index = registered.indexOf(107);
   assert.ok(index > 0, '107 is registered');
   assert.equal(registered[index - 1], 106, '107 lands directly after the 106 head');
@@ -23,7 +23,7 @@ test('107 remains registered between 106 and 108', () => {
   // K2: 129 (durable fault classification) then T05/T04: 130 window cost
   // policy, 131 resolved supply billing identity, 132 media task recovery,
   // 133 durable model cooldowns (core-plan 9.1).
-  assert.equal(registered.at(-1), 147, 'the append-only registry ends at bounded global budget 147');
+  assert.equal(registered.at(-1), 149, 'the append-only registry ends at fast ledger retention 149');
   assert.equal(registered.indexOf(107), registered.lastIndexOf(107));
   assert.equal(SAAS_MIGRATIONS[index], migration);
 });

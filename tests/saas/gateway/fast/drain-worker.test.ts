@@ -121,6 +121,53 @@ test('background poll failure aborts, closes and rejects even when error reporti
     assert.ok(!calls.some((sql) => sql.includes('fast-journal:worker-ledger')));
   }
 });
+test('retention-days is opt-in, range-checked, and arms the guard inside the drain transaction', async () => {
+  const dependencies = {
+    env: { MODEL_ROUTER_SAAS_GATEWAY_DATABASE_URL: url },
+    createDatabase: () => fixture().database,
+  };
+  for (const retentionDays of ['0', '-1', '3651', '1.5', 'abc']) {
+    await assert.rejects(
+      saasFastBillingWorker({ once: true, allowLocalPlaintext: true, retentionDays }, dependencies),
+      /Invalid fast billing/,
+    );
+  }
+  const { calls, database } = fixture();
+  const lines: string[] = [];
+  await saasFastBillingWorker(
+    { once: true, allowLocalPlaintext: true, retentionDays: '7' },
+    {
+      ...dependencies,
+      createDatabase: () => database,
+      verifyGatewayPrivileges: async () => {},
+      writeLine: (line) => lines.push(line),
+    },
+  );
+  assert.ok(calls.some((sql) => sql.includes("set_config('model_router_saas.fast_retention', 'on', true)")));
+  assert.ok(calls.some((sql) => sql.includes('FROM saas_fast_gateway_intents i')));
+  assert.equal(calls.at(-1), 'close');
+  assert.deepEqual(JSON.parse(lines.at(-1) ?? ''), { event: 'stopped', mode: 'once', processedJobs: '0' });
+  // Retention stays silent when nothing ages out: no churn in the drain log.
+  assert.ok(!lines.some((line) => JSON.parse(line).event === 'retention'));
+
+  const pollLines: string[] = [];
+  const controller = new AbortController();
+  await saasFastBillingWorker(
+    { allowLocalPlaintext: true, retentionDays: 3 },
+    {
+      ...dependencies,
+      createDatabase: () => fixture().database,
+      verifyGatewayPrivileges: async () => {},
+      signal: controller.signal,
+      writeLine: (line) => {
+        pollLines.push(line);
+        if (JSON.parse(line).event === 'ready') controller.abort();
+      },
+    },
+  );
+  const ready = pollLines.map((line) => JSON.parse(line)).find((entry) => entry.event === 'ready');
+  assert.equal(ready.retentionDays, 3);
+});
 test('poll stop and privilege failures close resources without leaking raw database errors', async () => {
   const { calls, database } = fixture();
   const controller = new AbortController();

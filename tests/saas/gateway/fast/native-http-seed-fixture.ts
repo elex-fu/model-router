@@ -6,10 +6,17 @@ import type { SaasDatabase } from '../../../../src/saas/db/types.js';
 import type { ProviderEnvironment } from '../../../../src/saas/runtime/providers.js';
 import type { NativeFastHttpRoute } from './native-http-runtime-fixture.js';
 
+export interface NativeFastHttpSeedRoute {
+  readonly protocol: 'openai' | 'anthropic';
+  readonly endpoint: string;
+  readonly publicModel: string;
+}
+
 export async function seedNativeFastHttpInventory(
   database: SaasDatabase,
   kmsEnv: ProviderEnvironment,
   maxConcurrency: 64 | 256 = 64,
+  extraRoutes: readonly NativeFastHttpSeedRoute[] = [],
 ) {
   assert.ok(maxConcurrency === 64 || maxConcurrency === 256, 'known native fixture concurrency');
   const { SaasIdentityService } = await import('../../../../src/saas/identity/service.js');
@@ -63,7 +70,13 @@ export async function seedNativeFastHttpInventory(
     audit,
   });
   const profileId = `r9-profile-${randomUUID()}`;
-  const models = ['native-fast-ci-model'];
+  // Default behavior stays byte-identical for the fixed-cpu family; extra
+  // routes only add aliases to the supply-profile/entitlement/key scopes.
+  const routesToSeed: readonly NativeFastHttpSeedRoute[] = [
+    { protocol: 'openai', endpoint: '/v1/chat/completions', publicModel: 'native-fast-ci-model' },
+    ...extraRoutes,
+  ];
+  const models = [...new Set(routesToSeed.map((route) => route.publicModel))];
   const now = new Date();
   const effectiveAt = new Date(now.getTime() - 60000).toISOString();
   await database.query(
@@ -101,13 +114,13 @@ export async function seedNativeFastHttpInventory(
   });
   const routes = new SaasRouteConfigService(database);
   const inventory: NativeFastHttpRoute[] = [];
-  for (const protocol of ['openai'] as const) {
+  for (const route of routesToSeed) {
+    const { protocol, endpoint } = route;
+    const publicModel = route.publicModel;
     const providerId = `r9-mock-${protocol}`;
     const productId = `r9-product-${protocol}`;
     const providerModel = `r9-provider-model-${protocol}`;
     const publicModelId = `r9-public-model-${protocol}`;
-    const publicModel = 'native-fast-ci-model';
-    const endpoint = '/v1/chat/completions';
     const poolId = `r9-pool-${protocol}`;
     await catalog.registerProviderProduct({ providerId, productId, displayName: `R9 ${protocol} MOCK TEST` });
     await catalog.registerPublicModelAlias({

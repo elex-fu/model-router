@@ -5,7 +5,7 @@ import { BOUNDED_FAST_GATEWAY_BUDGET_SAAS_MIGRATION as migration } from '../../.
 import { SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS } from '../../../../src/saas/db/runtime-privileges.js';
 
 test('147 appends a global wallet budget and immutable two-slot deployment without rewriting existing rows', () => {
-  assert.equal(SAAS_MIGRATIONS.at(-1), migration);
+  assert.equal(SAAS_MIGRATIONS.at(-3), migration);
   assert.equal(migration.version, 147);
   assert.match(migration.sql, /slot IN \(0,1\)/);
   assert.match(migration.sql, /UNIQUE \(deployment_id,slot\)/);

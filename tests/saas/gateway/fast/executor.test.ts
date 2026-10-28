@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto';
 import test from 'node:test';
 import type { Dispatcher } from 'undici';
 import {
+  FastGatewayExecutionError,
   FastGatewayExecutor,
   type FastGatewayExecutorOptions,
   type FastIntentInput,
@@ -713,6 +714,46 @@ test('TPM reconciliation is attached only after a durable successful usage recei
     else assert.equal(await executor.execute(s.input), true);
     assert.equal((feedback[0] as { actualTokenUnits?: number }).actualTokenUnits, receiptFails ? undefined : 15);
     assert.equal(s.intents[0].maxCostMinorUnits, '144');
+  }
+});
+
+test('admission denial maps to a typed fast error with an optional Retry-After ceiling', async () => {
+  for (const denial of [
+    {
+      result: { allowed: false as const, reason: 'rate_limited' as const },
+      status: 429,
+      code: 'FAST_RATE_LIMITED',
+      retry: undefined,
+    },
+    {
+      result: { allowed: false as const, reason: 'quota_exceeded' as const, retryAfterMs: 1500 },
+      status: 429,
+      code: 'FAST_QUOTA_EXCEEDED',
+      retry: 2,
+    },
+    {
+      result: { allowed: false as const, reason: 'unavailable' as const },
+      status: 503,
+      code: 'FAST_UNAVAILABLE',
+      retry: undefined,
+    },
+  ]) {
+    const s = setup({
+      admission: {
+        acquire: async () => denial.result,
+      },
+    });
+    let caught: unknown;
+    try {
+      await s.executor.execute(s.input);
+    } catch (error) {
+      caught = error;
+    }
+    assert.ok(caught instanceof FastGatewayExecutionError, String(caught));
+    assert.equal(caught.status, denial.status);
+    assert.equal(caught.code, denial.code);
+    assert.equal(caught.retryAfterSeconds, denial.retry);
+    assert.equal(s.calls.includes('intent'), false, 'denied admission must not reserve a journal intent');
   }
 });
 

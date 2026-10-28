@@ -91,6 +91,8 @@ export class FastGatewayExecutionError extends Error {
   constructor(
     readonly status: number,
     readonly code: string,
+    /** Optional Retry-After (integer seconds), currently only admission 429s. */
+    readonly retryAfterSeconds?: number,
   ) {
     super(code);
     this.name = 'FastGatewayExecutionError';
@@ -406,6 +408,7 @@ export class FastGatewayExecutor implements FastGatewayExecutorPort {
       throw new FastGatewayExecutionError(
         admitted.reason === 'unavailable' ? 503 : 429,
         `FAST_${admitted.reason.toUpperCase()}`,
+        admitted.retryAfterMs ? Math.max(1, Math.ceil(admitted.retryAfterMs / 1000)) : undefined,
       );
     const lease = admitted.lease;
     let intentId: string | undefined;
