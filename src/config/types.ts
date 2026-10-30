@@ -69,6 +69,16 @@ export interface UpstreamConfig {
   passThroughAuth?: boolean;
   /** OAuth client-credentials config for dynamic upstream token resolution. */
   oauth?: OAuthConfig;
+  /**
+   * C3b: AWS Bedrock credentials — presence activates the Bedrock transport
+   * (SigV4-signed invoke / invoke-with-response-stream, anthropic protocol).
+   */
+  bedrock?: { accessKeyId: string; secretAccessKey: string; sessionToken?: string; region: string };
+  /**
+   * C3b: GCP Vertex AI service-account auth — presence activates the Vertex
+   * transport (OAuth2 bearer via minted SA token, anthropic rawPredict).
+   */
+  vertex?: { serviceAccountJson: string; location?: string };
   /** Routing priority: lower value = tried first. Default 0. */
   priority?: number;
   /** Stable sort index within same priority. */

@@ -1,5 +1,6 @@
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { Readable } from 'node:stream';
 import { Agent } from 'undici';
 import type { ConfigStore } from '../config/store.js';
 import type { Config, OAuthConfig, ProxyKey } from '../config/types.js';
@@ -58,6 +59,9 @@ import type { KeyPool } from './keyPool.js';
 import { extractMultipartStringField, multipartBoundary } from './multipart.js';
 import type { OAuthTokenResolver } from './oauth.js';
 import { preprocessRequest } from './preprocess.js';
+import { bedrockTransportProfile } from './providers/bedrock.js';
+import type { ProviderTransportProfile } from './providers/types.js';
+import { vertexTransportProfile } from './providers/vertex-sa.js';
 import {
   isThinkingBudgetError,
   isThinkingSignatureError,
@@ -82,6 +86,12 @@ export interface ProxyHandlerOptions {
     set(key: string, upstreamName: string, nowMs?: number): void;
     remove(key: string): void;
   };
+  /**
+   * C3b: transport profile overrides for tests (mocked token minting). The
+   * built-in Bedrock/Vertex profiles serve any upstream that declares matching
+   * credentials when no override is supplied.
+   */
+  providerTransports?: { bedrock?: ProviderTransportProfile; vertex?: ProviderTransportProfile };
   /** Server-only invocation; never populated from HTTP headers or request JSON. */
   internalPlayground?: {
     keyId: string;
@@ -1621,6 +1631,8 @@ export async function proxyHandler(
               copilotOptimized: upstream.copilotOptimized,
               passThroughAuth: upstream.passThroughAuth,
               oauth: upstream.oauth,
+              bedrock: upstream.bedrock,
+              vertex: upstream.vertex,
               provider: upstream.provider,
               presetId: (upstream as { presetId?: string }).presetId,
               endpoint: (upstream as { endpoint?: string }).endpoint,
@@ -1642,6 +1654,7 @@ export async function proxyHandler(
             firstByteTimeoutMs,
             elapsedMs: elapsedLatencyMs,
             oauthResolver: options.oauthResolver,
+            providerTransports: options.providerTransports,
             onCorrectiveRetry: async (previous) => {
               if (totalAttempts >= maxRetries || abortController.signal.aborted || performance.now() >= deadline) {
                 return { ...previous, shouldRetry: false, failureReason: 'corrective_retry_budget_exhausted' };
@@ -2058,6 +2071,8 @@ async function trySingleUpstream(options: {
     copilotOptimized?: boolean;
     passThroughAuth?: boolean;
     oauth?: OAuthConfig;
+    bedrock?: { accessKeyId: string; secretAccessKey: string; sessionToken?: string; region: string };
+    vertex?: { serviceAccountJson: string; location?: string };
     provider: string;
     presetId?: string;
     endpoint?: string;
@@ -2079,6 +2094,7 @@ async function trySingleUpstream(options: {
   firstByteTimeoutMs?: number;
   elapsedMs: () => number;
   oauthResolver?: OAuthTokenResolver;
+  providerTransports?: { bedrock?: ProviderTransportProfile; vertex?: ProviderTransportProfile };
   onAttemptSent?: () => Promise<void> | void;
   onCorrectiveRetry?: (previous: TryResult) => Promise<TryResult | undefined>;
 }): Promise<TryResult> {
@@ -2101,6 +2117,7 @@ async function trySingleUpstream(options: {
     oauthResolver,
     onAttemptSent,
     onCorrectiveRetry,
+    providerTransports,
   } = options;
 
   const localCtl = new AbortController();
@@ -2146,6 +2163,36 @@ async function trySingleUpstream(options: {
   const isMultipartRequest =
     MULTIPART_REQUEST_PATHS.has(clientPath) &&
     String(req.headers['content-type'] ?? '').startsWith('multipart/form-data');
+  // C3b: a declared Bedrock/Vertex credential block activates its transport
+  // profile (SigV4 / SA-token auth, provider URL shapes, eventstream decode).
+  // Scoped to anthropic-protocol upstreams: Claude-on-Bedrock/Vertex is the
+  // covered path; other protocol/transport combinations fail closed below.
+  const transport: ProviderTransportProfile | undefined = upstream.bedrock
+    ? (options.providerTransports?.bedrock ?? bedrockTransportProfile)
+    : upstream.vertex
+      ? (options.providerTransports?.vertex ?? vertexTransportProfile)
+      : undefined;
+  if (transport && upstream.protocol !== 'anthropic') {
+    cleanupSignal();
+    return { ok: false, shouldRetry: false, statusCode: 422, errorMessage: 'unsupported_capability' };
+  }
+  const providerSettings = {
+    apiKey: apiKey || undefined,
+    ...(upstream.bedrock
+      ? {
+          awsAccessKeyId: upstream.bedrock.accessKeyId,
+          awsSecretAccessKey: upstream.bedrock.secretAccessKey,
+          ...(upstream.bedrock.sessionToken ? { awsSessionToken: upstream.bedrock.sessionToken } : {}),
+          awsRegion: upstream.bedrock.region,
+        }
+      : {}),
+    ...(upstream.vertex
+      ? {
+          serviceAccountJson: upstream.vertex.serviceAccountJson,
+          ...(upstream.vertex.location ? { vertexLocation: upstream.vertex.location } : {}),
+        }
+      : {}),
+  };
   const configuredCompactEndpoint = upstream.compactEndpoint;
   if (clientPath === '/v1/responses/compact' && (!profile.nativeResponses || !configuredCompactEndpoint)) {
     cleanupSignal();
@@ -2176,7 +2223,19 @@ async function trySingleUpstream(options: {
           : (upstream.endpoint ?? profile.endpoint));
   let upstreamUrl: URL;
   try {
-    if (upstream.protocol === 'gemini') {
+    if (transport) {
+      // C3b: the transport owns the URL shape (Bedrock invoke paths, Vertex
+      // rawPredict paths) — model and streaming intent ride the URL.
+      upstreamUrl = new URL(
+        transport.buildUrl({
+          baseUrl: upstream.baseUrl,
+          endpoint: isStreaming ? 'messages-stream' : 'messages',
+          model: resolvedModel,
+          stream: isStreaming,
+          upstream: providerSettings,
+        }),
+      );
+    } else if (upstream.protocol === 'gemini') {
       // C0 fix: gemini upstreams address the model and the action in the URL
       // path (`:generateContent` / `:streamGenerateContent`), which is outside
       // joinApiUrl's fixed-endpoint charset. resolvedModel keeps modelMap
@@ -2258,10 +2317,21 @@ async function trySingleUpstream(options: {
         }
       }
     }
+    // C3b: transport-level wire transforms (Bedrock drops `model` and injects
+    // anthropic_version in the body; Vertex injects its own version marker).
+    // Copy-on-write after the bridge transform: the input body is never mutated.
+    if (transport?.transformRequestBody && transformedBody && typeof transformedBody === 'object') {
+      const transportBody = transport.transformRequestBody(transformedBody, {
+        endpoint: isStreaming ? 'messages-stream' : 'messages',
+        model: resolvedModel,
+        stream: isStreaming,
+      });
+      if (transportBody) transformedBody = transportBody;
+    }
     upstreamBodyBytes = Buffer.from(JSON.stringify(transformedBody), 'utf-8');
   }
 
-  const upstreamHeaders = new Headers();
+  let upstreamHeaders = new Headers();
   for (const [key, value] of Object.entries(req.headers)) {
     if (value === undefined) continue;
     if (
@@ -2289,7 +2359,38 @@ async function trySingleUpstream(options: {
     optimizeCopilotHeaders(preprocessedBody, upstreamHeaders);
   }
 
-  if (upstream.authMode === 'none' && (upstream.provider === 'custom-openai' || upstream.provider === 'custom')) {
+  if (transport) {
+    // C3b: the transport owns authentication — SigV4 (Bedrock, complete
+    // signed header set) or a minted service-account OAuth token (Vertex).
+    let transportHeaders: Readonly<Record<string, string>>;
+    try {
+      transportHeaders = await transport.buildAuth(providerSettings, {
+        method: req.method ?? 'POST',
+        url: upstreamUrl.toString(),
+        body: upstreamBodyBytes,
+        headers: {
+          accept:
+            upstreamHeaders.get('accept') ??
+            (transport.id === 'bedrock' && isStreaming ? 'application/vnd.amazon.eventstream' : 'application/json'),
+          'content-type': upstreamHeaders.get('content-type') ?? 'application/json',
+        },
+      });
+    } catch (error) {
+      const result = failure(error);
+      cleanupSignal();
+      return result;
+    }
+    if (transport.ownsHeaders) {
+      // Bedrock signs a complete set; forwarding anything else breaks the
+      // signature. The dispatch's accept/content-type choices already rode
+      // the signed set via buildAuth's input.
+      upstreamHeaders = new Headers();
+    }
+    for (const [key, value] of Object.entries(transportHeaders)) upstreamHeaders.set(key, value);
+  } else if (
+    upstream.authMode === 'none' &&
+    (upstream.provider === 'custom-openai' || upstream.provider === 'custom')
+  ) {
     // Explicitly unauthenticated local/custom service.
   } else if ((upstream.passThroughAuth || upstream.authMode === 'pass-through') && clientAuth) {
     if (upstream.authMode === 'x-api-key') {
@@ -2339,13 +2440,21 @@ async function trySingleUpstream(options: {
   }
 
   upstreamHeaders.set('host', upstreamUrl.host);
-  upstreamHeaders.set('accept', isStreaming ? 'text/event-stream' : 'application/json');
+  // C3b: Bedrock's streaming answers carry the eventstream framing, not SSE.
+  upstreamHeaders.set(
+    'accept',
+    transport?.id === 'bedrock' && isStreaming
+      ? 'application/vnd.amazon.eventstream'
+      : isStreaming
+        ? 'text/event-stream'
+        : 'application/json',
+  );
   // C1: multipart media requests keep their boundary-bearing content-type so
   // the upstream can re-parse the forwarded form; everything else is JSON.
   if (!isMultipartRequest) {
     upstreamHeaders.set('content-type', 'application/json');
   }
-  if (upstream.protocol === 'anthropic') {
+  if (upstream.protocol === 'anthropic' && !transport?.ownsHeaders) {
     if (upstream.anthropicVersion !== undefined) {
       upstreamHeaders.set('anthropic-version', upstream.anthropicVersion);
     }
@@ -2421,13 +2530,26 @@ async function trySingleUpstream(options: {
     let rectifiedBody: any = null;
     let isSignatureRetry = false;
 
-    if (profile.claudeOptimizations && upstream.protocol === 'anthropic' && isThinkingSignatureError(message)) {
+    // C3b: no corrective retries through a transport profile — the retried
+    // body would differ from the signed payload (Bedrock) or re-mint tokens
+    // (Vertex) for a path the transports were never validated against.
+    if (
+      profile.claudeOptimizations &&
+      !transport &&
+      upstream.protocol === 'anthropic' &&
+      isThinkingSignatureError(message)
+    ) {
       const rectified = rectifyAnthropicRequest(preprocessedBody);
       if (rectified.applied) {
         rectifiedBody = rectified.body;
         isSignatureRetry = true;
       }
-    } else if (profile.claudeOptimizations && upstream.protocol === 'anthropic' && isThinkingBudgetError(message)) {
+    } else if (
+      profile.claudeOptimizations &&
+      !transport &&
+      upstream.protocol === 'anthropic' &&
+      isThinkingBudgetError(message)
+    ) {
       const rectified = rectifyThinkingBudget(preprocessedBody);
       if (rectified.applied) {
         rectifiedBody = rectified.body;
@@ -2705,14 +2827,29 @@ async function trySingleUpstream(options: {
     return { ok: true, statusCode: upstreamRes.status };
   }
 
-  const observedBody = upstreamRes.body.pipeThrough(
-    new TransformStream<Uint8Array, Uint8Array>({
+  // C3b: transports answering a binary framing (Bedrock eventstream) decode
+  // before the bridge sees the stream, so the SSE pipeline is unchanged.
+  let observedBody: ReadableStream<Uint8Array>;
+  if (transport?.decodeResponse) {
+    const decoded = transport.decodeResponse(Readable.fromWeb(upstreamRes.body as never));
+    const timing = new TransformStream<Uint8Array, Uint8Array>({
       transform(chunk, controller) {
         if (chunk.byteLength > 0) markFirstByte();
         controller.enqueue(chunk);
       },
-    }),
-  );
+    });
+    const piped = Readable.toWeb(decoded) as unknown as ReadableStream<Uint8Array>;
+    observedBody = piped.pipeThrough(timing);
+  } else {
+    observedBody = upstreamRes.body.pipeThrough(
+      new TransformStream<Uint8Array, Uint8Array>({
+        transform(chunk, controller) {
+          if (chunk.byteLength > 0) markFirstByte();
+          controller.enqueue(chunk);
+        },
+      }),
+    );
+  }
   const { clientStream, usage } = bridge.transformStream(observedBody);
 
   const startClientStream = () => {

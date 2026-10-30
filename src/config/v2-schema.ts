@@ -150,6 +150,24 @@ export const upstreamSchema = z
     auth: upstreamAuthSchema,
     credentials: z.array(z.object({ id, label, enabled: z.boolean(), secret: secretSource }).strict()),
     accountGroupId: id.optional(),
+    // C3b: Bedrock / Vertex transport activation blocks. Credential material
+    // goes through the same secret-source mechanism as apiKeys.
+    bedrock: z
+      .object({
+        accessKeyId: secretSource,
+        secretAccessKey: secretSource,
+        sessionToken: secretSource.optional(),
+        region: z.string().min(2).max(32),
+      })
+      .strict()
+      .optional(),
+    vertex: z
+      .object({
+        serviceAccount: secretSource,
+        location: z.string().min(2).max(32).optional(),
+      })
+      .strict()
+      .optional(),
     models: z.array(
       z
         .object({

@@ -44,6 +44,23 @@ export async function compileRuntimeConfig(raw: ConfigV2, resolver?: SecretResol
             scope: upstream.auth.scope,
           }
         : undefined;
+    // C3b: resolve transport credentials through the same secret mechanism.
+    const bedrock = upstream.bedrock
+      ? {
+          accessKeyId: await resolveSecret(upstream.bedrock.accessKeyId, resolver),
+          secretAccessKey: await resolveSecret(upstream.bedrock.secretAccessKey, resolver),
+          ...(upstream.bedrock.sessionToken
+            ? { sessionToken: await resolveSecret(upstream.bedrock.sessionToken, resolver) }
+            : {}),
+          region: upstream.bedrock.region,
+        }
+      : undefined;
+    const vertex = upstream.vertex
+      ? {
+          serviceAccountJson: await resolveSecret(upstream.vertex.serviceAccount, resolver),
+          ...(upstream.vertex.location ? { location: upstream.vertex.location } : {}),
+        }
+      : undefined;
     upstreams.push({
       id: upstream.id,
       name: upstream.id,
@@ -71,6 +88,8 @@ export async function compileRuntimeConfig(raw: ConfigV2, resolver?: SecretResol
       authHeaderName: upstream.auth.mode === 'custom-header' ? upstream.auth.headerName : undefined,
       passThroughAuth: upstream.auth.mode === 'pass-through',
       oauth,
+      ...(bedrock ? { bedrock } : {}),
+      ...(vertex ? { vertex } : {}),
       priority: upstream.priority,
       sortIndex: upstream.sortIndex,
     });

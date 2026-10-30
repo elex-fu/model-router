@@ -1,0 +1,32 @@
+# Classic-mode performance baseline, 2026-10-30 (plan D2 prerequisite,
+# docs/standalone-relay-capability-plan-2026-10-30.md).
+# Topology: FULL production classic path — V2 config (offline CLI upstream:add/key:create/
+#   upstream:map:set), model-router start with SQLite control/telemetry/quota ledger in a
+#   tmp dataDir, upstream = the local-ab TLS mock 18453 (same source as all SaaS runs;
+#   model native-fast-ci-model -> modelMap r9-provider-model-openai, fixture keys
+#   r9-openai-account-{1,2}, fixed 5ms delay). CA via NODE_EXTRA_CA_CERTS.
+#   Quota defaultMaxConcurrentRequests raised 10 -> 256 for the bench key (the V2 default
+#   10 caps concurrency and floods 429s — a default worth revisiting for API-shaped usage).
+# Harness: scripts/performance/local-ab/classic-setup.ts + run-profile.sh + bench-client.
+# Environment: same M1 Pro host as all prior baselines; NOISE DOMINATES — the first c32-json
+#   run hit a quiet window (load ~2-3), the reruns landed in load ~4-6 and are mutually
+#   consistent (424/410 RPS). Treat single-window numbers as ranges, not points.
+# Key findings:
+#   - classic c32 JSON in the quiet window (1157.9 RPS / 2.33ms CPU per req) EXCEEDS every
+#     prior same-mock number on this host: SaaS fast 693-893, s2a paired 729.5 (load ~15).
+#     Even the noisy-window rerun (410-424) is within the band where environment, not code,
+#     is the variable.
+#   - CPU/req 2.33-4.05ms across noise windows vs SaaS fast 1.81-2.0: classic carries the
+#     V2 quota-admission SQLite transaction + telemetry per request, but no PG journal.
+#   - classic REUSES upstream TLS connections (0-32 full handshakes per 3500 requests,
+#     shared undici Agent keep-alive) — unlike SaaS strict, which does one full handshake
+#     per request. This is a structural classic advantage worth porting notes in D2.
+#   - c64 degradation is steeper than c32 (p50 26->96ms JSON, 1158->664 RPS), same shape
+#     as the other Node planes on this host.
+name,concurrency,stream,n,rps,success,status_200,p50_ms,p95_ms,p99_ms,cpu_ms_per_req,load_window,mock_tls_full,mock_tls_resumed
+c32-json,32,json,3500,1157.87,3500,3500,26.15,34.37,72.25,2.331,quiet,10,22
+c32-json-rerun,32,json,3500,424.40,3500,3500,75.42,85.78,95.45,3.943,noisy,1,30
+c32-json-rerun2,32,json,3500,410.36,3500,3500,78.02,85.96,89.02,4.049,noisy,0,26
+c32-sse,32,sse,3500,862.51,3500,3500,35.23,44.59,116.19,2.917,quiet,17,6
+c64-json,64,json,3500,664.22,3500,3500,95.92,109.84,112.04,3.063,quiet,10,0
+c64-sse,64,sse,3500,515.53,3500,3500,124.95,139.54,142.81,3.643,quiet,22,0
