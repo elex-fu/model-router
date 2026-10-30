@@ -1,0 +1,30 @@
+# T8 fast intent group-commit A/B, 2026-10-28 (same-run control vs batch, c32 JSON, 3500 requests each)
+# Topology: PG 5434 model_router_bench (schema re-created + reseeded this run), Redis 16399, TLS mock 18453 (+metrics sidecar 18454),
+#   MR fast gateway 18088 (MODEL_ROUTER_FAST_GATEWAY=reserved-max), purge+restart between profiles
+#   (kill gateway, DELETE saas_redis_quota_state, redis del mr:quota* + mr:fast:*, restart; bounded-slot reclamation makes
+#   time-to-ready ~122s after a kill+purge cycle — driver readyz window sized 240s).
+# Batch env: MODEL_ROUTER_FAST_RESERVE_BATCH_WINDOW_MS / _MAX_ROWS as noted per row; off = vars unset.
+# Engagement proof: p50 responds monotonically to window size (off 38.59 -> 5ms 40.31 -> 40ms 46.31), 2ms/16-row point is
+#   worse (652.1 rps) than 5ms/32 — smaller windows emit more partial batches. p99 halved at the 5ms operating point.
+# Acceptance vs plan (docs/fast-gateway-optimization-plan-2026-10-28.md T8):
+#   c32 JSON >= 700 rps: 693.7 vs target (99.1%); same-run no-batch control 693.0 — the report's 553.1 baseline no longer
+#     reproduces on the reseeded environment, and the batch delta on rps is neutral (bottleneck moved off the intent INSERT);
+#     gap to s2a (729.5) narrowed 1.32x -> 1.05x.
+#   p50 not worse than +5ms: 40.31 vs same-run control 38.59 = +1.72ms (vs report baseline 50.0ms it is -9.7ms). PASS.
+#   per-request error boundaries under injected batch faults: 11 unit tests + 5 PG integration subtests pass (23505 ->
+#     per-row legacy reserve with per-request outcomes; zero-ack -> per-row defer; non-unique error -> all rows reject, no
+#     silent retry; deadline/close/backpressure boundaries). PASS.
+name,side,concurrency,stream,n,rps,success,status_200,p50_ms,p95_ms,p99_ms,ttfb_p50_ms,cpu_ms_per_req,duration_s,mock_tls_full,mock_tls_resumed,reserve_batch_window_ms,reserve_batch_max_rows
+c32-json,mr-fast-nobatch,32,json,3500,692.98,3500,3500,38.59,74.49,210.44,32.38,2.011,5.05,32,0,off,off
+c32-json,mr-fast-batch,32,json,3500,693.71,3500,3500,40.31,64.87,83.5,34.49,1.986,5.05,32,0,5,32
+c32-json,mr-fast-batch,32,json,3500,602.72,3500,3500,46.31,75.3,100.34,39.75,2.783,5.81,32,0,40,32
+c32-json,mr-fast-batch,32,json,3500,652.06,3500,3500,42.19,74.83,169.06,35.55,2.051,5.37,32,0,2,16
+# Re-verification 2026-10-30 (independent clean environment): fresh PG 18.6 on 5434 + Redis 16399,
+#   mock/seed/gateway re-armed from scripts/performance/local-ab/. Same protocol as the 10-28 run
+#   (purge+restart between profiles, c32 JSON, 3500 requests). Absolute RPS higher (892/885 vs 693)
+#   because the window was quieter (load ~3 vs ~15); the A/B *relative* conclusion reproduces exactly:
+#   RPS neutral (-0.8%), p50 +0.68ms, p99 slightly better, CPU/req parity, 100% fast-reserved-max,
+#   0 fallback, 7000 intents persisted across both profiles.
+name,side,concurrency,stream,n,rps,success,status_200,p50_ms,p95_ms,p99_ms,ttfb_p50_ms,cpu_ms_per_req,duration_s,mock_tls_full,mock_tls_resumed,reserve_batch_window_ms,reserve_batch_max_rows
+c32-json,mr-fast-nobatch,32,json,3500,892.51,3500,3500,33.6,43.74,57.3,28.24,1.826,3.92,32,0,off,off
+c32-json,mr-fast-batch,32,json,3500,885.42,3500,3500,34.28,43.69,54.9,29.62,1.809,3.95,32,0,5,32

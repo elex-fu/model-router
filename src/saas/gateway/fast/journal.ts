@@ -111,6 +111,18 @@ export interface FastJournalOptions {
   readonly allocationStripes?: number;
   readonly workerPollMs?: number;
   readonly workerBatchSize?: number;
+  /**
+   * Group-commit admission window in milliseconds; 0/undefined keeps the
+   * single-statement path. Concurrent reserves sharing (tenant, currency) are
+   * aggregated into one multi-row RESERVE statement after this window elapses
+   * or the row cap fills. Per-request isolation is preserved: a batch-level
+   * unique violation degrades every queued row to the single-row legacy loop.
+   */
+  readonly reserveBatchWindowMs?: number;
+  /** Maximum rows per group-commit statement. Bounded at 32. Default 16. */
+  readonly reserveBatchMaxRows?: number;
+  /** Global queued-reserve cap; beyond this admissions take the direct path. Default 256. */
+  readonly reserveBatchMaxQueue?: number;
   readonly onBackgroundError?: (code: string) => void;
   readonly onCreditUnavailable?: (reason: 'credit_busy' | 'credit_not_ready') => void;
   readonly onCreditRecovery?: (reason: 'credit_busy' | 'credit_not_ready') => void;
@@ -257,9 +269,93 @@ interface AllocationRow {
   available_minor_units: string;
 }
 
+/*
+ * Group-commit variant of RESERVE_SQL: one statement admits up to N intents
+ * sharing (tenant, currency, owner, epoch). The credit CAS is evaluated once
+ * against SUM(max_cost), so the decrement and every dependent INSERT stay in
+ * one atomic statement exactly like the single-row form. Numeric/timestamp
+ * columns arrive as text in the jsonb recordset and are cast here, keeping
+ * >2^53 exactness. A unique violation aborts the whole statement (credit
+ * decrement included) and the caller degrades every row to the single-row
+ * legacy loop; that is the per-request isolation boundary.
+ */
+const RESERVE_BATCH_SQL = `/* fast-journal:reserve-batch */
+WITH current_owner AS MATERIALIZED (
+  SELECT owner, epoch FROM saas_fast_gateway_owners WHERE owner=$2 AND epoch=$3 FOR SHARE
+), batch AS MATERIALIZED (
+  SELECT b.idx, b.id, b.request_id, b.attempt_id, b.project_id, b.proxy_key_id,
+         b.request_fingerprint, b.payload_sha256, b.account_id, b.max_cost::bigint AS max_cost,
+         b.price_snapshot, b.authority_snapshot, b.send_deadline::timestamptz AS send_deadline, b.identity
+    FROM jsonb_to_recordset($1::jsonb) AS b(
+      idx integer, id uuid, request_id uuid, attempt_id uuid, project_id uuid,
+      proxy_key_id uuid, request_fingerprint text, payload_sha256 text,
+      account_id text, max_cost text, price_snapshot jsonb, authority_snapshot jsonb,
+      send_deadline text, identity text)
+), paying AS MATERIALIZED (
+  SELECT * FROM batch WHERE $5::text IS NOT NULL
+), total AS MATERIALIZED (
+  SELECT COALESCE(SUM(p.max_cost),0) AS cost FROM paying p
+), candidate AS MATERIALIZED (
+  SELECT a.id FROM saas_fast_credit_allocations a JOIN current_owner o ON o.owner=a.owner AND o.epoch=a.epoch
+   WHERE a.tenant_id=$4 AND a.currency=$5 AND a.owner=$2 AND a.epoch=$3
+     AND a.state='active' AND a.available_minor_units >= (SELECT cost FROM total)
+   ORDER BY ((a.stripe::integer - $6::integer + 8) % 8)
+   LIMIT 1
+), credit AS (
+  UPDATE saas_fast_credit_allocations a
+     SET available_minor_units = available_minor_units - (SELECT cost FROM total)
+    FROM current_owner o, candidate c
+   WHERE a.id=c.id AND a.tenant_id=$4 AND a.currency=$5 AND a.owner=$2 AND a.epoch=$3
+     AND a.state='active' AND a.available_minor_units >= (SELECT cost FROM total)
+     AND o.owner = a.owner AND o.epoch = a.epoch
+  RETURNING a.id, a.epoch
+), inserted AS (
+  INSERT INTO saas_fast_gateway_intents
+    (id, request_id, attempt_id, tenant_id, project_id, proxy_key_id, request_fingerprint,
+     payload_sha256, account_id, currency, max_cost_minor_units, price_snapshot, authority_snapshot,
+     allocation_id, allocation_epoch, send_deadline, intent_digest)
+  SELECT b.id, b.request_id, b.attempt_id, $4, b.project_id, b.proxy_key_id, b.request_fingerprint,
+         b.payload_sha256, b.account_id, $5, b.max_cost, b.price_snapshot, b.authority_snapshot,
+         credit.id, credit.epoch, b.send_deadline, b.identity
+    FROM batch b JOIN credit ON true
+  UNION ALL
+  SELECT b.id, b.request_id, b.attempt_id, $4, b.project_id, b.proxy_key_id, b.request_fingerprint,
+         b.payload_sha256, b.account_id, NULL::text, b.max_cost, NULL::jsonb, b.authority_snapshot,
+         NULL::uuid, NULL::uuid, b.send_deadline, b.identity
+    FROM batch b, current_owner
+   WHERE $5::text IS NULL
+  RETURNING id
+)
+SELECT id,NULL::boolean AS credit_busy,NULL::boolean AS credit_recoverable FROM inserted
+UNION ALL SELECT NULL::uuid,EXISTS(SELECT 1 FROM candidate) AS credit_busy,
+  (SELECT COALESCE(SUM(a.available_minor_units),0) >= (SELECT cost FROM total)
+     FROM saas_fast_credit_allocations a
+    WHERE a.tenant_id=$4 AND a.currency=$5 AND a.owner=$2 AND a.epoch=$3 AND a.state='active')
+  AS credit_recoverable
+WHERE NOT EXISTS(SELECT 1 FROM inserted)`;
+
 interface FastBatchProgress {
   readonly planned: Set<string>;
   readonly restored: Set<string>;
+}
+
+interface ReserveBatchOffer {
+  readonly input: FastReserveIntentInput;
+  readonly id: string;
+  readonly identity: string;
+  readonly priceSnapshotJson: string | null;
+  readonly authoritySnapshotJson: string;
+  readonly stripe: number;
+}
+
+interface ReserveBatchEntry extends ReserveBatchOffer {
+  readonly resolve: (result: FastReserveResult) => void;
+  readonly reject: (error: unknown) => void;
+}
+
+interface ReserveBatchGroup {
+  readonly entries: ReserveBatchEntry[];
+  timer?: NodeJS.Timeout;
 }
 
 export class PostgresFastGatewayJournal implements FastGatewayJournal {
@@ -267,6 +363,11 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
   private readonly boundedDeployment?: BoundedOwnerActivation;
   private readonly tranche: bigint | null;
   private readonly stripes: number;
+  private readonly reserveBatchWindowMs: number;
+  private readonly reserveBatchMaxRows: number;
+  private readonly reserveBatchMaxQueue: number;
+  private readonly reserveBatchGroups = new Map<string, ReserveBatchGroup>();
+  private reserveBatchQueued = 0;
   private readonly observedMaximum = new Map<
     string,
     {
@@ -306,6 +407,27 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
     this.stripes = options.allocationStripes ?? 8;
     if (!Number.isSafeInteger(this.stripes) || this.stripes < 1 || this.stripes > 8)
       throw new Error('FAST_JOURNAL_INVALID_STRIPES');
+    this.reserveBatchWindowMs = options.reserveBatchWindowMs ?? 0;
+    if (
+      !Number.isSafeInteger(this.reserveBatchWindowMs) ||
+      this.reserveBatchWindowMs < 0 ||
+      this.reserveBatchWindowMs > 50
+    )
+      throw new Error('FAST_JOURNAL_INVALID_RESERVE_BATCH_WINDOW');
+    this.reserveBatchMaxRows = options.reserveBatchMaxRows ?? 16;
+    if (
+      !Number.isSafeInteger(this.reserveBatchMaxRows) ||
+      this.reserveBatchMaxRows < 1 ||
+      this.reserveBatchMaxRows > 32
+    )
+      throw new Error('FAST_JOURNAL_INVALID_RESERVE_BATCH_ROWS');
+    this.reserveBatchMaxQueue = options.reserveBatchMaxQueue ?? 256;
+    if (
+      !Number.isSafeInteger(this.reserveBatchMaxQueue) ||
+      this.reserveBatchMaxQueue < this.reserveBatchMaxRows ||
+      this.reserveBatchMaxQueue > 4096
+    )
+      throw new Error('FAST_JOURNAL_INVALID_RESERVE_BATCH_QUEUE');
     this.ready = this.boundedDeployment
       ? this.prepareBoundedOwner(this.boundedDeployment)
       : database
@@ -504,6 +626,166 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
       }
     }
     const id = randomUUID();
+    if (this.reserveBatchWindowMs > 0) {
+      const batched = this.offerReserveBatch({
+        input,
+        id,
+        identity,
+        priceSnapshotJson,
+        authoritySnapshotJson,
+        stripe: this.nextStripe(input.tenantId, input.currency),
+      });
+      if (batched) return batched;
+    }
+    return this.reserveSingle(input, id, priceSnapshotJson, authoritySnapshotJson, identity);
+  }
+
+  /**
+   * Group-commit offer. Returns the admission promise when the entry queued,
+   * or null when backpressure demands the direct single-statement path.
+   * The entry's id/identity/stripe are already final; a later batch failure
+   * degrades to reserveSingle, which replays them unchanged.
+   */
+  private offerReserveBatch(offer: ReserveBatchOffer): Promise<FastReserveResult> | null {
+    if (this.closed || this.reserveBatchQueued >= this.reserveBatchMaxQueue) return null;
+    const key = `${offer.input.tenantId}:${offer.input.currency ?? ''}`;
+    let group = this.reserveBatchGroups.get(key);
+    if (!group) {
+      group = { entries: [] };
+      this.reserveBatchGroups.set(key, group);
+    }
+    let resolve!: (result: FastReserveResult) => void;
+    let reject!: (error: unknown) => void;
+    const promise = new Promise<FastReserveResult>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    const entry: ReserveBatchEntry = { ...offer, resolve, reject };
+    group.entries.push(entry);
+    this.reserveBatchQueued++;
+    if (group.entries.length === 1) {
+      const timer = setTimeout(() => {
+        void this.flushReserveBatch(key, group as ReserveBatchGroup);
+      }, this.reserveBatchWindowMs);
+      timer.unref();
+      group.timer = timer;
+    }
+    if (group.entries.length >= this.reserveBatchMaxRows) {
+      if (group.timer) clearTimeout(group.timer);
+      group.timer = undefined;
+      void this.flushReserveBatch(key, group);
+    }
+    return promise;
+  }
+
+  /** Statement-atomic flush: all rows acknowledge or the whole batch degrades. */
+  private async flushReserveBatch(key: string, group: ReserveBatchGroup): Promise<void> {
+    if (group.timer) clearTimeout(group.timer);
+    group.timer = undefined;
+    if (this.reserveBatchGroups.get(key) === group) this.reserveBatchGroups.delete(key);
+    this.reserveBatchQueued -= group.entries.length;
+    const live: ReserveBatchEntry[] = [];
+    for (const entry of group.entries) {
+      if (entry.input.sendDeadlineMs <= Date.now() || entry.input.signal?.aborted)
+        entry.resolve({ kind: 'denied', reason: 'send_deadline' });
+      else if (this.closed) entry.resolve({ kind: 'denied', reason: 'closed' });
+      else live.push(entry);
+    }
+    if (live.length === 0) return;
+    if (live.length === 1) {
+      // A lone survivor pays the direct path's exact recovery semantics.
+      const entry = live[0] as ReserveBatchEntry;
+      try {
+        entry.resolve(
+          await this.reserveSingle(
+            entry.input,
+            entry.id,
+            entry.priceSnapshotJson,
+            entry.authoritySnapshotJson,
+            entry.identity,
+          ),
+        );
+      } catch (error) {
+        entry.reject(error);
+      }
+      return;
+    }
+    const first = live[0] as ReserveBatchEntry;
+    const rows = live.map((entry, index) => ({
+      idx: index,
+      id: entry.id,
+      request_id: entry.input.requestId,
+      attempt_id: entry.input.attemptId,
+      project_id: entry.input.projectId,
+      proxy_key_id: entry.input.proxyKeyId,
+      request_fingerprint: entry.input.requestFingerprint,
+      payload_sha256: entry.input.payloadSha256,
+      account_id: entry.input.accountId,
+      max_cost: entry.input.maxCostMinorUnits,
+      price_snapshot: entry.priceSnapshotJson === null ? null : JSON.parse(entry.priceSnapshotJson),
+      authority_snapshot: JSON.parse(entry.authoritySnapshotJson),
+      send_deadline: new Date(entry.input.sendDeadlineMs).toISOString(),
+      identity: entry.identity,
+    }));
+    const deferToLegacy = (): void => {
+      for (const entry of live) {
+        this.reserveSingle(
+          entry.input,
+          entry.id,
+          entry.priceSnapshotJson,
+          entry.authoritySnapshotJson,
+          entry.identity,
+        ).then(entry.resolve, entry.reject);
+      }
+    };
+    try {
+      const result = await this.database.query<{ id: string | null }>(RESERVE_BATCH_SQL, [
+        JSON.stringify(rows),
+        first.input.allocationOwner,
+        this.epoch,
+        first.input.tenantId,
+        first.input.currency,
+        first.stripe,
+      ]);
+      const acknowledged = new Set(result.rows.filter((row) => row.id !== null).map((row) => row.id as string));
+      if (acknowledged.size === live.length) {
+        for (const entry of live) {
+          entry.resolve({
+            kind: 'created',
+            intent: {
+              id: entry.id,
+              requestId: entry.input.requestId,
+              attemptId: entry.input.attemptId,
+              tenantId: entry.input.tenantId,
+              maxCostMinorUnits: entry.input.maxCostMinorUnits,
+            },
+          });
+        }
+      } else if (acknowledged.size === 0) {
+        // Acknowledged shared no-write (or vanished owner): every row takes
+        // the exact single-request recovery path, preserving per-request
+        // isolation and the fixed BUSY/NOT_READY statement ceilings.
+        deferToLegacy();
+      } else {
+        throw new Error('FAST_JOURNAL_UNCERTAIN_RESERVE');
+      }
+    } catch (error) {
+      // A unique violation rolled back the whole statement including the
+      // credit decrement; degrading every row to the legacy loop is the
+      // per-request isolation boundary (the duplicate row resolves via its
+      // own findExisting). Non-unique errors stay uncertain for all rows.
+      if (isUniqueViolation(error)) deferToLegacy();
+      else for (const entry of live) entry.reject(error);
+    }
+  }
+
+  private async reserveSingle(
+    input: FastReserveIntentInput,
+    id: string,
+    priceSnapshotJson: string | null,
+    authoritySnapshotJson: string,
+    identity: string,
+  ): Promise<FastReserveResult> {
     let unavailable: 'credit_busy' | 'credit_not_ready' = 'credit_not_ready';
     let busyReselections = 0;
     let retriedNotReady = false;
@@ -1259,6 +1541,14 @@ export class PostgresFastGatewayJournal implements FastGatewayJournal {
     this.closed = true;
     if (this.timer) clearTimeout(this.timer);
     this.timer = undefined;
+    // Queued group-commit admissions can never outlive the journal; a timer
+    // callback racing this close observes the closed flag through flush.
+    for (const group of this.reserveBatchGroups.values()) {
+      if (group.timer) clearTimeout(group.timer);
+      for (const entry of group.entries) entry.resolve({ kind: 'denied', reason: 'closed' });
+    }
+    this.reserveBatchGroups.clear();
+    this.reserveBatchQueued = 0;
     if (options.drain === false) {
       // Fatal standalone shutdown: finish only work already started. Never
       // claim another job or retire credit while reporting a processor failure.

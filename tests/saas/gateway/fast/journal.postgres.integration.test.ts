@@ -3837,3 +3837,168 @@ test('fast money journal real PostgreSQL: atomic reserve, durable completion, ex
     },
   );
 });
+
+test('fast money journal group-commit reserve: real PostgreSQL atomic batch, summed CAS, per-row fault isolation', {
+  skip: !enabled,
+  timeout: 120_000,
+}, async (t) => {
+  const urls = roleUrls();
+  const migrator = createSaasDatabase({ connectionString: urls[0], max: 8 });
+  const gateway = createSaasDatabase({ connectionString: urls[2], max: 16 });
+  t.after(async () => {
+    await gateway.close();
+    await migrator.close();
+  });
+  await gateway.verifySchema();
+  const billing = new PlatformWalletLedgerService();
+  async function setup(balance = '100', tranche = balance, owner = randomUUID(), windowMs = 20) {
+    const tenantId = randomUUID();
+    await migrator.query("INSERT INTO saas_tenants(id,name,slug) VALUES ($1,'fast-journal-batch-test',$2)", [
+      tenantId,
+      tenantId,
+    ]);
+    await migrator.transaction((tx) =>
+      billing.postVerifiedFunding(tx, {
+        tenantId,
+        currency: 'USD',
+        amountMinorUnits: balance,
+        sourceOrderRef: randomUUID(),
+        idempotencyKey: randomUUID(),
+      }),
+    );
+    const journal = new PostgresFastGatewayJournal(gateway, {
+      allocationOwner: owner,
+      allocationTrancheMinorUnits: tranche,
+      reserveBatchWindowMs: windowMs,
+    });
+    await journal.replenish(tenantId, 'USD');
+    return { tenantId, owner, journal };
+  }
+  async function facts(tenantId: string) {
+    return (
+      await gateway.query<{
+        balance: string;
+        backing: string;
+        available: string;
+        intents: string;
+      }>(
+        `SELECT w.posted_balance_minor_units::text AS balance,
+       (SELECT COALESCE(SUM(backing_minor_units),0)::text FROM saas_fast_credit_allocations WHERE tenant_id=$1) AS backing,
+       (SELECT COALESCE(SUM(available_minor_units),0)::text FROM saas_fast_credit_allocations WHERE tenant_id=$1) AS available,
+       (SELECT COUNT(*)::text FROM saas_fast_gateway_intents WHERE tenant_id=$1) AS intents
+       FROM saas_wallets w WHERE w.tenant_id=$1 AND w.currency='USD'`,
+        [tenantId],
+      )
+    ).rows[0];
+  }
+  function byokIntent(tenantId: string, owner: string): ReturnType<typeof intentFixture> {
+    return {
+      ...intentFixture(tenantId, owner),
+      currency: null,
+      maxCostMinorUnits: '0',
+      priceSnapshot: null,
+    };
+  }
+
+  await t.test('paying batch reserves all rows with one credit CAS for the summed max cost', async () => {
+    const scope = await setup('200');
+    const first = intentFixture(scope.tenantId, scope.owner);
+    const second = intentFixture(scope.tenantId, scope.owner);
+    const [a, b] = await Promise.all([scope.journal.reserveIntent(first), scope.journal.reserveIntent(second)]);
+    assert.equal(a.kind, 'created');
+    assert.equal(b.kind, 'created');
+    // 2 x 80 hold = 160 reserved out of 200.
+    assert.deepEqual(await facts(scope.tenantId), {
+      balance: '200',
+      backing: '200',
+      available: '40',
+      intents: '2',
+    });
+    await scope.journal.close();
+  });
+
+  await t.test('paying batch stays exact beyond 2^53', async () => {
+    const hold = '9007199254740993';
+    const scope = await setup('18014398509482086');
+    const first = intentFixture(scope.tenantId, scope.owner, priceFixture(hold));
+    const second = intentFixture(scope.tenantId, scope.owner, priceFixture(hold));
+    const [a, b] = await Promise.all([scope.journal.reserveIntent(first), scope.journal.reserveIntent(second)]);
+    assert.equal(a.kind, 'created');
+    assert.equal(b.kind, 'created');
+    assert.deepEqual(await facts(scope.tenantId), {
+      balance: '18014398509482086',
+      backing: '18014398509482086',
+      available: '100',
+      intents: '2',
+    });
+    await scope.journal.close();
+  });
+
+  await t.test('duplicate request_id inside one batch rolls the whole statement back and defers per row', async () => {
+    const scope = await setup('100');
+    // A true idempotent replay reuses the identical input (same identity
+    // digest); same request_id with different payload is identity_conflict.
+    const replayed = intentFixture(scope.tenantId, scope.owner);
+    const [a, b] = await Promise.all([scope.journal.reserveIntent(replayed), scope.journal.reserveIntent(replayed)]);
+    assert.equal(a.kind, 'created');
+    assert.equal(b.kind, 'existing', 'the duplicate row replays through findExisting');
+    if (a.kind !== 'created' || b.kind !== 'existing') throw new Error('unexpected reserve outcome');
+    assert.equal(b.requestId, replayed.requestId);
+    // The rolled-back batch performed no debit; exactly one 80 hold landed.
+    assert.deepEqual(await facts(scope.tenantId), {
+      balance: '100',
+      backing: '100',
+      available: '20',
+      intents: '1',
+    });
+    await scope.journal.close();
+  });
+
+  await t.test('insufficient summed credit zero-acks the batch and defers with per-request outcomes', async () => {
+    const scope = await setup('100');
+    const first = intentFixture(scope.tenantId, scope.owner);
+    const second = intentFixture(scope.tenantId, scope.owner);
+    const [a, b] = await Promise.all([scope.journal.reserveIntent(first), scope.journal.reserveIntent(second)]);
+    // Summed 160 > 100: the shared batch acknowledged no write; the legacy
+    // loop then admits exactly one 80 hold and denies the other.
+    const created = [a, b].find((r) => r.kind === 'created');
+    const denied = [a, b].find((r) => r.kind === 'denied');
+    assert.ok(created, 'exactly one row fits the available credit');
+    assert.deepEqual(denied, { kind: 'denied', reason: 'credit_not_ready' });
+    assert.deepEqual(await facts(scope.tenantId), {
+      balance: '100',
+      backing: '100',
+      available: '20',
+      intents: '1',
+    });
+    await scope.journal.close();
+  });
+
+  await t.test('BYOK batch creates every row without touching credit', async () => {
+    const scope = await setup('100');
+    const [a, b] = await Promise.all([
+      scope.journal.reserveIntent(byokIntent(scope.tenantId, scope.owner)),
+      scope.journal.reserveIntent(byokIntent(scope.tenantId, scope.owner)),
+    ]);
+    assert.equal(a.kind, 'created');
+    assert.equal(b.kind, 'created');
+    if (a.kind !== 'created' || b.kind !== 'created') throw new Error('reserve denied');
+    assert.notEqual(a.intent.id, b.intent.id);
+    assert.deepEqual(await facts(scope.tenantId), {
+      balance: '100',
+      backing: '100',
+      available: '100',
+      intents: '2',
+    });
+    const rows = await gateway.query<{ currency: string | null; allocation_id: string | null }>(
+      'SELECT currency, allocation_id FROM saas_fast_gateway_intents WHERE tenant_id=$1 ORDER BY created_at',
+      [scope.tenantId],
+    );
+    assert.equal(rows.rowCount, 2);
+    for (const row of rows.rows) {
+      assert.equal(row.currency, null);
+      assert.equal(row.allocation_id, null, 'BYOK rows never debit an allocation');
+    }
+    await scope.journal.close();
+  });
+});

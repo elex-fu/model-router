@@ -1,6 +1,6 @@
 # fast 通道加固与统一实施计划
 
-日期：2026-10-28。状态：实施中（Phase 0 完成，Phase 0.5 未启动）。
+日期：2026-10-28。状态：实施中（Phase 0 完成，Phase 1 T8 完成）。
 依据文档：`docs/performance/local-ab-sub2api-20261028.md`（本地 A/B 实测、故障复盘、架构接入度与 sub2api 对照）。本文件把该报告的结论转化为可执行任务：每个任务给出问题证据、改动锚点、实现要点、验收标准、预估量级与依赖。
 
 ## 目标
@@ -23,6 +23,8 @@
 - **T3 完成（2026-10-28）**：说明——check-then-increment 计数顺序此前已存在，本次交付的是恢复面：(a) rpm/tpm 拒绝在 Lua 内打 1s 共享负缓存键（identity 含 tokenUnits），重复拒绝短路不走全键扫描；(b) concurrency 拒绝返回 soonest-expiry `retryAfterMs` 提示（不落缓存）；(c) denial 经 `FastGatewayExecutionError` 映射 429 + `Retry-After` 头（quarantine 503 的 readyAt 提示保留）。风暴恢复吞吐与 Redis QPS 验收需 T5/T7 基准工具就位后补实测数字。
 - **T4 完成（2026-10-28）**：迁移 149 `fast_gateway_retention`（原 UPDATE OR DELETE 不可变触发器收窄为 BEFORE UPDATE + GUC 门控 DELETE 守卫 `model_router_saas.fast_retention`）+ `saas_fast_gateway_intents_tenant_time` / `_created_at` 索引；保留任务 `runFastJournalRetention`（仅终结已结算意图，批事务 + SKIP LOCKED，子表先于 intents 删除）；billing worker 新增 `--retention-days`（once 模式 drain 后执行；poll 模式 unref 定时 + 重入保护）。体积回收 ≥90% 与轮询 <10ms 验收需 193k 行种子库实测，随 T7 固化脚本补做。
 - 健康检查：`npx tsc --noEmit` 干净；`npm run test:unit` 7643 通过 / 0 失败（含 T3/T4 新增 149 迁移测试、retention 单测、drain-worker retention 覆盖、Lua identity 重锚）。lint/deadcode 存量噪声与 HEAD 一致（本次未新增）；shellcheck 本机未安装跳过。
+- **T8 完成（2026-10-28）**：intent 组提交落地——`PostgresFastGatewayJournal` 新增微批 reserve 队列（`offerReserveBatch`/`flushReserveBatch`，组键 `tenant:currency`，窗口定时器 + 满批立即冲刷），语句级原子（summed CAS 全成或全不成）；单请求隔离（23505 → 逐行退回 legacy reserve，零 ack → 逐行 defer，非唯一错误 → 全部拒绝不重试）；背压（队列满退回单写）；低流量零延迟（单条 lone survivor 直写）；开关 `MODEL_ROUTER_FAST_RESERVE_BATCH_WINDOW_MS/_MAX_ROWS/_MAX_QUEUE`（0/缺省关闭）。故障注入单测 11 项 + PG 集成子测 5 项全过。A/B 实测（`docs/performance/fast-group-commit-t8-20261028.csv`，3500 请求 c32 JSON）：批 5ms/32 行 693.7 RPS / p50 40.31ms vs 同轮无批对照 693.0 / 38.59ms——RPS 中性（该环境下 intent INSERT 已不再是瓶颈，553 基线在同轮对照中不再复现），**p99 210.4 → 83.5ms（2.5×）**；窗口响应单调（40ms → p50 46.3、2ms/16 行 → 652 RPS）证实批路径生效且 5ms/32 为工作点。p50 增幅 +1.72ms ≤ 5ms 达标；RPS 693.7 为目标 700 的 99.1%（对照口径差 -0.1%），与 s2a 差距从 1.32× 收敛到 1.05×。
+- **T8 复测（2026-10-30）**：独立环境重建后复跑 A/B（见 CSV 追加行）：无批 892.5 / p50 33.6 / p99 57.3 vs 批 885.4 / p50 34.28 / p99 54.9——相对结论完全复现（RPS 中性 -0.8%、p50 +0.68ms、p99 略优、CPU/req 1.81–1.83、100% fast-reserved-max、0 回退）。单测 7679/0 失败、故障注入 11 项、PG 集成 71 项全过。
 
 ## Phase 0：P0 加固（立即）
 

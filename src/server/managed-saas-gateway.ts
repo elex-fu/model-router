@@ -1052,6 +1052,12 @@ export interface ManagedSaasFastGatewayOptions {
   /** Explicit value is a hard cap; absent selects wallet-backed automatic liquidity sizing. */
   readonly allocationTrancheMinorUnits?: string;
   readonly allocationStripes?: number;
+  /** Group-commit admission window in ms; 0/undefined keeps single-statement reserves. */
+  readonly reserveBatchWindowMs?: number;
+  /** Maximum rows per group-commit reserve statement (1..32, default 16). */
+  readonly reserveBatchMaxRows?: number;
+  /** Global queued-reserve cap before admissions fall back to direct statements. */
+  readonly reserveBatchMaxQueue?: number;
   /** Only a proven fresh/drained deployment may bypass conservative Redis restart quarantine. */
   readonly redisDrained?: boolean;
   /** Optional AES-256 deployment key enables encrypted shared L2; no plaintext credential values. */
@@ -2180,7 +2186,21 @@ export function resolveManagedSaasFastGatewayConfiguration(
         (typeof value.allocationTrancheMinorUnits !== 'string' ||
           !/^[1-9][0-9]*$/.test(value.allocationTrancheMinorUnits))) ||
       (value.allocationStripes !== undefined &&
-        (!Number.isSafeInteger(value.allocationStripes) || value.allocationStripes < 1 || value.allocationStripes > 8))
+        (!Number.isSafeInteger(value.allocationStripes) ||
+          value.allocationStripes < 1 ||
+          value.allocationStripes > 8)) ||
+      (value.reserveBatchWindowMs !== undefined &&
+        (!Number.isSafeInteger(value.reserveBatchWindowMs) ||
+          value.reserveBatchWindowMs < 0 ||
+          value.reserveBatchWindowMs > 50)) ||
+      (value.reserveBatchMaxRows !== undefined &&
+        (!Number.isSafeInteger(value.reserveBatchMaxRows) ||
+          value.reserveBatchMaxRows < 1 ||
+          value.reserveBatchMaxRows > 32)) ||
+      (value.reserveBatchMaxQueue !== undefined &&
+        (!Number.isSafeInteger(value.reserveBatchMaxQueue) ||
+          value.reserveBatchMaxQueue < (value.reserveBatchMaxRows ?? 1) ||
+          value.reserveBatchMaxQueue > 4096))
     )
       invalid();
     if (value.receiptQueue) {
@@ -2236,6 +2256,15 @@ export function resolveManagedSaasFastGatewayConfiguration(
     ...(environment.MODEL_ROUTER_FAST_CREDIT_STRIPES === undefined
       ? {}
       : { allocationStripes: Number(environment.MODEL_ROUTER_FAST_CREDIT_STRIPES) }),
+    ...(environment.MODEL_ROUTER_FAST_RESERVE_BATCH_WINDOW_MS === undefined
+      ? {}
+      : { reserveBatchWindowMs: Number(environment.MODEL_ROUTER_FAST_RESERVE_BATCH_WINDOW_MS) }),
+    ...(environment.MODEL_ROUTER_FAST_RESERVE_BATCH_MAX_ROWS === undefined
+      ? {}
+      : { reserveBatchMaxRows: Number(environment.MODEL_ROUTER_FAST_RESERVE_BATCH_MAX_ROWS) }),
+    ...(environment.MODEL_ROUTER_FAST_RESERVE_BATCH_MAX_QUEUE === undefined
+      ? {}
+      : { reserveBatchMaxQueue: Number(environment.MODEL_ROUTER_FAST_RESERVE_BATCH_MAX_QUEUE) }),
     redisDrained: environment.MODEL_ROUTER_FAST_REDIS_DRAINED === '1',
     reuseConnections: reuse !== '0',
     ...(receiptMode === undefined ? {} : { receiptMode: receiptMode as 'durable' | 'memory-queue' }),
@@ -2802,7 +2831,10 @@ export function createManagedSaasGatewayProductionComposition(
       : undefined;
   const payload = createProviderPayloadCompiler(options);
   const fastConfig = resolveManagedSaasFastGatewayConfiguration(options);
-  if (options.boundedGatewayOwner && (!fastConfig || fastConfig.allocationOwner !== options.boundedGatewayOwner.owner)) {
+  if (
+    options.boundedGatewayOwner &&
+    (!fastConfig || fastConfig.allocationOwner !== options.boundedGatewayOwner.owner)
+  ) {
     throw new ManagedSaasGatewayCompositionError('INVALID_CONFIGURATION');
   }
   let fastClose: (() => Promise<void>) | undefined;
@@ -2861,6 +2893,15 @@ export function createManagedSaasGatewayProductionComposition(
           ? {}
           : { allocationTrancheMinorUnits: fastConfig.allocationTrancheMinorUnits }),
         ...(fastConfig.allocationStripes === undefined ? {} : { allocationStripes: fastConfig.allocationStripes }),
+        ...(fastConfig.reserveBatchWindowMs === undefined
+          ? {}
+          : { reserveBatchWindowMs: fastConfig.reserveBatchWindowMs }),
+        ...(fastConfig.reserveBatchMaxRows === undefined
+          ? {}
+          : { reserveBatchMaxRows: fastConfig.reserveBatchMaxRows }),
+        ...(fastConfig.reserveBatchMaxQueue === undefined
+          ? {}
+          : { reserveBatchMaxQueue: fastConfig.reserveBatchMaxQueue }),
       });
       // Two workers share the DB pool with durable admission and ledger work;
       // do not copy a large goroutine pool or treat capacity as usable credit.

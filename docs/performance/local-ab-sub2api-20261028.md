@@ -122,7 +122,7 @@
 
 ### P1 — 吞吐/扩展性
 
-4. **JSON 吞吐差距**：热点在 Node 单事件循环 + 每请求同步 intent INSERT（journal.js:145）。方向：intent 写入组提交（group commit）/ 微批 INSERT（按 1–5ms 窗口聚合多请求一条多行 INSERT），或管线化。这是把 c32 JSON 从 553 提到 700+ 的最大单项杠杆。
+4. **JSON 吞吐差距**：热点在 Node 单事件循环 + 每请求同步 intent INSERT（journal.js:145）。方向：intent 写入组提交（group commit）/ 微批 INSERT（按 1–5ms 窗口聚合多请求一条多行 INSERT），或管线化。这是把 c32 JSON 从 553 提到 700+ 的最大单项杠杆。**（2026-10-28 T8 已实施并 A/B 实测，见 `fast-group-commit-t8-20261028.csv`：批 5ms/32 行 p99 210→83.5ms，p50 +1.7ms，RPS 与同轮无批对照持平（693.7 vs 693.0）——该杠杆主要兑现为尾延迟而非均值吞吐，与 s2a 差距 1.32×→1.05×；剩余均值差距按 T9/T10 继续。）**
 5. **c32→c64 延迟膨胀**（p50 50→111ms）：allocation CAS / 钱包 fence advisory 锁在高并发补齐时的争用。方向：分片 advisory 锁或按 (tenant,currency) 细粒度 fence，replenish 目标带滞回避免高频抖动。
 6. **journal 保留/清理**：intents/receipts 需要保留策略与删除任务（按 resolutions 完成时间或固定 TTL 批量 DELETE），同时给 worker 轮询查询补状态过滤索引，防止表增长后轮询退化。
 7. **在途容量预留可配置/自适应**：64 固定值在 200 并发客户端下让 MR 表面吞吐归零。至少把 `MAX_HTTP_IN_FLIGHT` 与对外宣传容量对齐文档化；进一步可按上游健康度动态调整。
