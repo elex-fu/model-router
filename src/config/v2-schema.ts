@@ -11,6 +11,15 @@ const id = z
 const label = z.string().trim().min(1).max(200);
 const positiveInt = z.number().int().positive();
 const nonNegativeInt = z.number().int().nonnegative();
+const ipOrCidr = z.string().refine((cidr) => {
+  const slash = cidr.lastIndexOf('/');
+  const address = slash < 0 ? cidr : cidr.slice(0, slash);
+  const family = isIP(address);
+  if (!family) return false;
+  if (slash < 0) return true;
+  const prefix = Number(cidr.slice(slash + 1));
+  return Number.isInteger(prefix) && prefix >= 0 && prefix <= (family === 4 ? 32 : 128);
+}, 'Expected an IP address or CIDR');
 const secretSource = z.discriminatedUnion('type', [
   // Read old key-shaped env references without changing CAS snapshot identity.
   // Config commits canonicalize them to inline sources before persistence.
@@ -121,6 +130,8 @@ export const proxyKeySchema = z
     rpm: nonNegativeInt.optional(),
     dailyTokens: nonNegativeInt.optional(),
     maxConcurrentRequests: nonNegativeInt.optional(),
+    ipAllowlist: z.array(ipOrCidr).optional(),
+    ipDenylist: z.array(ipOrCidr).optional(),
   })
   .strict();
 
@@ -197,17 +208,16 @@ export const configV2Schema = z
         firstByteTimeoutMs: positiveInt,
         streamIdleTimeoutMs: positiveInt,
         totalRequestTimeoutMs: positiveInt,
-        trustedProxyCidrs: z.array(
-          z.string().refine((cidr) => {
-            const slash = cidr.lastIndexOf('/');
-            const address = slash < 0 ? cidr : cidr.slice(0, slash);
-            const family = isIP(address);
-            if (!family) return false;
-            if (slash < 0) return true;
-            const prefix = Number(cidr.slice(slash + 1));
-            return Number.isInteger(prefix) && prefix >= 0 && prefix <= (family === 4 ? 32 : 128);
-          }, 'Expected an IP address or CIDR'),
-        ),
+        trustedProxyCidrs: z.array(ipOrCidr),
+        metricsEnabled: z.boolean().optional(),
+        metricsAuthToken: z.string().min(16).optional(),
+        sessionAffinity: z
+          .object({
+            enabled: z.boolean(),
+            ttlMinutes: positiveInt.optional(),
+          })
+          .strict()
+          .optional(),
       })
       .strict(),
     admin: z

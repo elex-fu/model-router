@@ -15,6 +15,9 @@ export interface ProxyKey {
   rpm?: number;
   dailyTokens?: number;
   maxConcurrentRequests?: number;
+  /** O3: client IP / CIDR policy for this key. Denylist wins; empty allowlist = allow non-denied. */
+  ipAllowlist?: string[];
+  ipDenylist?: string[];
 }
 
 export interface OAuthConfig {
@@ -70,6 +73,12 @@ export interface UpstreamConfig {
   priority?: number;
   /** Stable sort index within same priority. */
   sortIndex?: number;
+  /**
+   * O2: relative selection weight within the same priority (default 1).
+   * Only takes effect when at least one same-priority upstream declares a
+   * weight other than 1; otherwise the deterministic sortIndex order applies.
+   */
+  weight?: number;
 }
 
 export interface ServerConfig {
@@ -82,6 +91,17 @@ export interface ServerConfig {
   requestTimeoutMs?: number;
   /** Ordered list of upstream names for strict failover. Overrides priority when set. */
   failoverQueue?: string[];
+  /** O4: expose GET /metrics (Prometheus text format). Default false. */
+  metricsEnabled?: boolean;
+  /** O4: bearer token guarding /metrics (requires metricsEnabled). */
+  metricsAuthToken?: string;
+  /**
+   * O2: best-effort session affinity — consecutive requests from one proxy key
+   * for one model prefer the upstream that served the previous request.
+   * Sticky within TTL and upstream health; failures drift to the next
+   * candidate and clear the mapping. Never a correctness guarantee.
+   */
+  sessionAffinity?: { enabled: boolean; ttlMinutes?: number };
 }
 
 export interface Config {

@@ -81,6 +81,18 @@ program
   .action((options) => management(async () => (await import('./v2-management.js')).configMigrate(options)));
 
 program
+  .command('pricing:import <path-or-url>')
+  .description('Import model pricing from a local JSON file or an https URL (models.dev shape or local pricing schema)')
+  .option('--dry-run', 'Validate and report without writing pricing profiles')
+  .option('--provider <name>', 'Provider label applied to imported profiles')
+  .option('--upstream <id>', 'Upstream id applied to imported profiles')
+  .option('--currency <CCC>', 'Currency code label override (amounts are not converted)')
+  .option('-c, --config <path>', 'Path to V2 configuration')
+  .action((pathOrUrl, options) =>
+    management(async () => (await import('./pricing-import.js')).pricingImportCli(pathOrUrl, options)),
+  );
+
+program
   .command('admin:bootstrap')
   .description('Create the first administrator via the local admin listener')
   .option('-c, --config <path>', 'Path to V2 configuration')

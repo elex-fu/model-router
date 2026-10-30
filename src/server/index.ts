@@ -11,11 +11,11 @@ import { ControlStore } from '../control/store.js';
 import { HealthMonitor } from '../health/monitor.js';
 import { IpAuthBlocker } from '../limit/ipBlocker.js';
 import { SQLiteQuotaLedger } from '../quota/ledger.js';
-import { initializeQuotaStore } from '../quota/store.js';
-import { QuotaWriteClient } from '../quota/write-client.js';
 import { RedisQuotaLedger } from '../quota/redis-ledger.js';
 import { RedisQuotaState } from '../quota/redis-state.js';
+import { initializeQuotaStore } from '../quota/store.js';
 import { QuotaTimezoneVersions } from '../quota/timezone-versions.js';
+import { QuotaWriteClient } from '../quota/write-client.js';
 import type { DeploymentEnvironment } from '../saas/deployment.js';
 import { parseDeploymentConfig } from '../saas/deployment.js';
 import { readLocalBrandSnapshot } from '../saas/platform/brand/local.js';
@@ -29,11 +29,13 @@ import { CircuitBreaker } from './circuitBreaker.js';
 import { reconcileObservedExternal } from './external-config-lifecycle.js';
 import { KeyPool } from './keyPool.js';
 import { type ManagedSaasStartOptions, startManagedSaasServer } from './managed-saas.js';
+import { createMetricsRegistry } from './metrics.js';
 import { OAuthTokenResolver } from './oauth.js';
 import { createOAuthAccountAdminAdapters } from './oauth-account-admin.js';
 import { OAuthAccountStore } from './oauth-accounts.js';
 import { createPlaygroundExecutor } from './playground-executor.js';
 import { proxyHandler } from './proxy.js';
+import { SessionAffinityStore } from './sticky-affinity.js';
 
 const DEFAULT_MAX_BODY_BYTES = 4 * 1024 * 1024;
 
@@ -307,6 +309,15 @@ async function startLocalServer(
     healthMonitor.start();
 
     const circuitBreaker = new CircuitBreaker();
+    // O4: the registry (and therefore the /metrics endpoint) exists only when
+    // the deployment opts in; without it the endpoint stays 404.
+    const metrics = effectiveRaw.server.metricsEnabled ? createMetricsRegistry() : undefined;
+    // O2: stickiness is process-local by design (restart clears it).
+    const sessionAffinity = effectiveRaw.server.sessionAffinity?.enabled
+      ? new SessionAffinityStore({
+          defaultTtlMs: (effectiveRaw.server.sessionAffinity.ttlMinutes ?? 10) * 60_000,
+        })
+      : undefined;
     const oauthAccounts = new OAuthAccountStore(configPath, controlStore.secrets);
     const oauthResolver = new OAuthTokenResolver(oauthAccounts);
 
@@ -439,6 +450,9 @@ async function startLocalServer(
       ipBlocker,
       trustProxy,
       circuitBreaker,
+      metrics,
+      metricsAuthToken: effectiveRaw.server.metricsAuthToken,
+      sessionAffinity,
       oauthResolver,
       maxRetries: effectiveRaw.server.maxAttempts,
       requestTimeoutMs: effectiveRaw.server.totalRequestTimeoutMs,

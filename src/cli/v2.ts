@@ -240,6 +240,10 @@ async function execute(control: ControlService, action: Action, args: string[], 
     const profile = providerProfile(givenProvider, protocol as UpstreamDefinition['protocol']);
     if (PROVIDER_PROFILES[givenProvider] && profile.protocol !== protocol)
       throw new Error(`Preset ${givenProvider} requires protocol ${profile.protocol}`);
+    // C3: known presets carry a canonical baseUrl; '-' defers to it instead
+    // of requiring the caller to retype the well-known endpoint.
+    const effectiveBaseUrl = baseUrl === '-' || baseUrl === '' ? (profile.baseUrl ?? '') : baseUrl;
+    if (!effectiveBaseUrl) throw new Error('A base URL is required (pass one, or use a known preset with -)');
     const mode = (options.authMode ?? profile.authMode) as UpstreamDefinition['auth']['mode'];
     if (!['bearer', 'x-api-key', 'google', 'none'].includes(mode))
       throw new Error('Use --auth-mode bearer, x-api-key, google, or none');
@@ -259,7 +263,7 @@ async function execute(control: ControlService, action: Action, args: string[], 
       presetId: givenProvider.includes('-') ? givenProvider : undefined,
       protocol: protocol as UpstreamDefinition['protocol'],
       enabled: true,
-      baseUrl,
+      baseUrl: effectiveBaseUrl,
       endpoints: { generate: profile.endpoint },
       auth: { mode },
       credentials: secretIds.map((secretId, index) => ({

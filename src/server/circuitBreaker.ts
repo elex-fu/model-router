@@ -112,6 +112,22 @@ export class CircuitBreaker {
       : { state: 'closed', failures: 0, lastFailureTime: 0 };
   }
 
+  /**
+   * Current state of every tracked upstream. O4 /metrics samples this at
+   * scrape time — no hot-path bookkeeping for the gauge.
+   */
+  snapshot(): Array<{ upstream: string; status: 'closed' | 'open' | 'half-open' }> {
+    const result: Array<{ upstream: string; status: 'closed' | 'open' | 'half-open' }> = [];
+    for (const [upstream, state] of this.states) {
+      const effective: 'closed' | 'open' | 'half-open' =
+        state.status === 'open' && Date.now() - state.lastFailureTime >= this.recoveryTimeoutMs
+          ? 'half-open'
+          : state.status;
+      result.push({ upstream, status: effective });
+    }
+    return result;
+  }
+
   private getState(upstreamName: string): CircuitBreakerState {
     let s = this.states.get(upstreamName);
     if (!s) {

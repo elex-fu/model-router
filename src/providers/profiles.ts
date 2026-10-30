@@ -109,6 +109,43 @@ export const PROVIDER_PROFILES: Readonly<Record<string, ProviderProfile>> = {
     preserveReasoning: true,
     claudeOptimizations: false,
   },
+  // C3 preset family (docs/standalone-relay-capability-plan-2026-10-30.md):
+  // mainstream OpenAI-compatible relays/providers — no signing, bearer auth,
+  // chat/completions endpoint. baseUrl is the fallback used by `upstream:add`
+  // when the positional baseUrl argument is '-'.
+  openrouter: {
+    id: 'openrouter',
+    protocol: 'openai',
+    baseUrl: 'https://openrouter.ai/api/v1',
+    endpoint: 'chat/completions',
+    authMode: 'bearer',
+    nativeResponses: false,
+    compact: false,
+    preserveReasoning: true,
+    claudeOptimizations: false,
+  },
+  groq: {
+    id: 'groq',
+    protocol: 'openai',
+    baseUrl: 'https://api.groq.com/openai/v1',
+    endpoint: 'chat/completions',
+    authMode: 'bearer',
+    nativeResponses: false,
+    compact: false,
+    preserveReasoning: true,
+    claudeOptimizations: false,
+  },
+  siliconflow: {
+    id: 'siliconflow',
+    protocol: 'openai',
+    baseUrl: 'https://api.siliconflow.cn/v1',
+    endpoint: 'chat/completions',
+    authMode: 'bearer',
+    nativeResponses: false,
+    compact: false,
+    preserveReasoning: true,
+    claudeOptimizations: false,
+  },
 };
 
 /** Existing provider names remain valid; new presets are explicit. */

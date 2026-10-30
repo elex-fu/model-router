@@ -43,10 +43,20 @@ model-router backup:restore <backupId> --config <配置文件绝对路径> --exp
 - **双向协议桥接**：客户端可走 Anthropic（`/v1/messages`）或 OpenAI（`/v1/chat/completions`）协议，上游可选 Anthropic 或 OpenAI；4 种 client/upstream 组合（`a→a` `o→o` `a→o` `o→a`）全部可用
 - **OpenAI Responses API**：支持 `/v1/responses` 与 `/v1/responses/compact`，兼容 Codex CLI
 - **OpenAI Embeddings API**：支持 `/v1/embeddings`（透传，仅对 OpenAI 协议族上游开放；用量取 `usage.prompt_tokens`，输出恒为 0）
+- **Gemini 原生入口（/v1beta）**：`POST /v1beta/models/{model}:generateContent` 与 `:streamGenerateContent?alt=sse` 按 gemini 协议接入；model 与流式意图直接取自 URL 路径，标准 Gemini SDK/CLI 可用。桥接矩阵 g→g（透传）/ g→anthropic / g→openai / g→responses 在 `pickBridge` 中齐备；gemini 上游按 `resolvedModel` 构造 `v1beta/models/{model}:{action}` 路径（modelMap 重写生效），认证走 `x-goog-api-key`（`authMode: google` 或 `protocol: gemini` 自动生效）。验收矩阵见 `tests/integration/gemini-bridge.test.ts`
+- **媒体与轻端点（C1/C2）**：`/v1/rerank`、`/v1/completions`、`/v1/images/generations`（同步）对 OpenAI 协议族上游透传；`/v1/messages/count_tokens` 对 Anthropic 协议族上游透传；`/v1/audio/speech` 二进制响应逐字节回传，`/v1/audio/transcriptions|translations` 以 multipart 不透明转发（路由自动扫描表单 `model` 字段）。跨协议族一律 fail-closed 422 `unsupported_capability`
+- **厂商预设（C3）**：`openrouter` / `groq` / `siliconflow` 预设进 `PROVIDER_PROFILES`，`upstream:add` 的 baseUrl 传 `-` 即取规范地址；Vertex SA 与 Bedrock SigV4/eventstream 适配模块位于 `src/server/providers/`（classic 接线为后续任务）
 - **modelMap 模型重写**：在 upstream 上配置 `pattern → realModel` 映射，支持精确匹配 + glob 通配（`*`、`?`），可让客户端用任意名字调用上游
 - **同 upstream 多 Key 自动调度**：每个 upstream 支持配置多个 API Key，请求时轮询调度；某个 Key 连续失败 3 次后自动冷却 5 分钟，同 upstream 内兜底切换到其它 Key
 - **多 upstream 故障降级 + 熔断器**：同一 model 可挂多个 upstream，失败自动降级到其它 upstream；每个 upstream 独立 Circuit Breaker（Closed/Open/HalfOpen），防止故障扩散
+- **调度优先级与故障队列**：upstream 支持 `priority`（数值小者先试）与同优先级内的稳定 `sortIndex`；`server.failoverQueue` 指定上游名有序列表时可强制故障降级顺序（覆盖 priority）
+- **同优先级加权调度（O2）**：upstream 可选 `weight`（默认 1）；同优先级内权重不全相同时按加权随机选择，全默认时保持确定性 sortIndex 序；`failoverQueue` 生效时禁用加权
+- **会话粘性（O2）**：`server.sessionAffinity: { enabled: true, ttlMinutes?: 10 }` 开启尽力粘性——同一代理 key + 模型的连续请求优先命中上次服务的 upstream（进程内 LRU+TTL，失败即漂移，重启即清，非正确性保证）
+- **Key 级 IP 策略（O3）**：代理 key 可配置 `ipAllowlist` / `ipDenylist`（单 IP 或 CIDR v4/v6，deny 优先；不可信代理头不参与判定），命中拒绝返回 403
+- **Prometheus /metrics（O4）**：`server.metricsEnabled: true` 暴露 `GET /metrics`（Prometheus 文本 0.0.4：请求计数/时延直方图/token 计量/在途仪表/熔断状态/RSS），可选 `metricsAuthToken` Bearer 门禁；默认关闭时端点 404
+- **模型价格表导入（O1）**：`model-router pricing:import <file|url>` 批量导入定价（models.dev 形状或本地 pricing schema 形状），逐行校验、失败行报告、`--dry-run` 支持
 - **代理 Key 鉴权**：为不同使用方分配独立的代理 key，认证错误按客户端协议返回
+- **Key 级模型/上游白名单**：代理 key 可配置 `allowedModels`（精确 + glob 通配）限制可调用的模型，`allowedUpstreams` / `allowedUpstreamIds` 限制可路由的上游
 - **上游认证策略区分**：支持 `Authorization: Bearer`、`x-api-key`、经过校验的自定义 Header，以及 OAuth 动态令牌解析与受限透传
 - **Copilot 请求优化**：上游启用 `copilotOptimized` 后，自动执行请求分类、thinking 块剥离、tool_result 合并、warmup 模型降级、确定性 ID 注入
 - **System Prompt 计费头清洗**：自动剥离 Claude Code CLI 注入的 `x-anthropic-billing-header` 前缀，避免 upstream 400

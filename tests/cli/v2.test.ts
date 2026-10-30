@@ -181,6 +181,53 @@ test('V2 credential is encrypted in ControlStore, not config', async () => {
   }
 });
 
+test('V2 preset upstreams fall back to the canonical baseUrl when given -', async () => {
+  const f = await fixture();
+  try {
+    for (const [name, preset, expectedBase] of [
+      ['or1', 'openrouter', 'https://openrouter.ai/api/v1'],
+      ['groq1', 'groq', 'https://api.groq.com/openai/v1'],
+      ['sf1', 'siliconflow', 'https://api.siliconflow.cn/v1'],
+    ] as const) {
+      const add = await cli(
+        f.configPath,
+        'upstream:add',
+        name,
+        preset,
+        'openai',
+        '-',
+        'sk-preset-key',
+        '--models',
+        'preset-model',
+      );
+      assert.equal(add.code, 0, add.stderr);
+    }
+    const bases = f
+      .read()
+      .upstreams.map((upstream: { baseUrl: string }) => upstream.baseUrl)
+      .sort();
+    assert.deepEqual(bases, [
+      ...['https://api.groq.com/openai/v1', 'https://api.siliconflow.cn/v1', 'https://openrouter.ai/api/v1'],
+    ]);
+    // A non-preset provider with '-' still refuses instead of guessing.
+    const refused = await cli(
+      f.configPath,
+      'upstream:add',
+      'custom1',
+      'custom-openai',
+      'openai',
+      '-',
+      'sk-key',
+      '--models',
+      'm',
+    );
+    assert.equal(refused.code, 1);
+    assert.match(refused.stderr, /base URL is required/);
+  } finally {
+    f.close();
+  }
+});
+
 test('V2 writes refuse an active server and a concurrent CLI lock', async () => {
   const f = await fixture();
   const server = createServer((_request, response) => {

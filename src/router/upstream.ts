@@ -59,6 +59,7 @@ export function selectUpstreams(
   upstreams: UpstreamConfig[],
   key?: ProxyKey,
   failoverQueue?: string[],
+  random: () => number = Math.random,
 ): UpstreamMatch[] {
   const queue = failoverQueue ?? [];
   const matches: UpstreamMatch[] = [];
@@ -79,7 +80,48 @@ export function selectUpstreams(
     }
   }
   matches.sort((a, b) => compareUpstreamMatch(a, b, queue));
-  return matches;
+  return interleaveWeightedMatches(matches, queue, random);
+}
+
+/**
+ * O2: within each equal-priority run (and only when no strict failover queue is
+ * set), upstreams whose weights are not all equal are re-drawn by weighted
+ * random selection; the deterministic sortIndex order survives untouched when
+ * every weight is the default 1. Returns the same matches in a possibly
+ * reordered sequence.
+ */
+function interleaveWeightedMatches(matches: UpstreamMatch[], queue: string[], random: () => number): UpstreamMatch[] {
+  if (queue.length > 0) return matches;
+  const result: UpstreamMatch[] = [];
+  let index = 0;
+  while (index < matches.length) {
+    const priority = matches[index].upstream.priority ?? 0;
+    let end = index;
+    while (end < matches.length && (matches[end].upstream.priority ?? 0) === priority) end += 1;
+    const group = matches.slice(index, end);
+    const weights = group.map(({ upstream }) => Math.max(0, upstream.weight ?? 1));
+    const uniform = weights.every((weight) => weight === weights[0]);
+    if (uniform) {
+      result.push(...group);
+    } else {
+      // Weighted draw without replacement; zero-weight upstreams never lead.
+      const pool = group.map((match, i) => ({ match, weight: weights[i]! }));
+      while (pool.length > 0) {
+        const total = pool.reduce((sum, item) => sum + item.weight, 0);
+        let pick = total > 0 ? random() * total : 0;
+        let chosen = 0;
+        for (; chosen < pool.length; chosen++) {
+          pick -= pool[chosen]!.weight;
+          if (pick <= 0) break;
+        }
+        if (chosen >= pool.length) chosen = pool.length - 1;
+        result.push(pool[chosen]!.match);
+        pool.splice(chosen, 1);
+      }
+    }
+    index = end;
+  }
+  return result;
 }
 
 // Backward compat

@@ -8,6 +8,7 @@ import type { KeyLimiter, ReserveResult } from '../limit/limiter.js';
 import { redactSecrets } from '../limit/redact.js';
 import type { LogEntry } from '../logger/types.js';
 import { type Bridge, type Protocol, pickBridge } from '../protocol/bridge.js';
+import { UnsupportedBridgeFeatureError } from '../protocol/openai-gemini.js';
 import {
   BridgeToolChoiceMismatchError,
   BridgeToolChoiceSelectionError,
@@ -15,6 +16,17 @@ import {
 } from '../protocol/openai-to-anth.js';
 import { providerProfile } from '../providers/profiles.js';
 import { joinApiUrl } from '../providers/url.js';
+
+/** Join a base URL with a bridge-rewritten absolute path (may carry a query). */
+function appendUpstreamPath(baseUrl: string, rewrittenPath: string): URL {
+  const base = new URL(baseUrl);
+  if (!['http:', 'https:'].includes(base.protocol) || base.username || base.password || base.hash)
+    throw new Error('Invalid upstream base URL');
+  if (!rewrittenPath.startsWith('/') || rewrittenPath.includes('\\') || /(^|\/)\.{1,2}(\/|$)/.test(rewrittenPath))
+    throw new Error('Invalid upstream path');
+  return new URL(rewrittenPath, base);
+}
+
 import { normalizeUsage } from '../providers/usage.js';
 import { estimateQuotaAttemptReserve } from '../quota/estimate.js';
 import type { SQLiteQuotaLedger } from '../quota/ledger.js';
@@ -41,7 +53,9 @@ import { authenticateProxyKey } from './auth.js';
 import type { CircuitBreaker } from './circuitBreaker.js';
 import { getClientIp } from './clientIp.js';
 import { optimizeCopilotBody, optimizeCopilotHeaders } from './copilotOptimizer.js';
+import { keyIpAllowed } from './key-ip-policy.js';
 import type { KeyPool } from './keyPool.js';
+import { extractMultipartStringField, multipartBoundary } from './multipart.js';
 import type { OAuthTokenResolver } from './oauth.js';
 import { preprocessRequest } from './preprocess.js';
 import {
@@ -52,6 +66,22 @@ import {
 } from './rectifier.js';
 
 export interface ProxyHandlerOptions {
+  /** O4: Prometheus registry; when absent the /metrics endpoint stays dark. */
+  metrics?: {
+    observeRequest(labels: { proto: string; upstream: string; status: number | string }, durationMs?: number): void;
+    addTokens(direction: string, upstream: string, tokens: number): void;
+    addInFlight(delta?: number): void;
+    setCircuitState(upstream: string, state: number): void;
+    render(): string;
+  };
+  /** O4: optional bearer token guarding /metrics (in addition to metricsEnabled). */
+  metricsAuthToken?: string;
+  /** O2: best-effort session affinity store; absent disables stickiness. */
+  sessionAffinity?: {
+    get(key: string, nowMs?: number): string | null;
+    set(key: string, upstreamName: string, nowMs?: number): void;
+    remove(key: string): void;
+  };
   /** Server-only invocation; never populated from HTTP headers or request JSON. */
   internalPlayground?: {
     keyId: string;
@@ -216,14 +246,46 @@ function collectBody(req: IncomingMessage, maxBytes: number): Promise<Buffer> {
 function clientProtocolFromPath(path: string): Protocol | null {
   const pathname = path.split('?')[0];
   if (pathname === '/v1/messages') return 'anthropic';
+  if (pathname === '/v1/messages/count_tokens') return 'anthropic';
   if (pathname === '/v1/chat/completions') return 'openai';
   if (pathname === '/v1/responses' || pathname === '/v1/responses/compact') return 'responses';
   // R2: embeddings rides the OpenAI inbound protocol family; the upstream
   // gate in trySingleUpstream keeps it passthrough-only for OpenAI upstreams.
   if (pathname === '/v1/embeddings') return 'openai';
+  // C1: media-family endpoints ride the OpenAI inbound family (except the
+  // anthropic-native count_tokens); per-endpoint upstream gates live in
+  // trySingleUpstream next to the embeddings gate.
+  if (
+    pathname === '/v1/rerank' ||
+    pathname === '/v1/completions' ||
+    pathname === '/v1/images/generations' ||
+    pathname === '/v1/audio/speech' ||
+    pathname === '/v1/audio/transcriptions' ||
+    pathname === '/v1/audio/translations'
+  )
+    return 'openai';
   if (path.startsWith('/v1beta/')) return 'gemini';
   return null;
 }
+
+/**
+ * C1/C2 media endpoints: client path → upstream relative endpoint, plus the
+ * protocol family that is allowed to serve each (fail-closed 422 otherwise,
+ * mirroring the embeddings rule). `messages/count_tokens` composes with the
+ * legacy-base `v1/` prefix the same way the anthropic `messages` endpoint does.
+ */
+const MEDIA_ENDPOINTS: Readonly<Record<string, { endpoint: string; requiredUpstream: Protocol }>> = {
+  '/v1/rerank': { endpoint: 'rerank', requiredUpstream: 'openai' },
+  '/v1/completions': { endpoint: 'completions', requiredUpstream: 'openai' },
+  '/v1/images/generations': { endpoint: 'images/generations', requiredUpstream: 'openai' },
+  '/v1/audio/speech': { endpoint: 'audio/speech', requiredUpstream: 'openai' },
+  '/v1/audio/transcriptions': { endpoint: 'audio/transcriptions', requiredUpstream: 'openai' },
+  '/v1/audio/translations': { endpoint: 'audio/translations', requiredUpstream: 'openai' },
+  '/v1/messages/count_tokens': { endpoint: 'messages/count_tokens', requiredUpstream: 'anthropic' },
+};
+
+/** Multipart-form client paths: the request body is forwarded opaquely. */
+const MULTIPART_REQUEST_PATHS = new Set<string>(['/v1/audio/transcriptions', '/v1/audio/translations']);
 
 function writeProtocolError(
   res: ServerResponse,
@@ -235,7 +297,9 @@ function writeProtocolError(
   const body =
     clientProto === 'anthropic'
       ? { type: 'error', error: { type: errorType, message } }
-      : { error: { message, type: errorType, code: null } };
+      : clientProto === 'gemini'
+        ? { error: { code: statusCode, message, status: errorType } }
+        : { error: { message, type: errorType, code: null } };
   res.writeHead(statusCode, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(body));
 }
@@ -461,6 +525,25 @@ export async function proxyHandler(
   enqueue: (entry: LogEntry) => void,
   options: ProxyHandlerOptions = {},
 ): Promise<void> {
+  // O4: token usage rides the existing async log pipeline — one metrics
+  // accumulation per log entry, skipped when tokens are unknown.
+  const enqueueWithMetrics = (entry: LogEntry): void => {
+    try {
+      if (options.metrics && entry.upstream_name) {
+        if (typeof entry.request_tokens === 'number')
+          options.metrics.addTokens('input', entry.upstream_name, entry.request_tokens);
+        if (typeof entry.response_tokens === 'number')
+          options.metrics.addTokens('output', entry.upstream_name, entry.response_tokens);
+        if (typeof entry.cache_read_tokens === 'number')
+          options.metrics.addTokens('cache_read', entry.upstream_name, entry.cache_read_tokens);
+        if (typeof entry.cache_creation_tokens === 'number')
+          options.metrics.addTokens('cache_creation', entry.upstream_name, entry.cache_creation_tokens);
+      }
+    } catch {
+      // Metrics isolation: never affect the log write.
+    }
+    enqueue(entry);
+  };
   const startTime = Date.now();
   const monotonicStart = performance.now();
   const elapsedLatencyMs = () => Math.round(Math.max(0, performance.now() - monotonicStart));
@@ -500,6 +583,43 @@ export async function proxyHandler(
     } else {
       res.end(JSON.stringify(body));
     }
+    return;
+  }
+
+  // O4: Prometheus text exposition. Only mounted when the server enables
+  // metrics (the registry is absent otherwise); an optional bearer token adds
+  // a second gate on top of the listener's bind address.
+  if (reqPath === '/metrics' || reqPath.startsWith('/metrics?')) {
+    const method = req.method ?? 'GET';
+    if (method !== 'GET' && method !== 'HEAD') {
+      res.writeHead(405, { 'Content-Type': 'application/json', Allow: 'GET, HEAD' });
+      res.end(JSON.stringify({ error: { message: 'Method not allowed' } }));
+      return;
+    }
+    if (!options.metrics) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: { message: 'Not found' } }));
+      return;
+    }
+    if (options.metricsAuthToken !== undefined) {
+      const presented = req.headers.authorization;
+      if (presented !== `Bearer ${options.metricsAuthToken}`) {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: { message: 'Unauthorized' } }));
+        return;
+      }
+    }
+    // Circuit gauges are sampled at scrape time from the breaker snapshot —
+    // no per-request bookkeeping for this family.
+    for (const state of options.circuitBreaker?.snapshot() ?? []) {
+      options.metrics.setCircuitState(
+        state.upstream,
+        state.status === 'closed' ? 0 : state.status === 'half-open' ? 1 : 2,
+      );
+    }
+    const exposition = options.metrics.render();
+    res.writeHead(200, { 'Content-Type': 'text/plain; version=0.0.4; charset=utf-8' });
+    res.end(method === 'HEAD' ? undefined : exposition);
     return;
   }
 
@@ -549,26 +669,56 @@ export async function proxyHandler(
     return;
   }
 
+  const clientPath = (req.url || '/').split('?')[0];
   const clientProto = clientProtocolFromPath(reqPath);
   if (!clientProto) {
     res.writeHead(404, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: { message: 'Not found', type: 'not_found_error', code: null } }));
     return;
   }
+  // C0 fix: the gemini wire format carries the model and the streaming intent
+  // in the URL path (/v1beta/models/{model}:generateContent|streamGenerateContent),
+  // never in the body. Extract both so standard Gemini SDK/CLI clients work.
+  let geminiPathModel: string | undefined;
+  let geminiStreamMode = false;
+  if (clientProto === 'gemini') {
+    const match = /\/v1beta\/models\/([^/:?]+)(?::(streamGenerateContent|generateContent))?/.exec(reqPath);
+    if (match) {
+      try {
+        geminiPathModel = decodeURIComponent(match[1]!);
+      } catch {
+        geminiPathModel = undefined;
+      }
+      geminiStreamMode = match[2] === 'streamGenerateContent';
+    }
+  }
   if (req.method !== 'POST') {
     res.writeHead(405, { 'Content-Type': 'application/json', Allow: 'POST' });
     res.end(JSON.stringify({ error: { message: 'Method not allowed', type: 'invalid_request_error' } }));
     return;
   }
+  // O4: every request past the path/method guards eventually reaches exactly
+  // one publishCompletion call (early rejections included), so admission is
+  // counted here to keep the in-flight gauge balanced.
+  options.metrics?.addInFlight();
   const config = store.load();
   const playground = options.internalPlayground;
   const source = playground ? 'playground' : 'production';
   let requestedModel: string | null = null;
   let finalUpstreamId: string | null = null;
   let completionPublished = false;
+  // O4: name of the upstream the request settled on ('none' when none was attempted).
+  let lastUpstreamName: string | null = null;
   const publishCompletion = (status: number, outcome: string, durationMs = Date.now() - startTime) => {
     if (completionPublished) return;
     completionPublished = true;
+    // O4: one observation per request, on the single completion path.
+    try {
+      options.metrics?.observeRequest({ proto: clientProto, upstream: lastUpstreamName ?? 'none', status }, durationMs);
+      options.metrics?.addInFlight(-1);
+    } catch {
+      // Metrics must never alter the finalized proxy response.
+    }
     const safeModel = requestedModel && /^[A-Za-z0-9_.:/-]{1,200}$/.test(requestedModel) ? requestedModel : null;
     try {
       options.publishEvent?.('request.completed', {
@@ -662,6 +812,13 @@ export async function proxyHandler(
   }
   if (!playground) options.ipBlocker?.clearSuccess(clientIp);
   const proxyKey = auth.key;
+  // O3: per-key IP policy, evaluated after authentication so the rejection is
+  // attributable to the key, not the caller's auth. Deny entries win.
+  if (!keyIpAllowed(proxyKey, clientIp)) {
+    writeProtocolError(res, clientProto, 403, 'forbidden', 'Proxy key is not allowed from this address');
+    await recordEarlyRejection(403, (proxyKey as { id?: string }).id ?? proxyKey.name);
+    return;
+  }
   const proxyKeyName = proxyKey.name;
   const clientAuth = auth.rawAuth;
   const clientBridge = pickBridge(clientProto, clientProto);
@@ -676,7 +833,7 @@ export async function proxyHandler(
         res.writeHead(413, { 'Content-Type': errEnv.contentType });
         res.end(typeof errEnv.body === 'string' ? errEnv.body : JSON.stringify(errEnv.body));
       }
-      enqueue({
+      enqueueWithMetrics({
         proxy_key_name: proxyKeyName,
         client_ip: clientIp,
         client_protocol: clientProto,
@@ -709,8 +866,18 @@ export async function proxyHandler(
   } catch {
     // ignore parse errors
   }
+  // C1: multipart media requests (transcriptions/translations) never parse as
+  // JSON; routing still needs the model field, so scan it out of the form.
+  const isMultipartRequest =
+    MULTIPART_REQUEST_PATHS.has(clientPath) &&
+    String(req.headers['content-type'] ?? '').startsWith('multipart/form-data');
+  let multipartModel: string | undefined;
+  if (isMultipartRequest) {
+    const boundary = multipartBoundary(String(req.headers['content-type'] ?? ''));
+    multipartModel = boundary ? (extractMultipartStringField(bodyBuffer, boundary, 'model') ?? undefined) : undefined;
+  }
 
-  const model = parsedBody?.model;
+  const model = parsedBody?.model ?? multipartModel ?? geminiPathModel;
   requestedModel = typeof model === 'string' ? model : null;
   const requestRecord: RequestRecord = {
     id: requestId,
@@ -818,7 +985,7 @@ export async function proxyHandler(
           'Retry-After': String(retryAfterSec),
         });
         res.end(typeof errEnv.body === 'string' ? errEnv.body : JSON.stringify(errEnv.body));
-        enqueue({
+        enqueueWithMetrics({
           proxy_key_name: proxyKeyName,
           client_ip: clientIp,
           client_protocol: clientProto,
@@ -996,7 +1163,7 @@ export async function proxyHandler(
     ) {
       const message = 'The selected route does not support this client protocol';
       writeProtocolError(res, clientProto, 422, 'unsupported_client_protocol', message);
-      enqueue({
+      enqueueWithMetrics({
         proxy_key_name: proxyKeyName,
         client_ip: clientIp,
         client_protocol: clientProto,
@@ -1028,7 +1195,10 @@ export async function proxyHandler(
           return profile.nativeResponses && !!(upstream as { compactEndpoint?: string }).compactEndpoint;
         return profile.nativeResponses || (upstream.provider === 'openai' && upstream.protocol === 'openai');
       }
-      if (upstream.protocol === 'responses') return false;
+      // Responses-protocol upstreams serve responses clients natively. C0 fix:
+      // gemini clients may bridge onto them (GeminiToResponsesBridge exists);
+      // the openai/anthropic inbound bridges stay gated until audited.
+      if (upstream.protocol === 'responses' && clientProto !== 'gemini') return false;
       if (clientProto === 'gemini' || upstream.protocol === 'gemini') return true;
       if (
         clientProto !== upstream.protocol &&
@@ -1097,7 +1267,7 @@ export async function proxyHandler(
         ? 'Model not allowed for this proxy key'
         : 'No available upstream for the requested model';
       writeProtocolError(res, clientProto, 404, 'not_found_error', errMessage);
-      enqueue({
+      enqueueWithMetrics({
         proxy_key_name: proxyKeyName,
         client_ip: clientIp,
         client_protocol: clientProto,
@@ -1168,7 +1338,7 @@ export async function proxyHandler(
     requestRecord.state = 'admitted';
     observeRequest(requestRecord);
 
-    const isStreaming = parsedBody?.stream === true;
+    const isStreaming = parsedBody?.stream === true || geminiStreamMode;
     const streamIdleTimeoutMs =
       options.streamIdleTimeoutMs ?? runtimeTimeouts.streamIdleTimeoutMs ?? DEFAULT_STREAM_IDLE_MS;
     const connectTimeoutMs = options.connectTimeoutMs ?? runtimeTimeouts.connectTimeoutMs;
@@ -1197,6 +1367,21 @@ export async function proxyHandler(
       const retryRandom = options.retryRandom ?? Math.random;
       const retryBaseDelayMs = options.retryBaseDelayMs ?? RETRY_BASE_DELAY_MS;
       const retryMaxDelayMs = options.retryMaxDelayMs ?? RETRY_MAX_DELAY_MS;
+      // O2: best-effort stickiness — the candidate the proxy key last used for
+      // this model leads the list while it is still serving and healthy.
+      const affinityKey =
+        options.sessionAffinity && model ? `${(proxyKey as { id?: string }).id ?? proxyKeyName}|${model}` : null;
+      const stickyUpstreamName = affinityKey ? options.sessionAffinity!.get(affinityKey) : null;
+      if (affinityKey && stickyUpstreamName) {
+        const stickyIndex = supportedCandidates.findIndex(({ upstream }) => upstream.name === stickyUpstreamName);
+        if (stickyIndex > 0) {
+          const [sticky] = supportedCandidates.splice(stickyIndex, 1);
+          supportedCandidates.unshift(sticky);
+        } else if (stickyIndex < 0) {
+          // The sticky upstream no longer serves this model/route: drop the mapping.
+          options.sessionAffinity!.remove(affinityKey);
+        }
+      }
       for (let i = 0; i < supportedCandidates.length; i++) {
         if (abortController.signal.aborted || performance.now() >= deadline) break;
         const { upstream, resolvedModel } = supportedCandidates[i];
@@ -1419,10 +1604,13 @@ export async function proxyHandler(
 
             return telemetryUsage;
           };
+          // O4: the request settles on this upstream for metrics attribution.
+          lastUpstreamName = upstream.name;
           const result = await trySingleUpstream({
             req,
             res,
             parsedBody,
+            rawRequestBytes: isMultipartRequest ? bodyBuffer : undefined,
             resolvedModel,
             upstream: {
               name: upstream.name,
@@ -1519,6 +1707,8 @@ export async function proxyHandler(
             requestRecord.firstTextMs = result.firstTextMs;
 
           if (result.ok) {
+            // O2: a served request renews the sticky mapping.
+            if (affinityKey && lastUpstreamName) options.sessionAffinity?.set(affinityKey, lastUpstreamName);
             if (clientProto === 'responses' && result.responseId && options.responseOwnership) {
               options.responseOwnership.put({
                 responseId: result.responseId,
@@ -1535,7 +1725,7 @@ export async function proxyHandler(
             if (isStreaming && result.usagePromise) {
               if (limiter)
                 limiter.recordUsage(proxyKeyName, telemetryUsage.inputTotal ?? 0, telemetryUsage.outputTotal ?? 0);
-              enqueue({
+              enqueueWithMetrics({
                 proxy_key_name: proxyKeyName,
                 client_ip: clientIp,
                 client_protocol: clientProto,
@@ -1558,7 +1748,7 @@ export async function proxyHandler(
               if (limiter) {
                 limiter.recordUsage(proxyKeyName, result.usage?.inputTokens ?? 0, result.usage?.outputTokens ?? 0);
               }
-              enqueue({
+              enqueueWithMetrics({
                 proxy_key_name: proxyKeyName,
                 client_ip: clientIp,
                 client_protocol: clientProto,
@@ -1585,6 +1775,11 @@ export async function proxyHandler(
             return;
           }
           lastFailure = result;
+          // O2: the sticky upstream failed — clear the mapping so the next
+          // request drifts to another candidate.
+          if (affinityKey && stickyUpstreamName && upstream.name === stickyUpstreamName) {
+            options.sessionAffinity?.remove(affinityKey);
+          }
 
           // Once any response bytes or headers are visible to the client, this
           // response belongs to this upstream. Never append another attempt.
@@ -1615,7 +1810,7 @@ export async function proxyHandler(
             options.circuitBreaker?.neutralRelease(upstream.name);
           }
 
-          enqueue({
+          enqueueWithMetrics({
             proxy_key_name: proxyKeyName,
             client_ip: clientIp,
             client_protocol: clientProto,
@@ -1851,6 +2046,8 @@ async function trySingleUpstream(options: {
   req: IncomingMessage;
   res: ServerResponse;
   parsedBody: any;
+  /** Collected raw request bytes; set for multipart media requests so the body forwards opaquely. */
+  rawRequestBytes?: Buffer;
   resolvedModel: string;
   upstream: {
     name: string;
@@ -1889,6 +2086,7 @@ async function trySingleUpstream(options: {
     req,
     res,
     parsedBody,
+    rawRequestBytes,
     resolvedModel,
     upstream,
     apiKey,
@@ -1944,6 +2142,10 @@ async function trySingleUpstream(options: {
 
   const clientPath = (req.url || '/').split('?')[0];
   const profile = providerProfile(upstream.presetId ?? upstream.provider, upstream.protocol);
+  const mediaEndpoint = MEDIA_ENDPOINTS[clientPath];
+  const isMultipartRequest =
+    MULTIPART_REQUEST_PATHS.has(clientPath) &&
+    String(req.headers['content-type'] ?? '').startsWith('multipart/form-data');
   const configuredCompactEndpoint = upstream.compactEndpoint;
   if (clientPath === '/v1/responses/compact' && (!profile.nativeResponses || !configuredCompactEndpoint)) {
     cleanupSignal();
@@ -1955,24 +2157,43 @@ async function trySingleUpstream(options: {
     cleanupSignal();
     return { ok: false, shouldRetry: false, statusCode: 422, errorMessage: 'unsupported_capability' };
   }
+  // C1/C2: media endpoints stay same-family only (openai family; count_tokens
+  // is anthropic-native). Cross-protocol bridging for media shapes is out of
+  // scope: fail closed like embeddings rather than half-bridge a payload.
+  if (mediaEndpoint && upstream.protocol !== mediaEndpoint.requiredUpstream) {
+    cleanupSignal();
+    return { ok: false, shouldRetry: false, statusCode: 422, errorMessage: 'unsupported_capability' };
+  }
   const compactEndpoint = configuredCompactEndpoint ?? '';
   const endpoint =
-    clientPath === '/v1/responses/compact'
+    mediaEndpoint?.endpoint ??
+    (clientPath === '/v1/responses/compact'
       ? compactEndpoint
       : clientPath === '/v1/responses'
         ? (upstream.endpoint ?? 'responses')
         : clientPath === '/v1/embeddings'
           ? 'embeddings'
-          : (upstream.endpoint ?? profile.endpoint);
+          : (upstream.endpoint ?? profile.endpoint));
   let upstreamUrl: URL;
   try {
-    // Legacy bases without an API prefix retain their old /v1 target.
-    const basePath = new URL(upstream.baseUrl).pathname;
-    const legacyBase = (upstream.provider === 'openai' || upstream.provider === 'anthropic') && basePath === '/';
-    upstreamUrl = joinApiUrl(
-      upstream.baseUrl,
-      legacyBase && upstream.protocol !== 'gemini' ? `v1/${endpoint}` : endpoint,
-    );
+    if (upstream.protocol === 'gemini') {
+      // C0 fix: gemini upstreams address the model and the action in the URL
+      // path (`:generateContent` / `:streamGenerateContent`), which is outside
+      // joinApiUrl's fixed-endpoint charset. resolvedModel keeps modelMap
+      // rewrites effective; isStreaming already folds the client's URL action
+      // (gemini), body `stream` (openai/anthropic), or multipart default.
+      upstreamUrl = appendUpstreamPath(
+        upstream.baseUrl,
+        `/v1beta/models/${encodeURIComponent(resolvedModel)}:${
+          isStreaming ? 'streamGenerateContent?alt=sse' : 'generateContent'
+        }`,
+      );
+    } else {
+      // Legacy bases without an API prefix retain their old /v1 target.
+      const basePath = new URL(upstream.baseUrl).pathname;
+      const legacyBase = (upstream.provider === 'openai' || upstream.provider === 'anthropic') && basePath === '/';
+      upstreamUrl = joinApiUrl(upstream.baseUrl, legacyBase ? `v1/${endpoint}` : endpoint);
+    }
   } catch {
     cleanupSignal();
     return { ok: false, shouldRetry: false, statusCode: 502, errorMessage: 'Invalid upstream URL' };
@@ -1982,37 +2203,63 @@ async function trySingleUpstream(options: {
     return { ok: false, shouldRetry: false, statusCode: 502, errorMessage: 'Invalid upstream authentication header' };
   }
 
-  const preprocessedBody = preprocessRequest(parsedBody ?? {}, upstream.protocol, resolvedModel, profile, {
-    thinking: upstream.thinkingPolicy,
-    autoCacheControl: upstream.autoCacheControl,
-  });
-  if (upstream.copilotOptimized) {
-    optimizeCopilotBody(preprocessedBody);
-  }
-  let transformedBody: any;
-  try {
-    transformedBody = bridge.transformRequest(preprocessedBody);
-  } catch (error) {
-    if (!(error instanceof BridgeToolChoiceSelectionError)) throw error;
-    cleanupSignal();
-    return { ok: false, shouldRetry: false, statusCode: 400, errorMessage: error.message };
-  }
-  if (transformedBody && typeof transformedBody === 'object') {
-    transformedBody.model = resolvedModel;
-    if (upstream.protocol === 'openai' && isStreaming && upstream.requestStreamUsage !== undefined) {
-      const streamOptions = transformedBody.stream_options;
-      if (upstream.requestStreamUsage) {
-        transformedBody.stream_options = {
-          ...(streamOptions && typeof streamOptions === 'object' ? streamOptions : {}),
-          include_usage: true,
-        };
-      } else if (streamOptions && typeof streamOptions === 'object') {
-        delete streamOptions.include_usage;
-        if (Object.keys(streamOptions).length === 0) delete transformedBody.stream_options;
+  // C1: multipart media requests are opaque to the proxy — the body (and its
+  // boundary-bearing Content-Type, forwarded by the header copy below) go to
+  // the upstream byte-for-byte. No preprocess, no bridge, no JSON round-trip.
+  // preprocessedBody stays null on that path; the anthropic-only rectifiers
+  // below can never run against a multipart request (media gate = openai).
+  let preprocessedBody: any = null;
+  let upstreamBodyBytes: Buffer;
+  if (isMultipartRequest && rawRequestBytes) {
+    upstreamBodyBytes = rawRequestBytes;
+  } else {
+    // C0 fix: gemini-inbound bridges keep their internal state (target model,
+    // streaming flag) on the bridge instance and initialize it from the client
+    // URL path. The path rewrite itself is not used here — endpoint inference
+    // above already resolves the upstream path — only the state side effect.
+    if (bridge.clientProto === 'gemini' && upstream.protocol !== 'gemini') {
+      bridge.rewriteUrlPath(clientPath);
+    }
+    preprocessedBody = preprocessRequest(parsedBody ?? {}, upstream.protocol, resolvedModel, profile, {
+      thinking: upstream.thinkingPolicy,
+      autoCacheControl: upstream.autoCacheControl,
+    });
+    if (upstream.copilotOptimized) {
+      optimizeCopilotBody(preprocessedBody);
+    }
+    let transformedBody: any;
+    try {
+      transformedBody = bridge.transformRequest(preprocessedBody);
+    } catch (error) {
+      if (!(error instanceof BridgeToolChoiceSelectionError)) {
+        // C0 fix: a bridge rejecting a field it cannot translate is a client
+        // request problem (422), not an internal error (503).
+        if (error instanceof UnsupportedBridgeFeatureError) {
+          cleanupSignal();
+          return { ok: false, shouldRetry: false, statusCode: 422, errorMessage: error.message };
+        }
+        throw error;
+      }
+      cleanupSignal();
+      return { ok: false, shouldRetry: false, statusCode: 400, errorMessage: error.message };
+    }
+    if (transformedBody && typeof transformedBody === 'object') {
+      transformedBody.model = resolvedModel;
+      if (upstream.protocol === 'openai' && isStreaming && upstream.requestStreamUsage !== undefined) {
+        const streamOptions = transformedBody.stream_options;
+        if (upstream.requestStreamUsage) {
+          transformedBody.stream_options = {
+            ...(streamOptions && typeof streamOptions === 'object' ? streamOptions : {}),
+            include_usage: true,
+          };
+        } else if (streamOptions && typeof streamOptions === 'object') {
+          delete streamOptions.include_usage;
+          if (Object.keys(streamOptions).length === 0) delete transformedBody.stream_options;
+        }
       }
     }
+    upstreamBodyBytes = Buffer.from(JSON.stringify(transformedBody), 'utf-8');
   }
-  const upstreamBodyBytes = Buffer.from(JSON.stringify(transformedBody), 'utf-8');
 
   const upstreamHeaders = new Headers();
   for (const [key, value] of Object.entries(req.headers)) {
@@ -2093,7 +2340,11 @@ async function trySingleUpstream(options: {
 
   upstreamHeaders.set('host', upstreamUrl.host);
   upstreamHeaders.set('accept', isStreaming ? 'text/event-stream' : 'application/json');
-  upstreamHeaders.set('content-type', 'application/json');
+  // C1: multipart media requests keep their boundary-bearing content-type so
+  // the upstream can re-parse the forwarded form; everything else is JSON.
+  if (!isMultipartRequest) {
+    upstreamHeaders.set('content-type', 'application/json');
+  }
   if (upstream.protocol === 'anthropic') {
     if (upstream.anthropicVersion !== undefined) {
       upstreamHeaders.set('anthropic-version', upstream.anthropicVersion);
@@ -2341,6 +2592,57 @@ async function trySingleUpstream(options: {
   }
 
   if (!isStreaming) {
+    // C1: non-JSON success responses (audio/speech returns audio/mpeg, media
+    // endpoints may return other binaries) forward verbatim — no bridge, no
+    // JSON round-trip. JSON and SSE content types keep the existing paths.
+    const upstreamContentType = upstreamRes.headers.get('content-type') ?? '';
+    if (
+      upstreamContentType !== '' &&
+      !/application\/(json|[^;]*\+json)/i.test(upstreamContentType) &&
+      !upstreamContentType.includes('text/event-stream')
+    ) {
+      res.writeHead(upstreamRes.status, { 'Content-Type': upstreamContentType });
+      let binaryStreamError: string | undefined;
+      if (upstreamRes.body) {
+        const binaryReader = upstreamRes.body.getReader();
+        try {
+          while (true) {
+            const { done, value } = await binaryReader.read();
+            if (done) break;
+            if (value) {
+              markFirstByte();
+              if (!res.write(Buffer.from(value))) await waitForDrain(res);
+            }
+          }
+        } catch (error) {
+          binaryStreamError = parentSignal.aborted
+            ? String(parentSignal.reason)
+            : error instanceof Error
+              ? error.message
+              : 'binary_forward_error';
+          localCtl.abort();
+          await binaryReader.cancel().catch(() => {});
+        } finally {
+          binaryReader.releaseLock();
+          res.end();
+          cleanupSignal();
+        }
+      } else {
+        res.end();
+        cleanupSignal();
+      }
+      if (binaryStreamError) {
+        const failResult = failure(new Error(binaryStreamError), !parentSignal.aborted);
+        return { ...failResult, firstByteMs, responseCommitted: res.headersSent };
+      }
+      return {
+        ok: true,
+        statusCode: upstreamRes.status,
+        usage: undefined,
+        firstByteMs,
+        responseCommitted: res.headersSent,
+      };
+    }
     let upstreamJson: any;
     try {
       upstreamJson = await readJsonWithFirstByte(upstreamRes, markFirstByte);
@@ -2358,6 +2660,18 @@ async function trySingleUpstream(options: {
     try {
       transformed = bridge.transformResponse(upstreamJson);
     } catch (error) {
+      if (error instanceof UnsupportedBridgeFeatureError) {
+        cleanupSignal();
+        return {
+          ok: false,
+          shouldRetry: false,
+          statusCode: 422,
+          errorMessage: error.message,
+          usage,
+          rawUsage: upstreamJson?.usage ?? upstreamJson?.usageMetadata,
+          firstByteMs,
+        };
+      }
       if (!(error instanceof BridgeToolChoiceMismatchError)) throw error;
       cleanupSignal();
       return {
