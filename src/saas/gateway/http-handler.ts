@@ -19,6 +19,13 @@ import {
   estimateCountTokensInputTokens,
   resolveCountTokensPolicy,
 } from './count-tokens.js';
+import {
+  type RenderedCodexModelsManifest,
+  isCodexModelsManifestRequest,
+  matchesCodexModelsManifestEtag,
+  renderCodexModelsManifestResponse,
+} from './codex/models-manifest-http.js';
+import { DEFAULT_CODEX_MODEL_MANIFEST } from './codex/models-manifest.js';
 import { matchGeminiNativeContentPath, matchSaasEndpointEntry } from './endpoint-registry.js';
 import { FastGatewayExecutionError, type FastGatewayExecutorPort } from './fast/executor.js';
 import { type FastGatewayDiagnosticObserver, reportFastGatewayFailure } from './fast/failure-diagnostic.js';
@@ -714,6 +721,12 @@ function requestPath(req: IncomingMessage): string | undefined {
   }
 }
 
+function requestQuery(req: IncomingMessage): string {
+  const url = req.url ?? '';
+  const queryStart = url.indexOf('?');
+  return queryStart === -1 ? '' : url.slice(queryStart + 1);
+}
+
 /** Classify inference using the same route authorities as the HTTP dispatcher. */
 export function isSaasGatewayInferenceRequest(req: IncomingMessage): boolean {
   if ((req.method ?? '').toUpperCase() !== 'POST') return false;
@@ -1303,6 +1316,47 @@ function sendGeminiModelList(res: ServerResponse, requestId: string, models: rea
   }
 }
 
+/**
+ * P1-4b: the ChatGPT Codex manifest envelope for `GET /v1/models?client_version=...`
+ * — the document the Codex CLI's model picker parses. Caller-scoped like
+ * sendModelList (the manifest lists only models the key can invoke), with a
+ * strong ETag so conditional requests can revalidate per client.
+ */
+function sendCodexModelsManifest(
+  res: ServerResponse,
+  requestId: string,
+  manifest: RenderedCodexModelsManifest,
+  notModified: boolean,
+): void {
+  if (res.destroyed || res.writableEnded) return;
+  if (res.headersSent) {
+    res.end();
+    return;
+  }
+  try {
+    if (notModified) {
+      res.writeHead(304, { etag: manifest.etag, 'x-request-id': requestId });
+      res.end();
+      return;
+    }
+    res.writeHead(200, {
+      'content-type': 'application/json',
+      etag: manifest.etag,
+      'cache-control': 'no-store',
+      'x-content-type-options': 'nosniff',
+      'referrer-policy': 'no-referrer',
+      'x-request-id': requestId,
+    });
+    res.end(manifest.body);
+  } catch {
+    try {
+      res.destroy();
+    } catch {
+      // Nothing else is safe to send after the response write failed.
+    }
+  }
+}
+
 function sendModelList(res: ServerResponse, requestId: string, models: readonly string[]): void {
   if (res.destroyed || res.writableEnded) return;
   if (res.headersSent) {
@@ -1830,6 +1884,26 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
       if (!models) {
         sendHttpError(res, new GatewayHttpError(503, 'MODEL_DISCOVERY_UNAVAILABLE'), requestId);
         return true;
+      }
+      /*
+       * P1-4b (sub2a parity): the Codex CLI announces itself on the models
+       * endpoint via a `client_version` query parameter and expects the
+       * upstream ChatGPT manifest envelope instead of the plain OpenAI list.
+       * The validated discovered list stays the authority (usableSlugs) — the
+       * manifest only advertises models this caller can actually invoke; an
+       * empty intersection falls back to sendModelList below.
+       */
+      if (isCodexModelsManifestRequest(requestQuery(req))) {
+        const manifest = renderCodexModelsManifestResponse(DEFAULT_CODEX_MODEL_MANIFEST, models);
+        if (manifest !== null) {
+          sendCodexModelsManifest(
+            res,
+            requestId,
+            manifest,
+            matchesCodexModelsManifestEtag(req.headers, manifest.etag),
+          );
+          return true;
+        }
       }
       sendModelList(res, requestId, models);
       return true;

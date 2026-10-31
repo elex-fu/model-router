@@ -1115,6 +1115,92 @@ test('model discovery response contains no bearer, tenant, provider, account, or
   }
 });
 
+/* P1-4b: the ChatGPT Codex manifest shape on GET /v1/models?client_version=… */
+
+function codexScopedApiKey(): AuthenticatedApiKey {
+  const base = authenticatedApiKey();
+  const scopes = ['gpt-5.6-sol', 'gpt-5.5', 'gpt-5.2', 'unlisted-model'];
+  return {
+    ...base,
+    metadata: { ...base.metadata, modelScopes: scopes },
+    authorization: { ...base.authorization, modelScopes: scopes },
+  };
+}
+
+test('GET /v1/models with a client_version parameter serves the Codex manifest for the discovered slugs', async () => {
+  const setup = harness({
+    authenticate: async () => codexScopedApiKey(),
+    modelDiscovery: async () => ['gpt-5.5', 'unlisted-model', 'gpt-5.6-sol', 'gpt-5.2'],
+  });
+  setup.request.url = '/v1/models?client_version=0.146.0';
+  setup.request.method = 'GET';
+
+  assert.equal(await setup.handler(asRequest(setup.request), asResponse(setup.response)), true);
+  assert.equal(setup.response.writeHeadCalls[0]?.status, 200);
+  const headers = setup.response.writeHeadCalls[0]?.headers ?? {};
+  assert.equal(headers['content-type'], 'application/json');
+  assert.equal(headers['cache-control'], 'no-store');
+  assert.ok(typeof headers.etag === 'string' && headers.etag.length > 0);
+
+  const parsed = JSON.parse(String(setup.response.endBody)) as {
+    models: Array<Record<string, unknown>>;
+  };
+  // Only manifest entries whose slug this caller can invoke, in manifest order.
+  assert.deepEqual(
+    parsed.models.map((entry) => entry.slug),
+    ['gpt-5.6-sol', 'gpt-5.5', 'gpt-5.2'],
+  );
+  const sol = parsed.models[0];
+  assert.equal(sol.display_name, 'GPT-5.6-Sol');
+  assert.equal(sol.context_window, 272000);
+  assert.deepEqual(sol.supported_reasoning_levels, [{ effort: 'low' }, { effort: 'medium' }, { effort: 'high' }]);
+  assert.equal(sol.use_responses_lite, true);
+  assert.equal(setup.response.endCount, 1);
+  // No auth material or non-manifest slug leaks into the manifest envelope.
+  const body = String(setup.response.endBody);
+  for (const secret of ['test-secret', 'tenant-1', 'key-1', 'unlisted-model']) {
+    assert.equal(body.includes(secret), false);
+  }
+});
+
+test('GET /v1/models with a matching If-None-Match answers 304 with the ETag and no body', async () => {
+  const first = harness({
+    authenticate: async () => codexScopedApiKey(),
+    modelDiscovery: async () => ['gpt-5.5'],
+  });
+  first.request.url = '/v1/models?client_version=0.146.0';
+  first.request.method = 'GET';
+  await first.handler(asRequest(first.request), asResponse(first.response));
+  const etag = first.response.writeHeadCalls[0]?.headers.etag as string;
+
+  const revalidation = harness({
+    authenticate: async () => codexScopedApiKey(),
+    modelDiscovery: async () => ['gpt-5.5'],
+  });
+  revalidation.request.url = '/v1/models?client_version=0.146.0';
+  revalidation.request.method = 'GET';
+  revalidation.request.headers['if-none-match'] = `W/${etag}`;
+
+  await revalidation.handler(asRequest(revalidation.request), asResponse(revalidation.response));
+  assert.equal(revalidation.response.writeHeadCalls[0]?.status, 304);
+  assert.equal(revalidation.response.writeHeadCalls[0]?.headers.etag, etag);
+  assert.equal(revalidation.response.endCount, 1);
+  assert.equal(revalidation.response.endBody, undefined);
+});
+
+test('GET /v1/models with client_version but no usable manifest slugs falls back to the plain list', async () => {
+  const setup = harness({ modelDiscovery: async () => ['public-model'] });
+  setup.request.url = '/v1/models?client_version=0.146.0';
+  setup.request.method = 'GET';
+
+  await setup.handler(asRequest(setup.request), asResponse(setup.response));
+  assert.equal(setup.response.writeHeadCalls[0]?.status, 200);
+  assert.deepEqual(JSON.parse(String(setup.response.endBody)), {
+    object: 'list',
+    data: [{ id: 'public-model', object: 'model', created: 0, owned_by: 'managed-saas' }],
+  });
+});
+
 /* G1 (task #41): trusted-boundary Claude Code client evidence collection. */
 
 const BILLING_ATTRIBUTION_BLOCK =

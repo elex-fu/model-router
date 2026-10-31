@@ -50,7 +50,8 @@ classic 当前实际客户端面：`/v1/messages`、`/v1/chat/completions`、`/v
 - **P1-5 完成**：模型别名表补全（sub2api 全集 12 条：退役 5.x 系→继任者）+ effort 后缀扩宽（`none/xhigh` 补齐）+ **effort 提取搬运**（模型 id 后缀的 effort 现在落进 `reasoning.effort` 而非被静默丢弃——此前 transform 注释声称如此但从未实现）。测试 +3。
 - 健康检查：tsc 干净；Codex 域测试 82/82；全量单相 7822/0 失败。
 - **P1-3 完成（2026-10-31）**：wham 主动配额 + auto reset——纯模块两件：`wham-usage.ts`（配额面身份头组[Codex Desktop originator / openai-beta: codex-1 / sec-fetch-* / priority]、usage 体投影[primary/secondary 窗口归一化复用 quota-headers 规则、additional_rate_limits、credits、reset credits 摘要]）与 `reset-credits.ts`（详情解析、UUID 幂等 consume 请求构造、可用性判定）。接线：`codex-wham-usage-worker.ts`（gemini usage worker 同构轮询，SKIP LOCKED 认领 `codex_usage_updated_at`[099 迁移既有列，**零新迁移**] → KMS 回调内解封凭证 → 15s/512KiB 有界 fetch → 写入与被动路径同一 `writeCodexSnapshot` 快照形状）+ auto reset 分支（窗口用尽 → 可用 credit → 幂等 consume → 重取 usage；**默认关**，配额面副作用需显式开启）。测试 23（纯模块）+ 18（worker+store）= 41 项。
-- **未做**（后续按序）：P1-4 服务面接线（2–3 天）、P2 端点广度（alpha search/realtime/PAT 凭证，按产品决策）、classic 下沉（等 SaaS 侧 P0/P1 补完启动）。
+- **P1-4 服务面接线完成（2026-10-31）**：`/v1/models?client_version=`（s2a 的 Codex 客户端探测方式）→ 返回 ChatGPT Codex manifest 形状（snake_case 字段对齐上游 models.json：slug/上下文窗口/推理档位/工具能力位）；**发现列表仍是可用性权威**（manifest 只列该 key 实际可调用的模型，交集为空回退普通列表）；ETag/304 条件重验证（强 sha1，caller-scoped 不共享缓存）。测试 7+3。**P1 里程碑至此全部完成。**
+- **未做**（后续按序）：P2 端点广度（alpha search 1 天 / realtime 语音 3–5 天 / PAT·Agent-Identity 凭证各 1–2 天，按产品决策）、classic 下沉 CS1–CS5（D1 任务表已展开，SaaS 启动条件已满足）。
 
 ## Phase 0：卖相修正与验收基线（半天）
 
@@ -138,10 +139,24 @@ classic 当前实际客户端面：`/v1/messages`、`/v1/chat/completions`、`/v
 
 ## Phase 3：P2 决策门（不排期，先立判据）
 
-### D1 订阅账号池化（s2a 立身之本）
+### D1 订阅账号池化（s2a 立身之本）——已展开为可执行任务表（2026-10-31 修正）
 
-- **判据**：产品方向若确立"订阅转配额"市场（Claude Pro/Max、Codex、Gemini 订阅池化）才立项。工程构成：上游 OAuth token 刷新子系统（SaaS 已有 codex OAuth 与账号授权页部分基建可评估）、订阅窗口配额（5h/周/月）、账号粘性（与 O2 粘性同机制扩展）、每账号 TLS 指纹（重投入项）。量级：季度级。
-- **不做判据**：若定位保持"API key 聚合 + 协议桥接"，本项永久搁置——s2a 在此赛道有先发纵深，正面复刻 ROI 为负。
+- **重大修正**：原判据写"OAuth 握手/刷新是全新工程、量级季度级"——经代码核查证伪。SaaS 平面已存在**四家厂商（Claude/Codex/Gemini/Grok）订阅 OAuth 全栈**：授权绑定（PKCE + auth.json 导入 + id_token 解析）、定时刷新（1,724 行 worker：四家 adapter、到期扫描、退避、凭证轮换、每账号出口代理）、原生端点 + 身份保真、健康分类、配额头解析。Codex 侧 2026-10-31 又补齐了 P0 防腐层（版本自动同步 + 真实 instructions）与 P1（wham 主动配额 + auto reset + manifest + 别名表）。
+- **真实工程量：季度级 → 2–3 周**（Codex 单厂商可用池化），沿用 C3b 对 Bedrock/Vertex 的"提炼而非复制"模式（脱 PG 落 SQLite）。
+- **不做判据（维持）**：若定位保持"API key 聚合 + 协议桥接"，B 阶段以后永久搁置。**风险须知：订阅池化天然违反各厂商 ToS，SaaS 商用形态下风险远高于自托管——这是产品/法务决策，须在 B 阶段前明确接受。**
+
+**任务表（classic 下沉，SaaS 侧 P0/P1 已全部补完，启动条件满足）**：
+
+| # | 任务 | 内容 | 锚点/来源 | 量级 |
+|---|---|---|---|---|
+| CS1 | 刷新引擎提炼 | adapter 协议 + 调度/退避逻辑脱 PG → SQLite 表（账号 + next_refresh_at + 状态机）；填进 classic `OAuthTokenResolver` 的 "delegated to device flow manager" 预留位——**无后悔投资**（独立修复 codex_oauth/github_copilot 账号过期即重授权的现存缺陷） | `saas/supply/oauth-token-refresh-worker.ts`(~800 行核心) → classic | 4–5 天 |
+| CS2 | 握手/导入提炼 | codex-oauth PKCE + binding-service + auth.json import（纯函数为主）→ CLI/admin 授权 UX | `saas/platform/codex-oauth/`(1,096 行) | 2–3 天 |
+| CS3 | Codex native transport | builtin-provider-transports 的 Codex 段提炼为 classic `ProviderTransportProfile`（C3b 契约直接实现：URL/身份头/chatgpt-account-id/instructions） | `saas/runtime/builtin-provider-transports.ts:400-480` | 2 天 |
+| CS4 | 池化调度 | OAuthAccountStore 单 default → 账号池；KeyPool 冷却语义到账号粒度；401→auth-expired→刷新重试（健康分类提炼）；`/wham` 配额快照（P1-3 worker 的 SQLite 形态） | `saas/gateway/oauth-subscription/health-classifier.ts` | 3–4 天 |
+| CS5 | （Claude/Gemini/Grok 同构复制） | CS1–CS3 模式复制到其余三家 | `saas/platform/{claude,gemini,grok}-oauth/` | 各 ~1 周 |
+
+- 执行顺序：CS1 → CS2 → CS3 → CS4（Codex 闭环）→ 按产品方向决定 CS5。
+- 今日已预铺的零件：C3b transport 契约（buildAuth 异步=账号 token 解析挂点）、O2 SessionAffinityStore、P1-3 wham 纯模块（零 PG 依赖可直接复用）。
 
 ### D2 多实例水平扩展
 
