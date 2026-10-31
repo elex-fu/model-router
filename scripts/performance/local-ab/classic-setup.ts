@@ -39,16 +39,19 @@ const cli = (...args: string[]) =>
   });
 
 // The TLS mock from the local-ab tooling (same source as the SaaS runs).
+// The local-ab TLS mock expects the fixture identities (model
+// r9-provider-model-*, bearer r9-openai-account-{1,2}) and serves under /v1.
 cli(
   'upstream:add',
   'bench',
   'custom-openai',
   'openai',
-  'https://127.0.0.1:18453',
-  'sk-classic-bench-key',
+  'https://127.0.0.1:18453/v1',
+  'r9-openai-account-1,r9-openai-account-2',
   '--models',
   'native-fast-ci-model',
 );
+cli('upstream:map:set', 'bench', 'native-fast-ci-model', 'r9-provider-model-openai');
 const keyOutput = cli('key:create', 'bench');
 const match = /^Key: (\S+)$/m.exec(keyOutput);
 if (!match) throw new Error(`key:create output missing key:\n${keyOutput}`);

@@ -1340,7 +1340,15 @@ export async function proxyHandler(
           await finishRequest(503, null, null);
           return;
         }
-        writeProtocolError(res, clientProto, 429, 'rate_limit_error', rateLimitMessage(decision.reason));
+        // Mirror the in-memory limiter path: 429s carry a Retry-After hint
+        // so API-shaped clients back off instead of hammering the ledger.
+        const quotaRetryAfterSec = Math.max(1, Math.ceil((decision.retryAfterMs ?? 60_000) / 1000));
+        const quotaErrEnv = clientBridge.wrapError(429, rateLimitMessage(decision.reason));
+        res.writeHead(429, {
+          'Content-Type': quotaErrEnv.contentType,
+          'Retry-After': String(quotaRetryAfterSec),
+        });
+        res.end(typeof quotaErrEnv.body === 'string' ? quotaErrEnv.body : JSON.stringify(quotaErrEnv.body));
         await finishRequest(429, null, null);
         return;
       }

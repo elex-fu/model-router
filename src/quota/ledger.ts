@@ -141,7 +141,14 @@ export class SQLiteQuotaLedger {
         WHERE proxy_key_id=? AND state='active'`)
           .get(a.proxyKeyId) as { n: number };
         if (a.maxConcurrentRequests !== undefined && active.n >= a.maxConcurrentRequests)
-          return { allowed: false, reason: 'concurrency_exceeded' };
+          return {
+            allowed: false,
+            reason: 'concurrency_exceeded',
+            // In-flight requests release capacity as they settle; a short
+            // retry hint matches that cadence (the recovery-timeout bound is
+            // only a leak backstop, not an expected wait).
+            retryAfterMs: 1_000,
+          };
         const oldest = db
           .prepare(`SELECT admitted_at_ms FROM quota_admissions WHERE proxy_key_id=?
         AND admitted_at_ms > ? ORDER BY admitted_at_ms LIMIT 1`)

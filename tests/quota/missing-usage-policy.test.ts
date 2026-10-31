@@ -55,6 +55,9 @@ test('three attempts: one reported, two missing retain only two attempt bounds a
       (await ledger.admit({ ...period, requestId: 'blocked', reserveTokens: 1 })).reason,
       'concurrency_exceeded',
     );
+    // Concurrency rejections carry a short retry hint (settle cadence, not
+    // the recovery-timeout backstop).
+    assert.equal((await ledger.admit({ ...period, requestId: 'blocked', reserveTokens: 1 })).retryAfterMs, 1_000);
     await ledger.settle('next', null, 0);
     assert.equal(
       (await ledger.admit({ ...period, requestId: 'over', reserveTokens: 44 })).reason,

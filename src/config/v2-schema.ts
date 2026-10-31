@@ -327,7 +327,12 @@ export function defaultConfigV2(configPath: string, instanceId: string): ConfigV
       timezone: 'UTC',
       semanticsVersion: 'normalized_v2',
       missingUsagePolicy: 'retain-reservation',
-      defaultMaxConcurrentRequests: 10,
+      // 64 aligns the per-key concurrency cap with the SaaS gateway's default
+      // in-flight semaphore (MODEL_ROUTER_SAAS_GATEWAY_MAX_HTTP_IN_FLIGHT).
+      // 10 flooded API-shaped clients with 429s (see the 2026-10-30 classic
+      // baseline). Applies to NEW configs only; existing deployments keep
+      // their persisted value and edit it explicitly.
+      defaultMaxConcurrentRequests: 64,
     },
     upstreams: [],
     routes: [],

@@ -4,6 +4,11 @@ import { test } from 'node:test';
 import { compileRuntimeConfig, RuntimeConfigStore } from '../../src/config/v2-runtime.js';
 import { configV2Schema, defaultConfigV2 } from '../../src/config/v2-schema.js';
 
+test('V2 default quota concurrency aligns with the SaaS in-flight default (64)', () => {
+  const raw = defaultConfigV2('/tmp/model-router-test/config.json', 'test-instance');
+  assert.equal(raw.quota.defaultMaxConcurrentRequests, 64);
+});
+
 test('V2 runtime resolves credentials without putting plaintext in raw config', async () => {
   const raw = defaultConfigV2('/tmp/model-router-test/config.json', 'test-instance');
   raw.upstreams.push({

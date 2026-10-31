@@ -5,8 +5,11 @@
 #   tmp dataDir, upstream = the local-ab TLS mock 18453 (same source as all SaaS runs;
 #   model native-fast-ci-model -> modelMap r9-provider-model-openai, fixture keys
 #   r9-openai-account-{1,2}, fixed 5ms delay). CA via NODE_EXTRA_CA_CERTS.
-#   Quota defaultMaxConcurrentRequests raised 10 -> 256 for the bench key (the V2 default
-#   10 caps concurrency and floods 429s — a default worth revisiting for API-shaped usage).
+#   Quota note: the V2 default defaultMaxConcurrentRequests was 10 during this baseline and flooded
+#   429s (3037/3500 in the first run, manually raised to 256 to complete it). FIXED 2026-10-31: the
+#   default is now 64 (aligned with the SaaS gateway in-flight default), quota-ledger 429s carry
+#   Retry-After, and a re-run at the shipped default produced 3500/3500 success / 0 429 at
+#   1172.4 rps (classic-c32-json-default64 below). The first c32-json row above used the raised 256.
 # Harness: scripts/performance/local-ab/classic-setup.ts + run-profile.sh + bench-client.
 # Environment: same M1 Pro host as all prior baselines; NOISE DOMINATES — the first c32-json
 #   run hit a quiet window (load ~2-3), the reruns landed in load ~4-6 and are mutually
@@ -30,3 +33,4 @@ c32-json-rerun2,32,json,3500,410.36,3500,3500,78.02,85.96,89.02,4.049,noisy,0,26
 c32-sse,32,sse,3500,862.51,3500,3500,35.23,44.59,116.19,2.917,quiet,17,6
 c64-json,64,json,3500,664.22,3500,3500,95.92,109.84,112.04,3.063,quiet,10,0
 c64-sse,64,sse,3500,515.53,3500,3500,124.95,139.54,142.81,3.643,quiet,22,0
+c32-json-default64,32,json,3500,1172.37,3500,3500,25.70,33.22,96.65,2.311,quiet,9,23
