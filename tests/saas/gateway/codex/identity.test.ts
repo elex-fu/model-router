@@ -8,8 +8,11 @@ import {
   CODEX_MIN_VERSION,
   deriveStableUUIDv4,
   isolateSessionId,
+  readSyncedCodexVersion,
+  resetSyncedCodexVersionForTests,
   resolveFingerprintIds,
   semverGte,
+  updateSyncedCodexVersion,
 } from '../../../../src/saas/gateway/codex/identity.js';
 
 test('semverGte compares numerically across all three components', () => {
@@ -61,6 +64,59 @@ test('buildCanonicalIdentity supports a custom terminal profile', () => {
     terminal: 'WindowsTerminal',
   });
   assert.equal(identity.userAgent, 'codex_cli_rs/0.146.0 (Windows 11.0.0; x86_64) WindowsTerminal');
+});
+
+test('updateSyncedCodexVersion stores only stable versions at or above the minimum and reports changes', () => {
+  resetSyncedCodexVersionForTests();
+  try {
+    assert.equal(readSyncedCodexVersion(), null);
+    assert.equal(updateSyncedCodexVersion('0.150.0'), true);
+    assert.equal(readSyncedCodexVersion(), '0.150.0');
+    // Same value again: stored, but not a change.
+    assert.equal(updateSyncedCodexVersion('0.150.0'), false);
+    // Malformed input is rejected without throwing and without storing.
+    assert.equal(updateSyncedCodexVersion('rust-v0.151.0'), false);
+    assert.equal(updateSyncedCodexVersion(''), false);
+    assert.equal(updateSyncedCodexVersion('0.151'), false);
+    // Prerelease suffixes are never stable sync targets.
+    assert.equal(updateSyncedCodexVersion('0.151.0-beta.1'), false);
+    assert.equal(updateSyncedCodexVersion('0.151.0-rc.1'), false);
+    // Below the upstream minimum the backend answers 404, so it stays out.
+    assert.equal(updateSyncedCodexVersion('0.143.9'), false);
+    assert.equal(readSyncedCodexVersion(), '0.150.0');
+  } finally {
+    resetSyncedCodexVersionForTests();
+  }
+});
+
+test('buildCanonicalIdentity resolution order: explicit override > synced slot > baseline', () => {
+  resetSyncedCodexVersionForTests();
+  try {
+    updateSyncedCodexVersion('0.150.0');
+    // Synced slot beats the baseline for callers that pass no override.
+    assert.equal(buildCanonicalIdentity().version, '0.150.0');
+    // An explicit valid override always wins, even below the synced value.
+    assert.equal(buildCanonicalIdentity('0.148.1').version, '0.148.1');
+    // An ineligible override degrades to the synced slot, not the baseline.
+    assert.equal(buildCanonicalIdentity('0.100.0').version, '0.150.0');
+    assert.equal(buildCanonicalIdentity('garbage').version, '0.150.0');
+    resetSyncedCodexVersionForTests();
+    // With no synced slot and no override, the baseline stands.
+    assert.equal(buildCanonicalIdentity().version, CODEX_BASELINE_VERSION);
+  } finally {
+    resetSyncedCodexVersionForTests();
+  }
+});
+
+test('a synced slot below the minimum is ignored, so the baseline wins', () => {
+  resetSyncedCodexVersionForTests();
+  try {
+    assert.equal(updateSyncedCodexVersion('0.143.9'), false);
+    assert.equal(readSyncedCodexVersion(), null);
+    assert.equal(buildCanonicalIdentity().version, CODEX_BASELINE_VERSION);
+  } finally {
+    resetSyncedCodexVersionForTests();
+  }
 });
 
 test('accountIdentityNamespace builds the chatgpt account namespace and rejects malformed accounts', () => {

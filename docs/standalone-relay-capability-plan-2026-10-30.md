@@ -42,6 +42,15 @@ classic 当前实际客户端面：`/v1/messages`、`/v1/chat/completions`、`/v
 - **classic 性能基线完成（2026-10-30，D2 前置欠账清偿）**：`docs/performance/classic-baseline-20261030.csv`——完整生产路径（V2 config + SQLite 配额/遥测 + TLS mock 同源口径）。安静窗口 c32 JSON **1157.9 RPS / 2.33ms CPU·req**，超过本机全部既有同 mock 数字（SaaS fast 693–893、s2a 配对 729.5）；噪音窗口复测 410–424 RPS（方差来自环境，两轮复测互洽）。附带发现：classic 复用上游 TLS 连接（3500 请求仅 0–32 次完整握手，SaaS strict 为每请求一次）；V2 默认 `defaultMaxConcurrentRequests: 10` 对 API 形态使用过紧（压测首轮 3037 个 429）——**已修复（2026-10-31）**：默认 10→64（对齐 SaaS 网关在途信号量默认）、quota-ledger 并发拒绝补 `retryAfterMs: 1s`、quota 429 路径补 `Retry-After` 头（对齐内存 limiter/ipBlocker 路径）；默认值复测 3500/3500 成功 / 0 个 429 / 1172.4 RPS（CSV `c32-json-default64` 行）。注意：默认值只影响新建配置，存量配置的 10 需显式编辑。**D2 判据更新：单实例 c32 即 400–1100 RPS，自托管规模离多实例需求很远；若将来做 D2，"classic 连接复用 vs strict 每请求握手"是第一个该移植的点。**
 - 健康检查（2026-10-30）：`npx tsc --noEmit` 干净；新增测试合计 **11+6+17+15+48+8+13+12+3+3+6 = 142 项**（agents + 主线）；全量套件结果见提交说明。lint：改动文件 biome 干净（存量噪声与 HEAD 一致）。
 
+## Codex 订阅平价进展（2026-10-31，对比 sub2api 深挖后新增）
+
+- **P0-1 完成**：Codex 客户端版本自动同步——`src/saas/supply/codex-version-sync.ts` worker（GitHub `openai/codex` releases 跟随：`rust-v*` 稳定版 tag、404 回退列表端点、15s 超时、1MiB 上限、前向 only）+ settings 三键（`saas.codex.client_version` 管理员覆写 / `client_version_synced` worker 独占写 / `version_auto_sync_enabled` 默认开）+ identity 进程槽（override → synced → baseline 解析链）。防腐动机：上游对陈旧身份降载（流内 `server_is_overloaded`）、低于 0.144 直接 404。测试 17+3。
+- **P0-2 完成**：真实 instructions 模板——上游 `rust-v0.146.0`（Apache-2.0）五个家族资产（codex/gpt-5.6/gpt-5.5/gpt-5.4/gpt-5.2，来源 `gpt_5_codex_prompt.md` + models.json `base_instructions`）+ 生成器 `scripts/saas/codex-sync-instructions.ts`（资产与常量原子配对、lockstep 版本化、`--from-staged` 离线模式）+ 家族感知选择器（sub2api 映射语义：含 codex→codex 族，未知→5.5 最新兜底，永不返回空）。测试 21。
+- **P1-4（数据面）完成**：models manifest 投影模块 `models-manifest.ts`（0.146 models.json 的 slug/上下文窗口/推理档位/工具能力字段，纯投影无网络）——服务面接线（`/v1/models?client_version=` 返回 manifest 形状 + 组钉住）为后续。
+- **P1-5 完成**：模型别名表补全（sub2api 全集 12 条：退役 5.x 系→继任者）+ effort 后缀扩宽（`none/xhigh` 补齐）+ **effort 提取搬运**（模型 id 后缀的 effort 现在落进 `reasoning.effort` 而非被静默丢弃——此前 transform 注释声称如此但从未实现）。测试 +3。
+- 健康检查：tsc 干净；Codex 域测试 82/82；全量单相 7822/0 失败。
+- **未做**（后续按序）：P1-3 wham 主动配额+auto reset（3–4 天）、P1-4 服务面接线（2–3 天）、P2 端点广度（alpha search/realtime/PAT 凭证，按产品决策）、classic 下沉（等 SaaS 侧 P0/P1 补完启动）。
+
 ## Phase 0：卖相修正与验收基线（半天）
 
 ### C0 文档对齐 + Gemini 验收矩阵

@@ -111,19 +111,67 @@ export function semverGte(candidate: string, minimum: string): boolean {
 }
 
 /**
- * Canonical outbound identity trio. A `versionOverride` is honored only when
- * it is well-formed and at or above CODEX_MIN_VERSION; anything else degrades
- * to CODEX_BASELINE_VERSION because a low version is rejected upstream with
- * a plain 404. The three returned values are always mutually consistent.
+ * Process-level slot holding the latest auto-synced Codex CLI version (P0-1
+ * codex version auto-sync, the sub2api version-sync port). Only the sync
+ * worker writes it; the gateway hot path reads it through
+ * `buildCanonicalIdentity` without awaiting a settings row per request.
+ */
+let syncedCodexVersion: string | null = null;
+
+/**
+ * Stores a worker-observed stable version in the process-level synced slot.
+ * Validation mirrors the resolution chain (the internal semver parse): the
+ * value must be a well-formed, non-prerelease semver at or above
+ * CODEX_MIN_VERSION. Never throws — malformed or ineligible input simply
+ * returns false and leaves the slot untouched.
+ *
+ * @returns whether the stored synced version changed.
+ */
+export function updateSyncedCodexVersion(version: string): boolean {
+  if (typeof version !== 'string') return false;
+  const candidate = version.trim();
+  const parsed = parseSemver(candidate);
+  if (parsed === null || parsed.prerelease) return false;
+  if (!semverGte(candidate, CODEX_MIN_VERSION)) return false;
+  if (syncedCodexVersion === candidate) return false;
+  syncedCodexVersion = candidate;
+  return true;
+}
+
+/** The currently synced version, or null when the worker has not stored one. */
+export function readSyncedCodexVersion(): string | null {
+  return syncedCodexVersion;
+}
+
+/** Test-only: clears the synced slot so suites stay order-independent. */
+export function resetSyncedCodexVersionForTests(): void {
+  syncedCodexVersion = null;
+}
+
+/**
+ * Canonical outbound identity trio. Resolution order:
+ *
+ * 1. `versionOverride` — honored only when well-formed and at or above
+ *    CODEX_MIN_VERSION (an explicit per-request override always wins);
+ * 2. the process-level synced slot (`updateSyncedCodexVersion`), same
+ *    eligibility rule;
+ * 3. CODEX_BASELINE_VERSION.
+ *
+ * Anything else degrades to CODEX_BASELINE_VERSION because a low version is
+ * rejected upstream with a plain 404. The three returned values are always
+ * mutually consistent.
  */
 export function buildCanonicalIdentity(
   versionOverride?: string,
   profile: CodexTerminalProfile = CODEX_DEFAULT_TERMINAL_PROFILE,
 ): CodexCanonicalIdentity {
-  const version =
+  const overrideVersion =
     versionOverride !== undefined && versionOverride !== null && semverGte(versionOverride, CODEX_MIN_VERSION)
       ? versionOverride.trim()
-      : CODEX_BASELINE_VERSION;
+      : null;
+  const syncedVersion =
+    syncedCodexVersion !== null && semverGte(syncedCodexVersion, CODEX_MIN_VERSION) ? syncedCodexVersion : null;
+  const version = overrideVersion ?? syncedVersion ?? CODEX_BASELINE_VERSION;
   const originator = CODEX_DEFAULT_ORIGINATOR;
   const userAgent = `${originator}/${version} (${profile.os} ${profile.osVersion}; ${profile.arch}) ${profile.terminal}`;
   return { userAgent, originator, version };

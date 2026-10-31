@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { CODEX_FALLBACK_INSTRUCTIONS } from '../../../../src/saas/gateway/codex/instructions.js';
+import { CODEX_FAMILY_INSTRUCTIONS } from '../../../../src/saas/gateway/codex/instructions-families.generated.js';
 import {
   applyCodexCompilation,
   codexProviderRequestTransform,
@@ -61,15 +61,16 @@ test('chat.completions → responses: tool definitions convert to responses func
   assert.equal(converted.tool_choice, 'auto');
 });
 
-test('compilation injects fallback instructions only when the body has none', () => {
+test('compilation injects family instructions when the body has none', () => {
   const withClient = applyCodexCompilation({ model: 'm', input: [], instructions: 'client wins' }) as Record<
     string,
     unknown
   >;
   assert.equal(withClient.instructions, 'client wins');
 
+  // No instructions + unknown model → latest-known family prompt (gpt-5.5).
   const without = applyCodexCompilation({ model: 'm', input: [] }) as Record<string, unknown>;
-  assert.equal(without.instructions, CODEX_FALLBACK_INSTRUCTIONS);
+  assert.equal(without.instructions, CODEX_FAMILY_INSTRUCTIONS['gpt-5.5']);
 });
 
 test('compilation forces the codex wire contract (store=false, stream=true)', () => {

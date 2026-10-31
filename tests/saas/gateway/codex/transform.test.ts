@@ -4,6 +4,7 @@ import {
   aliasReservedToolNames,
   applyCodexOAuthTransform,
   normalizeCodexModel,
+  normalizeCodexModelWithEffort,
   restoreReservedToolNames,
 } from '../../../../src/saas/gateway/codex/transform.js';
 
@@ -15,13 +16,53 @@ function asRecord(value: unknown): Record<string, unknown> {
 test('normalizeCodexModel maps retired ids and strips reasoning-effort suffixes', () => {
   assert.equal(normalizeCodexModel('gpt-5.1-codex-max'), 'gpt-5.3-codex');
   assert.equal(normalizeCodexModel('gpt-5.1-codex-max-high'), 'gpt-5.3-codex');
-  assert.equal(normalizeCodexModel('gpt-5.2-codex-high'), 'gpt-5.2-codex');
-  assert.equal(normalizeCodexModel('gpt-5.2-codex-medium'), 'gpt-5.2-codex');
-  assert.equal(normalizeCodexModel('gpt-5.2-codex-low'), 'gpt-5.2-codex');
+  // sub2api-parity alias set: retired 5.x-era ids map to successors.
+  assert.equal(normalizeCodexModel('gpt-5.2-codex-high'), 'gpt-5.2');
+  assert.equal(normalizeCodexModel('gpt-5.2-codex-medium'), 'gpt-5.2');
+  assert.equal(normalizeCodexModel('gpt-5.2-codex-low'), 'gpt-5.2');
+  assert.equal(normalizeCodexModel('gpt-5-codex'), 'gpt-5.3-codex');
+  assert.equal(normalizeCodexModel('codex-mini-latest'), 'gpt-5.3-codex');
+  assert.equal(normalizeCodexModel('gpt-5.3'), 'gpt-5.3-codex');
+  assert.equal(normalizeCodexModel('gpt-5.4-chat-latest'), 'gpt-5.4');
+  assert.equal(normalizeCodexModel('gpt-5.1'), 'gpt-5.4');
+  assert.equal(normalizeCodexModel('gpt-5-mini'), 'gpt-5.4');
+  assert.equal(normalizeCodexModel('gpt-5'), 'gpt-5.4');
+  // Effort suffixes: none/xhigh widened alongside high/medium/low.
+  assert.equal(normalizeCodexModel('gpt-5.4-none'), 'gpt-5.4');
+  assert.equal(normalizeCodexModel('gpt-5.4-xhigh'), 'gpt-5.4');
   assert.equal(normalizeCodexModel('gpt-5.3-codex'), 'gpt-5.3-codex');
-  assert.equal(normalizeCodexModel('gpt-5-codex-high-low'), 'gpt-5-codex');
+  // Multi-suffix + retired base: full alias chain applies after stripping.
+  assert.equal(normalizeCodexModel('gpt-5-codex-high-low'), 'gpt-5.3-codex');
   // Unknown names pass through untouched.
   assert.equal(normalizeCodexModel('gpt-9-codex'), 'gpt-9-codex');
+});
+
+test('normalizeCodexModelWithEffort lifts the encoded effort out of the model id', () => {
+  assert.deepEqual(normalizeCodexModelWithEffort('gpt-5.3-codex-high'), {
+    model: 'gpt-5.3-codex',
+    effort: 'high',
+  });
+  assert.deepEqual(normalizeCodexModelWithEffort('gpt-5.4-none'), { model: 'gpt-5.4', effort: 'none' });
+  assert.deepEqual(normalizeCodexModelWithEffort('gpt-5.4-xhigh'), { model: 'gpt-5.4', effort: 'xhigh' });
+  assert.deepEqual(normalizeCodexModelWithEffort('gpt-5.5'), { model: 'gpt-5.5', effort: null });
+  // Multi-suffix ids: the rightmost suffix is the client's declared effort
+  // and the retired base still walks the alias chain.
+  assert.deepEqual(normalizeCodexModelWithEffort('gpt-5-codex-high-low'), {
+    model: 'gpt-5.3-codex',
+    effort: 'low',
+  });
+});
+
+test('applyCodexOAuthTransform moves a model-id effort into reasoning.effort', () => {
+  const result = asRecord(applyCodexOAuthTransform({ model: 'gpt-5.3-codex-high' }));
+  assert.equal(result.model, 'gpt-5.3-codex');
+  assert.deepEqual(result.reasoning, { effort: 'high' });
+  // An explicit client effort wins over the id-encoded one.
+  const explicit = asRecord(applyCodexOAuthTransform({ model: 'gpt-5.3-codex-high', reasoning: { effort: 'low' } }));
+  assert.deepEqual(explicit.reasoning, { effort: 'low' });
+  // A model id without a suffix never fabricates a reasoning block.
+  const plain = asRecord(applyCodexOAuthTransform({ model: 'gpt-5.5' }));
+  assert.equal(plain.reasoning, undefined);
 });
 
 test('applyCodexOAuthTransform forces store=false and stream=true and strips non-whitelisted fields', () => {

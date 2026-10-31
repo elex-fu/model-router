@@ -356,6 +356,13 @@ import {
   type CredentialValidationWorkerOptions,
   startCredentialValidationWorker as startValidationWorkerLoop,
 } from '../saas/supply/credential-validation-worker.js';
+import {
+  type CodexVersionSyncSettings,
+  type CodexVersionSyncWorkerHandle,
+  type CodexVersionSyncWorkerOptions,
+  seedSyncedCodexVersionFromSettings,
+  startCodexVersionSyncWorker,
+} from '../saas/supply/codex-version-sync.js';
 import { type CustomerByokHttpHandler, createCustomerByokHttpHandler } from '../saas/supply/customer-http.js';
 import {
   type EgressProxyProbeWorkerHandle,
@@ -469,6 +476,7 @@ export interface ManagedSaasRuntime {
   readonly geminiUsageWorker: GeminiUsageWorkerHandle | null;
   /** F6 OpenRouter model-catalog/pricing sync loop; opt-in on the worker workload. */
   readonly openRouterModelPricingSyncWorker: OpenRouterModelPricingSyncWorkerHandle | null;
+  readonly codexVersionSyncWorker: CodexVersionSyncWorkerHandle | null;
   /** R3 egress-proxy probe + expiry-sweep loop; same workload as quota sync. */
   readonly egressProxyProbeWorker: EgressProxyProbeWorkerHandle | null;
   /** R6a scheduled probe monitor loop; same workload as quota sync. */
@@ -642,6 +650,23 @@ export interface ManagedSaasStartOptions {
     readonly store?: OpenRouterModelPricingSyncStore;
     /** Optional sync loop tuning or test fetch. */
     readonly worker?: Partial<OpenRouterModelPricingSyncWorkerOptions>;
+  };
+  /**
+   * P0-1: Codex CLI client-version auto-sync loop (the sub2api version-sync
+   * port) on the credential-validation-worker workload. Presence of this
+   * option ENABLES the loop — the F6 OpenRouter pricing-sync opt-in
+   * precedent — because the worker writes the
+   * `saas.codex.client_version_synced` platform settings row through the
+   * audited settings path (INSERT privileges on saas_platform_settings /
+   * saas_audit_events) that the restricted validation-worker role does not
+   * hold by default. Absent keeps the workload exactly as before (the
+   * compile-time baseline version in the outbound identity).
+   */
+  codexVersionSync?: {
+    /** Custom settings seam (tests); default adapts the PlatformSettingsService on this database. */
+    readonly settings?: CodexVersionSyncSettings;
+    /** Optional sync loop tuning or test fetch. */
+    readonly worker?: Partial<CodexVersionSyncWorkerOptions>;
   };
   /** R3: optional egress-proxy probe/sweep loop tuning. */
   egressProxyProbeWorkerOptions?: EgressProxyProbeWorkerOptions;
@@ -1495,6 +1520,41 @@ function targetsModuleData(value: object, key: string): unknown {
   }
 }
 
+/**
+ * P0-1: adapts the audited PlatformSettingsService to the narrow
+ * CodexVersionSyncSettings surface the codex-version-sync worker needs.
+ * Reads degrade to "absent" on any store error (the worker treats that as
+ * "nothing stored yet"); writes go through the CAS `set` path so the
+ * settings audit trail records every synced version. The service fixes the
+ * audit entry_point at 'platform_admin', so the worker label rides the
+ * actor's user-agent column.
+ */
+function adaptPlatformSettingsForCodexVersionSync(database: SaasDatabase): CodexVersionSyncSettings {
+  const service = new PlatformSettingsService(database);
+  return {
+    async get(key: string): Promise<unknown> {
+      try {
+        return (await service.get(key))?.value;
+      } catch {
+        return undefined;
+      }
+    },
+    async put(
+      key: string,
+      value: string,
+      context: Readonly<{ actor: string; entryPoint: string }>,
+    ): Promise<void> {
+      const record = await service.get(key);
+      await service.set({
+        key,
+        value,
+        expectedVersion: record?.version ?? 0,
+        actor: { actorUserId: null, userAgent: `${context.entryPoint}:${context.actor}` },
+      });
+    },
+  };
+}
+
 async function startCredentialValidationWorkerRuntime(
   deployment: ManagedSaasDeploymentConfig,
   options: ManagedSaasStartOptions,
@@ -1563,6 +1623,7 @@ async function startCredentialValidationWorkerRuntime(
   let cnProvidersQuotaWorker: CnProvidersQuotaWorkerHandle | undefined;
   let geminiUsageWorker: GeminiUsageWorkerHandle | undefined;
   let openRouterModelPricingSyncWorker: OpenRouterModelPricingSyncWorkerHandle | undefined;
+  let codexVersionSyncWorker: CodexVersionSyncWorkerHandle | undefined;
   let oauthRefreshWorker: OauthTokenRefreshWorkerHandle | undefined;
   let egressProxyProbeWorker: EgressProxyProbeWorkerHandle | undefined;
   let probeMonitorWorker: ProbeMonitorWorkerHandle | undefined;
@@ -1579,6 +1640,9 @@ async function startCredentialValidationWorkerRuntime(
       if (cnProvidersQuotaWorker) await Promise.allSettled([cnProvidersQuotaWorker.close()]);
       if (openRouterModelPricingSyncWorker) {
         await Promise.allSettled([openRouterModelPricingSyncWorker.close()]);
+      }
+      if (codexVersionSyncWorker) {
+        await Promise.allSettled([codexVersionSyncWorker.close()]);
       }
       if (oauthRefreshWorker) await Promise.allSettled([oauthRefreshWorker.close()]);
       if (egressProxyProbeWorker) await Promise.allSettled([egressProxyProbeWorker.close()]);
@@ -1699,6 +1763,33 @@ async function startCredentialValidationWorkerRuntime(
         options.openRouterModelPricingSync.worker,
       );
     }
+    // P0-1 (sub2api version-sync port): the Codex client-version sync loop.
+    // Same opt-in posture as the OpenRouter pricing-sync loop above: the
+    // worker writes `saas.codex.client_version_synced` through the audited
+    // platform settings path, which the restricted validation-worker role
+    // does not hold by default, so a deployment enables the loop explicitly.
+    // The loop is read-mostly (one GitHub releases poll per 6h cadence) and
+    // never touches credentials or the KMS.
+    if (options.codexVersionSync) {
+      const codexVersionSettings =
+        options.codexVersionSync.settings ?? adaptPlatformSettingsForCodexVersionSync(database);
+      // Startup seeding: the gateway/transport call sites pass no
+      // per-request version override, so the process-level synced slot in
+      // gateway/codex/identity.ts is the only injection point the hot path
+      // consults. Seed it once with max(synced, admin override) — the admin
+      // override key also keeps the worker's forward-only check above it —
+      // and the loop refreshes the slot from every synced write.
+      try {
+        await seedSyncedCodexVersionFromSettings(codexVersionSettings);
+      } catch {
+        // An unreadable settings store keeps the compile-time baseline; the
+        // loop's forward-only writes re-seed the slot on the next success.
+      }
+      codexVersionSyncWorker = startCodexVersionSyncWorker(
+        codexVersionSettings,
+        options.codexVersionSync.worker,
+      );
+    }
     // Track R3: the egress-proxy probe/sweep loop shares this workload's
     // database role and decrypt-only KMS, exactly like the quota sync loop.
     // Probes measure the exit IP the provider sees; the expiry sweep is the
@@ -1754,6 +1845,7 @@ async function startCredentialValidationWorkerRuntime(
       geminiUsageWorker: geminiUsageWorker,
       cnProvidersQuotaWorker: cnProvidersQuotaWorker,
       openRouterModelPricingSyncWorker: openRouterModelPricingSyncWorker ?? null,
+      codexVersionSyncWorker: codexVersionSyncWorker ?? null,
       egressProxyProbeWorker,
       probeMonitorWorker: probeMonitorWorker ?? null,
       probeRunRetentionWorker: null,
@@ -1994,6 +2086,7 @@ export async function startManagedSaasServer(
       cnProvidersQuotaWorker: null,
       geminiUsageWorker: null,
       openRouterModelPricingSyncWorker: null,
+      codexVersionSyncWorker: null,
       egressProxyProbeWorker: null,
       probeMonitorWorker: null,
       probeRunRetentionWorker: null,
@@ -3601,6 +3694,7 @@ export async function startManagedSaasServer(
       geminiUsageWorker: null,
       cnProvidersQuotaWorker: null,
       openRouterModelPricingSyncWorker: null,
+      codexVersionSyncWorker: null,
       egressProxyProbeWorker: null,
       probeMonitorWorker: null,
       probeRunRetentionWorker: probeRunRetentionWorker ?? null,

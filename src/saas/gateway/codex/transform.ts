@@ -56,12 +56,27 @@ const CODEX_REQUEST_FIELD_WHITELIST: ReadonlySet<string> = new Set([
   'max_output_tokens',
 ]);
 
-/** Model alias table: names the upstream no longer serves, mapped to successors. */
+/**
+ * Model alias table: names the upstream no longer serves, mapped to
+ * successors (sub2api-parity set: retired codex/5.x-era ids). Self-mapping
+ * identities are omitted — unknown ids pass through unchanged.
+ */
 const CODEX_MODEL_ALIASES: Readonly<Record<string, string>> = {
   'gpt-5.1-codex-max': 'gpt-5.3-codex',
+  'gpt-5.1-codex': 'gpt-5.3-codex',
+  'gpt-5.1-codex-mini': 'gpt-5.3-codex',
+  'gpt-5-codex': 'gpt-5.3-codex',
+  'codex-mini-latest': 'gpt-5.3-codex',
+  'gpt-5.3': 'gpt-5.3-codex',
+  'gpt-5.2-codex': 'gpt-5.2',
+  'gpt-5.4-chat-latest': 'gpt-5.4',
+  'gpt-5': 'gpt-5.4',
+  'gpt-5-mini': 'gpt-5.4',
+  'gpt-5-nano': 'gpt-5.4',
+  'gpt-5.1': 'gpt-5.4',
 };
 
-const REASONING_SUFFIX_PATTERN = /-(high|medium|low)$/;
+const REASONING_SUFFIX_PATTERN = /-(none|low|medium|high|xhigh)$/;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -75,17 +90,35 @@ function stripReasoningSuffixes(model: string): string {
   return current;
 }
 
+/** The reasoning effort a model-id suffix encodes (rightmost wins), or null. */
+function extractReasoningEffort(model: string): string | null {
+  const match = REASONING_SUFFIX_PATTERN.exec(model);
+  return match ? match[1]! : null;
+}
+
 /**
  * Normalizes a client-visible model name to one the codex backend accepts:
- * reasoning-effort suffixes (`-high`/`-medium`/`-low`) are stripped (the
- * effort belongs in `reasoning.effort`, not the model id) and retired model
- * ids are mapped through the alias table. Unknown names pass through.
+ * reasoning-effort suffixes (`-none`/`-low`/`-medium`/`-high`/`-xhigh`) are
+ * stripped (the effort belongs in `reasoning.effort`, not the model id) and
+ * retired model ids are mapped through the alias table. Unknown names pass
+ * through.
  */
 export function normalizeCodexModel(model: string): string {
   if (typeof model !== 'string' || model.length === 0) return model;
   const stripped = stripReasoningSuffixes(model);
   const aliased = CODEX_MODEL_ALIASES[stripped] ?? stripped;
   return stripReasoningSuffixes(aliased);
+}
+
+/**
+ * Full model normalization with the encoded reasoning effort: the suffix is
+ * lifted out of the model id so the caller can place it in
+ * `reasoning.effort` (the suffix on the wire is not a real model).
+ */
+export function normalizeCodexModelWithEffort(model: string): { model: string; effort: string | null } {
+  if (typeof model !== 'string' || model.length === 0) return { model, effort: null };
+  const effort = extractReasoningEffort(model);
+  return { model: normalizeCodexModel(model), effort };
 }
 
 function aliasToolDefinition(tool: unknown): unknown {
@@ -292,20 +325,38 @@ function normalizeContentArrays(result: Record<string, unknown>): void {
  * Non-object input throws `CodexTransformError` so the caller can fail
  * closed. Rules are applied in the order documented on the module.
  */
-export function applyCodexOAuthTransform(body: unknown, options: { readonly allowNativePreviousResponseId?: boolean } = {}): unknown {
+export function applyCodexOAuthTransform(
+  body: unknown,
+  options: { readonly allowNativePreviousResponseId?: boolean } = {},
+): unknown {
   if (!isRecord(body)) throw new CodexTransformError('MALFORMED_BODY');
-  if (body.previous_response_id !== undefined && body.previous_response_id !== null && !options.allowNativePreviousResponseId) {
+  if (
+    body.previous_response_id !== undefined &&
+    body.previous_response_id !== null &&
+    !options.allowNativePreviousResponseId
+  ) {
     throw new CodexTransformError('FULL_CONTEXT_REQUIRED');
   }
   const result: Record<string, unknown> = {};
   for (const key of Object.keys(body)) {
     if (CODEX_REQUEST_FIELD_WHITELIST.has(key)) result[key] = body[key];
   }
-  if (options.allowNativePreviousResponseId && typeof body.previous_response_id === 'string') result.previous_response_id = body.previous_response_id;
+  if (options.allowNativePreviousResponseId && typeof body.previous_response_id === 'string')
+    result.previous_response_id = body.previous_response_id;
   result.store = false;
   result.stream = true;
   if (typeof result.model === 'string') {
-    result.model = normalizeCodexModel(result.model);
+    const normalized = normalizeCodexModelWithEffort(result.model);
+    result.model = normalized.model;
+    if (normalized.effort !== null) {
+      // The effort encoded in the model id is lifted into reasoning.effort —
+      // an explicit client-provided effort always wins.
+      const reasoning = isRecord(result.reasoning) ? { ...result.reasoning } : {};
+      if (reasoning.effort === undefined) {
+        reasoning.effort = normalized.effort;
+        result.reasoning = reasoning;
+      }
+    }
   }
   ensureReasoningInclude(result, body);
   convertLegacyFunctions(body, result);

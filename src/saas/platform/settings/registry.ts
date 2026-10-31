@@ -65,6 +65,16 @@ export interface PlatformSettingDefinition {
  */
 export const PLATFORM_SETTINGS_CONSUMER_REGISTRATION_ADMISSION = 'registration-admission' as const;
 
+/**
+ * P0-1 codex version auto-sync (sub2api version-sync port): the reserved
+ * `saas.codex.*` keys. All plain, all strictly parsed locally (the
+ * parseTopupAmountTierDiscountsSetting precedent — no feature-module
+ * import needed for a two-rule grammar).
+ */
+export const CODEX_CLIENT_VERSION_SETTINGS_KEY = 'saas.codex.client_version';
+export const CODEX_CLIENT_VERSION_SYNCED_SETTINGS_KEY = 'saas.codex.client_version_synced';
+export const CODEX_VERSION_AUTO_SYNC_ENABLED_SETTINGS_KEY = 'saas.codex.version_auto_sync_enabled';
+
 /** Registration reward amounts are already covered by the per-key grammar above. */
 
 const MAX_TOPUP_TIER_DISCOUNTS = 16;
@@ -88,6 +98,36 @@ function registrationPlainDefinition(key: string, description: string): Platform
     description,
     parse: (value) => parseRegistrationSettingValue(key, value),
   };
+}
+
+const CODEX_CLIENT_VERSION_PATTERN = /^\d+\.\d+\.\d+$/;
+
+/**
+ * Strict grammar for the two codex client-version keys (admin override and
+ * the worker-synced value): trim, empty is allowed (= follow the synced
+ * value), otherwise a bare `MAJOR.MINOR.PATCH` semver with no prerelease
+ * suffix. Throws on anything else.
+ */
+export function parseCodexClientVersionSetting(value: unknown): string {
+  if (typeof value !== 'string') throw new Error('the codex client version must be a string');
+  const trimmed = value.trim();
+  if (trimmed === '') return '';
+  if (!CODEX_CLIENT_VERSION_PATTERN.test(trimmed)) {
+    throw new Error('the codex client version must be a bare semver such as 0.150.0 (no prerelease suffix)');
+  }
+  return trimmed;
+}
+
+/**
+ * Strict grammar for the codex version auto-sync switch: the strings
+ * "true"/"false" (normalized to booleans); actual booleans pass through.
+ * Absent means the default true (resolved by the reader, not the parser).
+ */
+export function parseCodexVersionAutoSyncEnabledSetting(value: unknown): boolean {
+  if (typeof value === 'boolean') return value;
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  throw new Error('the codex version auto-sync switch must be "true" or "false"');
 }
 
 const REGISTRATION_SETTING_DESCRIPTIONS: Readonly<Record<string, string>> = Object.freeze({
@@ -243,6 +283,32 @@ const DEFINITIONS: readonly PlatformSettingDefinition[] = [
     description:
       'Exact https origins allowed to embed the console (max 8); empty keeps frame-ancestors none (the default).',
     parse: parseBrandFrameAncestorsSetting,
+  },
+  // P0-1 codex version auto-sync (sub2api version-sync port): the
+  // `saas.codex.*` keys consumed by the codex-version-sync worker and the
+  // codex outbound identity. Plain keys carry no consumer allowlist (the
+  // registration/plaza/brand precedent); the synced key is worker-exclusive
+  // on the write side, which the description states for the admin console.
+  {
+    key: CODEX_CLIENT_VERSION_SETTINGS_KEY,
+    kind: 'plain',
+    description:
+      'Pinned Codex CLI client version for the canonical outbound identity (bare semver, e.g. 0.150.0); empty follows the auto-synced value. Values below the upstream minimum still degrade to the baseline at resolution time.',
+    parse: parseCodexClientVersionSetting,
+  },
+  {
+    key: CODEX_CLIENT_VERSION_SYNCED_SETTINGS_KEY,
+    kind: 'plain',
+    description:
+      'Auto-synced Codex CLI client version (bare semver, e.g. 0.150.0) tracked from the openai/codex GitHub releases. Written exclusively by the codex-version-sync worker; the admin console must treat it as read-only.',
+    parse: parseCodexClientVersionSetting,
+  },
+  {
+    key: CODEX_VERSION_AUTO_SYNC_ENABLED_SETTINGS_KEY,
+    kind: 'plain',
+    description:
+      'Codex client-version auto-sync switch ("true"/"false", default true); "false" pauses the codex-version-sync worker fetch cycles.',
+    parse: parseCodexVersionAutoSyncEnabledSetting,
   },
 ];
 

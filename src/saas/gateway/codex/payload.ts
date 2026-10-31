@@ -117,13 +117,24 @@ export function convertChatCompletionsToResponsesRequest(body: unknown): unknown
 /**
  * The codex compile step applied after the protocol bridge: instructions
  * injection, then the full codex OAuth transform (field whitelist,
- * store/stream forcing, aliasing). Pure; the input is never mutated.
+ * store/stream forcing, aliasing). Pure; the input is never mutated. The
+ * outbound model drives which family base prompt is injected when the body
+ * carries no instructions.
  */
-export function applyCodexCompilation(body: unknown, options: { readonly clientInstructions?: unknown; readonly allowNativePreviousResponseId?: boolean } = {}): unknown {
+export function applyCodexCompilation(
+  body: unknown,
+  options: {
+    readonly clientInstructions?: unknown;
+    readonly allowNativePreviousResponseId?: boolean;
+    /** Model carried by this payload; defaults to the body's `model` field. */
+    readonly model?: string;
+  } = {},
+): unknown {
   if (!isRecord(body)) return body;
+  const model = typeof options.model === 'string' ? options.model : typeof body.model === 'string' ? body.model : '';
   const withInstructions: Record<string, unknown> = {
     ...body,
-    instructions: resolveCodexInstructions(options.clientInstructions ?? body.instructions),
+    instructions: resolveCodexInstructions(options.clientInstructions ?? body.instructions, model),
   };
   return applyCodexOAuthTransform(withInstructions, options);
 }
@@ -151,7 +162,11 @@ export function codexProviderRequestTransform(input: CodexProviderRequestTransfo
     input.clientProtocol === 'openai' && input.providerProtocol === 'responses'
       ? (convertChatCompletionsToResponsesRequest(input.body) as Record<string, unknown>)
       : input.body;
-  return applyCodexCompilation(bridgeBody, { allowNativePreviousResponseId: input.upstreamTransport === 'websocket' && input.continuationMode === 'remote-history' });
+  return applyCodexCompilation(bridgeBody, {
+    allowNativePreviousResponseId:
+      input.upstreamTransport === 'websocket' && input.continuationMode === 'remote-history',
+    model: typeof bridgeBody.model === 'string' ? bridgeBody.model : undefined,
+  });
 }
 
 /** Alias kept for composition wiring symmetry with the transport factory. */
