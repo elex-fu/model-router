@@ -363,6 +363,11 @@ import {
   seedSyncedCodexVersionFromSettings,
   startCodexVersionSyncWorker,
 } from '../saas/supply/codex-version-sync.js';
+import { PostgresCodexWhamUsageStore } from '../saas/supply/codex-wham-usage-store-postgres.js';
+import {
+  type CodexWhamUsageWorkerHandle,
+  startCodexWhamUsageWorker,
+} from '../saas/supply/codex-wham-usage-worker.js';
 import { type CustomerByokHttpHandler, createCustomerByokHttpHandler } from '../saas/supply/customer-http.js';
 import {
   type EgressProxyProbeWorkerHandle,
@@ -474,6 +479,8 @@ export interface ManagedSaasRuntime {
   readonly cnProvidersQuotaWorker: CnProvidersQuotaWorkerHandle | null;
   /** R-dormant (batch 2.2): the gemini usage-snapshot loop; same workload. */
   readonly geminiUsageWorker: GeminiUsageWorkerHandle | null;
+  /** P1-3b: the codex /wham active usage-snapshot loop; same workload. */
+  readonly codexWhamUsageWorker: CodexWhamUsageWorkerHandle | null;
   /** F6 OpenRouter model-catalog/pricing sync loop; opt-in on the worker workload. */
   readonly openRouterModelPricingSyncWorker: OpenRouterModelPricingSyncWorkerHandle | null;
   readonly codexVersionSyncWorker: CodexVersionSyncWorkerHandle | null;
@@ -635,6 +642,17 @@ export interface ManagedSaasStartOptions {
   ) => PostgresProviderQuotaSnapshotStore;
   /** Optional gemini usage loop tuning; same workload as quota sync. */
   geminiUsageWorkerOptions?: Partial<GeminiUsageWorkerOptions>;
+  /**
+   * P1-3b: optional codex /wham usage loop tuning; same workload as quota
+   * sync. `autoResetEnabled` is deliberately opt-in (default false): redeeming
+   * a rate-limit reset credit is a quota-plane side effect, so it rolls out
+   * behind an explicit deployment decision.
+   */
+  codexWhamUsageWorkerOptions?: {
+    readonly autoResetEnabled?: boolean;
+    readonly refreshMs?: number;
+    readonly pollIntervalMs?: number;
+  };
   /**
    * F6 (task #39): OpenRouter catalog/pricing sync loop on the
    * credential-validation-worker workload. Presence of this option ENABLES
@@ -1622,6 +1640,7 @@ async function startCredentialValidationWorkerRuntime(
   let opencodeGoUsageWorker: OpencodeGoUsageWorkerHandle | undefined;
   let cnProvidersQuotaWorker: CnProvidersQuotaWorkerHandle | undefined;
   let geminiUsageWorker: GeminiUsageWorkerHandle | undefined;
+  let codexWhamUsageWorker: CodexWhamUsageWorkerHandle | undefined;
   let openRouterModelPricingSyncWorker: OpenRouterModelPricingSyncWorkerHandle | undefined;
   let codexVersionSyncWorker: CodexVersionSyncWorkerHandle | undefined;
   let oauthRefreshWorker: OauthTokenRefreshWorkerHandle | undefined;
@@ -1637,6 +1656,7 @@ async function startCredentialValidationWorkerRuntime(
       if (quotaWorker) await Promise.allSettled([quotaWorker.close()]);
       if (opencodeGoUsageWorker) await Promise.allSettled([opencodeGoUsageWorker.close()]);
       if (geminiUsageWorker) await Promise.allSettled([geminiUsageWorker.close()]);
+      if (codexWhamUsageWorker) await Promise.allSettled([codexWhamUsageWorker.close()]);
       if (cnProvidersQuotaWorker) await Promise.allSettled([cnProvidersQuotaWorker.close()]);
       if (openRouterModelPricingSyncWorker) {
         await Promise.allSettled([openRouterModelPricingSyncWorker.close()]);
@@ -1733,6 +1753,21 @@ async function startCredentialValidationWorkerRuntime(
     // Same workload, role and lease semantics as the opencode-go loop above;
     // a deployment without gemini accounts simply idles every round.
     geminiUsageWorker = startGeminiUsageWorker(createSnapshotStore(database, {}), options.geminiUsageWorkerOptions);
+    // P1-3b (sub2api quota-plane port): the codex /wham active usage loop
+    // queries the quota plane for codex platform-pool accounts and writes the
+    // same normalized 5h/7d snapshot the scheduler already consumes (until now
+    // only passive response-header snapshots existed). Same workload, role and
+    // SKIP LOCKED lease semantics as the gemini loop above; the claim filters
+    // on the codex binding triple, so a deployment without codex accounts
+    // simply idles every round. Auto reset-credit redemption stays opt-in via
+    // codexWhamUsageWorkerOptions (default false).
+    codexWhamUsageWorker = startCodexWhamUsageWorker(
+      new PostgresCodexWhamUsageStore(database, kms, createSnapshotStore(database, {}), {
+        deployment: deployment.deploymentId,
+        environment: deployment.environmentId,
+      }),
+      options.codexWhamUsageWorkerOptions,
+    );
     // Batch-3 (task #13): the CN-provider coding-plan quota probe loop
     // (zhipu /api/monitor/usage/quota/limit without Bearer; minimax
     // coding_plan/remains with Bearer). Same workload, role and lease
@@ -1843,6 +1878,7 @@ async function startCredentialValidationWorkerRuntime(
       quotaSyncWorker: quotaWorker,
       opencodeGoUsageWorker: opencodeGoUsageWorker,
       geminiUsageWorker: geminiUsageWorker,
+      codexWhamUsageWorker: codexWhamUsageWorker,
       cnProvidersQuotaWorker: cnProvidersQuotaWorker,
       openRouterModelPricingSyncWorker: openRouterModelPricingSyncWorker ?? null,
       codexVersionSyncWorker: codexVersionSyncWorker ?? null,
@@ -2085,6 +2121,7 @@ export async function startManagedSaasServer(
       opencodeGoUsageWorker: null,
       cnProvidersQuotaWorker: null,
       geminiUsageWorker: null,
+      codexWhamUsageWorker: null,
       openRouterModelPricingSyncWorker: null,
       codexVersionSyncWorker: null,
       egressProxyProbeWorker: null,
@@ -3692,6 +3729,7 @@ export async function startManagedSaasServer(
       quotaSyncWorker: null,
       opencodeGoUsageWorker: null,
       geminiUsageWorker: null,
+      codexWhamUsageWorker: null,
       cnProvidersQuotaWorker: null,
       openRouterModelPricingSyncWorker: null,
       codexVersionSyncWorker: null,

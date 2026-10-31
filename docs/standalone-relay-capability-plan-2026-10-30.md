@@ -49,7 +49,8 @@ classic 当前实际客户端面：`/v1/messages`、`/v1/chat/completions`、`/v
 - **P1-4（数据面）完成**：models manifest 投影模块 `models-manifest.ts`（0.146 models.json 的 slug/上下文窗口/推理档位/工具能力字段，纯投影无网络）——服务面接线（`/v1/models?client_version=` 返回 manifest 形状 + 组钉住）为后续。
 - **P1-5 完成**：模型别名表补全（sub2api 全集 12 条：退役 5.x 系→继任者）+ effort 后缀扩宽（`none/xhigh` 补齐）+ **effort 提取搬运**（模型 id 后缀的 effort 现在落进 `reasoning.effort` 而非被静默丢弃——此前 transform 注释声称如此但从未实现）。测试 +3。
 - 健康检查：tsc 干净；Codex 域测试 82/82；全量单相 7822/0 失败。
-- **未做**（后续按序）：P1-3 wham 主动配额+auto reset（3–4 天）、P1-4 服务面接线（2–3 天）、P2 端点广度（alpha search/realtime/PAT 凭证，按产品决策）、classic 下沉（等 SaaS 侧 P0/P1 补完启动）。
+- **P1-3 完成（2026-10-31）**：wham 主动配额 + auto reset——纯模块两件：`wham-usage.ts`（配额面身份头组[Codex Desktop originator / openai-beta: codex-1 / sec-fetch-* / priority]、usage 体投影[primary/secondary 窗口归一化复用 quota-headers 规则、additional_rate_limits、credits、reset credits 摘要]）与 `reset-credits.ts`（详情解析、UUID 幂等 consume 请求构造、可用性判定）。接线：`codex-wham-usage-worker.ts`（gemini usage worker 同构轮询，SKIP LOCKED 认领 `codex_usage_updated_at`[099 迁移既有列，**零新迁移**] → KMS 回调内解封凭证 → 15s/512KiB 有界 fetch → 写入与被动路径同一 `writeCodexSnapshot` 快照形状）+ auto reset 分支（窗口用尽 → 可用 credit → 幂等 consume → 重取 usage；**默认关**，配额面副作用需显式开启）。测试 23（纯模块）+ 18（worker+store）= 41 项。
+- **未做**（后续按序）：P1-4 服务面接线（2–3 天）、P2 端点广度（alpha search/realtime/PAT 凭证，按产品决策）、classic 下沉（等 SaaS 侧 P0/P1 补完启动）。
 
 ## Phase 0：卖相修正与验收基线（半天）
 
