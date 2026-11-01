@@ -98,7 +98,9 @@ function authJson(accountId: string, email: string): string {
       OPENAI_API_KEY: null,
       tokens: {
         id_token: makeIdToken(chatgptClaims(accountId, email)),
-        access_token: `codex-access-${accountId}`,
+        // JWT-shaped so the import path's expiry decode exercises (the real
+        // Codex CLI auth.json carries a JWT access token; refresh keeps it alive).
+        access_token: makeIdToken({ exp: Math.floor((Date.now() + 3_600_000) / 1000) }),
         refresh_token: `codex-refresh-${accountId}`,
         account_id: accountId,
       },
@@ -132,6 +134,18 @@ test('codex-account import reads a file and list shows the account (subprocess)'
     assert.match(imported.stdout, /login importer@example\.com/);
     assert.match(imported.stdout, /default codex_oauth account/);
     assert.match(imported.stdout, /Source: auth-json-import/);
+    // The access token's JWT exp is decoded into the account expiry so the
+    // CS1 refresh engine's margin logic covers imported accounts.
+    {
+      const ctl = new ControlStore(f.dir);
+      try {
+        const accounts = new OAuthAccountStore(f.configPath, ctl.secrets);
+        const imp = accounts.get('codex_oauth', 'acct-imp-1');
+        assert.ok(imp?.expiresAt !== undefined && imp.expiresAt > Date.now());
+      } finally {
+        ctl.close();
+      }
+    }
     // Credentials are sealed in the control store, never in account metadata.
     const metadata = readFileSync(join(f.dir, 'oauth-accounts.json'), 'utf8');
     assert.match(metadata, /secretRef/);
@@ -141,7 +155,7 @@ test('codex-account import reads a file and list shows the account (subprocess)'
     try {
       const accounts = new OAuthAccountStore(f.configPath, control.secrets);
       const stored = accounts.get('codex_oauth', 'acct-imp-1');
-      assert.equal(stored?.accessToken, 'codex-access-acct-imp-1');
+      assert.ok(stored?.accessToken.startsWith('eyJ') === false || stored.accessToken.split('.').length === 3);
       assert.equal(stored?.refreshToken, 'codex-refresh-acct-imp-1');
       assert.equal(stored?.isDefault, true);
       assert.equal(stored?.status, 'active');

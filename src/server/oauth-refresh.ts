@@ -393,12 +393,24 @@ export class OAuthRefreshEngine {
    * stored token is inside the expiry margin. Throws the re-authentication
    * error for revoked accounts and the no-account error when none is stored.
    */
-  async resolveAccessToken(provider: string, accountId?: string): Promise<string> {
+  async resolveAccessToken(
+    provider: string,
+    accountId?: string,
+    options?: { force?: boolean },
+  ): Promise<string> {
     const account = this.getAccount(provider, accountId);
     if (account === undefined) throw new Error(`No authenticated account for ${provider}`);
     if (isRevoked(account)) throw reauthenticationRequired(provider);
-    if (!this.shouldRefresh(account) || this.withinBackoff(account)) return account.accessToken;
-    await this.runExclusive(provider, account.id);
+    // `force` bypasses the expiry-margin check: a live 401 from the upstream
+    // is definitive evidence the token is dead even when the stored expiry is
+    // unknown (imported auth.json accounts) — the expiry margin is a
+    // proactive optimization, never the only refresh trigger. Backoff still
+    // applies: a forced refresh inside a failure backoff returns the stored
+    // token (a retry storm must not become a refresh storm).
+    if ((!options?.force && !this.shouldRefresh(account)) || this.withinBackoff(account)) {
+      return account.accessToken;
+    }
+    await this.runExclusive(provider, account.id, options?.force === true);
     const updated = this.getAccount(provider, accountId);
     if (updated === undefined) throw new Error(`No authenticated account for ${provider}`);
     if (isRevoked(updated)) throw reauthenticationRequired(provider);
@@ -466,21 +478,32 @@ export class OAuthRefreshEngine {
     return account.nextRetryAt !== undefined && account.nextRetryAt > this.now();
   }
 
-  private runExclusive(provider: string, accountId: string): Promise<void> {
+  private runExclusive(provider: string, accountId: string, force = false): Promise<void> {
     const key = `${provider}:${accountId}`;
     const existing = this.inFlight.get(key);
     if (existing !== undefined) return existing;
-    const run = this.refreshAccount(provider, accountId).finally(() => {
+    const run = this.refreshAccount(provider, accountId, force).finally(() => {
       this.inFlight.delete(key);
     });
     this.inFlight.set(key, run);
     return run;
   }
 
-  private async refreshAccount(provider: string, accountId: string): Promise<void> {
+  private async refreshAccount(provider: string, accountId: string, force = false): Promise<void> {
     const account = this.store.get(provider, accountId);
     if (account === undefined || isRevoked(account)) return;
-    if (!this.shouldRefresh(account) || this.withinBackoff(account)) return;
+    // `force` bypasses the expiry margin (a live 401 is definitive expiry
+    // evidence) but never the backoff or the provider binding: a forced
+    // refresh still needs a refresh token and a provider that supports it.
+    if ((!force && !this.shouldRefresh(account)) || this.withinBackoff(account)) return;
+    if (
+      force &&
+      (typeof account.refreshToken !== 'string' ||
+        account.refreshToken.length === 0 ||
+        resolveOAuthRefreshProviderSpec(account.provider, account) === null)
+    ) {
+      return;
+    }
 
     // Crash-observability stamp before the network call: a crash in this
     // window leaves 'refreshing' on disk, which loads as active (a crashed

@@ -161,12 +161,38 @@ export async function registerCodexAccount(
     ...(bound.login === undefined ? {} : { login: bound.login }),
     accessToken: bound.accessToken,
     refreshToken: bound.refreshToken,
-    ...(bound.expiresAt === undefined ? {} : { expiresAt: bound.expiresAt }),
+    // The auth.json import path carries no expires_in — but the access token
+    // is a JWT whose exp claim IS the expiry. Decode it so the CS1 refresh
+    // engine's expiry-margin logic works for imported accounts; without it
+    // expiresAt stays null and the engine never proactively refreshes.
+    ...(bound.expiresAt === undefined
+      ? { expiresAt: decodeAccessTokenExpiry(bound.accessToken) }
+      : { expiresAt: bound.expiresAt }),
     isDefault,
     ...(bound.status === undefined ? {} : { status: bound.status }),
   };
   store.add(account);
   return { account: store.get('codex_oauth', account.id) ?? account, isDefault, source: bound.source };
+}
+
+/**
+ * Best-effort `exp` (seconds) decode from an access token's JWT payload →
+ * epoch ms. Returns undefined for opaque/non-JWT tokens or malformed
+ * payloads: expiry stays unknown rather than guessed.
+ */
+function decodeAccessTokenExpiry(accessToken: string): number | undefined {
+  const segments = accessToken.split('.');
+  if (segments.length !== 3) return undefined;
+  try {
+    const payload = JSON.parse(Buffer.from(segments[1]!, 'base64url').toString('utf-8')) as {
+      exp?: unknown;
+    };
+    const exp = payload.exp;
+    if (typeof exp !== 'number' || !Number.isSafeInteger(exp) || exp <= 0) return undefined;
+    return exp * 1000;
+  } catch {
+    return undefined;
+  }
 }
 
 function reportRegistered(registered: RegisteredCodexAccount, writeLine: (line: string) => void): void {

@@ -330,6 +330,30 @@ describe('OAuthRefreshEngine', () => {
     assert.equal(store.get('codex_oauth', 'a1')?.failureCount, 0);
   });
 
+  it('force refreshes a null-expiry account on demand (the 401 recovery path)', async () => {
+    // Imported auth.json accounts may carry no expiry; a live 401 from the
+    // upstream is the definitive signal, so {force:true} bypasses the margin.
+    store.put(baseAccount({ expiresAt: undefined }));
+    // Without force: unknown expiry returns the stored token, never refreshes.
+    assert.equal(await engine.resolveAccessToken('codex_oauth'), 'old-access');
+    assert.equal(fetchCalls.length, 0);
+    await engine.close();
+
+    const forced = new OAuthRefreshEngine(store, {
+      fetchImpl: async (url, init) => {
+        fetchCalls.push({ url, init });
+        return respond();
+      },
+      nowMs: () => now.value,
+    });
+    const token = await forced.resolveAccessToken('codex_oauth', undefined, { force: true });
+    assert.equal(token, 'new-access');
+    assert.equal(fetchCalls.length, 1);
+    // The refresh response recorded the expiry — subsequent resolves use the margin.
+    assert.ok(store.get('codex_oauth', 'a1')?.expiresAt !== undefined);
+    await forced.close();
+  });
+
   it('sweeps expiring accounts proactively and stops on close()', async () => {
     store.put(baseAccount());
     engine.start(5);

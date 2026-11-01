@@ -57,7 +57,7 @@ export type CodexAccountFailureClassification = 'credential_expired' | 'quota' |
  * expiry margin.
  */
 export interface CodexAccountEngine {
-  resolveAccessToken(provider: string, accountId?: string): Promise<string>;
+  resolveAccessToken(provider: string, accountId?: string, options?: { force?: boolean }): Promise<string>;
 }
 
 /**

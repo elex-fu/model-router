@@ -240,7 +240,7 @@ export class CodexAccountPool implements CodexAccountPoolContract {
       // whether a grant is actually due; a rejected grant never reaches the
       // request path from here.
       if (this.engine !== undefined) {
-        void this.engine.resolveAccessToken(this.provider, accountId).catch(() => {});
+        void this.engine.resolveAccessToken(this.provider, accountId, { force: true }).catch(() => {});
       }
       return;
     }
