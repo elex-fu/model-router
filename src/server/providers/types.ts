@@ -37,6 +37,18 @@ export interface UpstreamProviderSettings {
   readonly awsRegion?: string | null;
   /** Vertex location override (defaults to us-central1). */
   readonly vertexLocation?: string | null;
+  /**
+   * CS3: the codex subscription account selected for THIS request by the
+   * codex account pool (classic `codexAccount` upstreams). The codex account
+   * transport profile reads it in `buildAuth` — resolving the access token
+   * lazily through the refresh engine when `accessToken` is absent — and the
+   * chatgpt-account-id header from `chatgptAccountId` when known.
+   */
+  readonly codexAccount?: {
+    readonly accountId: string;
+    readonly accessToken?: string;
+    readonly chatgptAccountId?: string | null;
+  };
 }
 
 /** One outbound request as the dispatch has assembled it pre-auth. */

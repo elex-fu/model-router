@@ -93,6 +93,14 @@ program
   );
 
 program
+  .command('codex-account <action> [path]')
+  .description('Bind a Codex OAuth account: auth (PKCE browser flow), import (Codex CLI auth.json), list')
+  .option('-c, --config <path>', 'Path to V2 configuration')
+  .action((action, path, options) =>
+    management(async () => (await import('./codex-account.js')).codexAccountCli(action, options, path)),
+  );
+
+program
   .command('admin:bootstrap')
   .description('Create the first administrator via the local admin listener')
   .option('-c, --config <path>', 'Path to V2 configuration')

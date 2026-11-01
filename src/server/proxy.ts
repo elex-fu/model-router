@@ -53,6 +53,8 @@ import {
 import { authenticateProxyKey } from './auth.js';
 import type { CircuitBreaker } from './circuitBreaker.js';
 import { getClientIp } from './clientIp.js';
+import type { CodexAccountPoolContract, CodexAccountSelection } from './codex-account-pool.js';
+import { CODEX_ACCOUNT_TRANSPORT_ID, classifyCodexAccountFailure } from './codex-account-transport.js';
 import { optimizeCopilotBody, optimizeCopilotHeaders } from './copilotOptimizer.js';
 import { keyIpAllowed } from './key-ip-policy.js';
 import type { KeyPool } from './keyPool.js';
@@ -92,6 +94,15 @@ export interface ProxyHandlerOptions {
    * credentials when no override is supplied.
    */
   providerTransports?: { bedrock?: ProviderTransportProfile; vertex?: ProviderTransportProfile };
+  /**
+   * CS3/CS4: codex subscription-account pool for `codexAccount` upstreams —
+   * per-attempt account selection plus the failure/success feedback that
+   * drives account-level cooldowns (401 credential-expired, 429 quota,
+   * KeyPool-style strikes otherwise). Absent disables the capability.
+   */
+  codexAccountPool?: CodexAccountPoolContract;
+  /** CS3: codex account transport profile (engine-backed token resolution). */
+  codexAccountTransport?: ProviderTransportProfile;
   /** Server-only invocation; never populated from HTTP headers or request JSON. */
   internalPlayground?: {
     keyId: string;
@@ -1432,7 +1443,11 @@ export async function proxyHandler(
           !!upstream.oauth ||
           noAuth ||
           (upstream as { authMode?: string }).authMode === 'pass-through' ||
-          (upstream as { authMode?: string }).authMode === 'oauth';
+          (upstream as { authMode?: string }).authMode === 'oauth' ||
+          // CS3: codex subscription-account upstreams authenticate through the
+          // account pool (codexAccountTransport.buildAuth), never the static
+          // key pool — an empty apiKeys list must not skip the upstream.
+          !!(upstream as { codexAccount?: unknown }).codexAccount;
         const ownedCredentialIndex = previousOwner?.credentialId
           ? (upstream.credentialIds?.indexOf(previousOwner.credentialId) ?? -1)
           : -1;
@@ -1466,7 +1481,17 @@ export async function proxyHandler(
         }
         const entriesForUpstream = ownedEntry ? [ownedEntry] : rawEntries.slice();
 
-        const keyCount = usesClientAuth ? 1 : entriesForUpstream.length;
+        // CS3/CS4: codex accounts ARE the credentials — attempt one pool
+        // select() per schedulable account (the static key pool equivalent:
+        // one attempt per key entry), so a 401 on one account fails over to
+        // the next inside the same upstream. Floored at one attempt so an
+        // exhausted pool surfaces the clear "no authenticated codex account"
+        // 502 instead of a generic all-upstreams-failed error.
+        const keyCount = usesClientAuth
+          ? (upstream as { codexAccount?: unknown }).codexAccount
+            ? Math.max(1, options.codexAccountPool?.availableCount() ?? 1)
+            : 1
+          : entriesForUpstream.length;
 
         for (let k = 0; k < keyCount; k++) {
           if (abortController.signal.aborted || performance.now() >= deadline) break;
@@ -1624,6 +1649,10 @@ export async function proxyHandler(
           };
           // O4: the request settles on this upstream for metrics attribution.
           lastUpstreamName = upstream.name;
+          // CS3/CS4: mutable per-attempt holder — trySingleUpstream records the
+          // codex account the pool selected (one write point covers every
+          // TryResult exit path), and the feedback above reads it afterwards.
+          const codexAttempt: { accountId?: string } = {};
           const result = await trySingleUpstream({
             req,
             res,
@@ -1641,6 +1670,7 @@ export async function proxyHandler(
               oauth: upstream.oauth,
               bedrock: upstream.bedrock,
               vertex: upstream.vertex,
+              codexAccount: (upstream as { codexAccount?: { provider?: 'codex_oauth' } }).codexAccount,
               provider: upstream.provider,
               presetId: (upstream as { presetId?: string }).presetId,
               endpoint: (upstream as { endpoint?: string }).endpoint,
@@ -1663,6 +1693,9 @@ export async function proxyHandler(
             elapsedMs: elapsedLatencyMs,
             oauthResolver: options.oauthResolver,
             providerTransports: options.providerTransports,
+            codexAccountPool: options.codexAccountPool,
+            codexAccountTransport: options.codexAccountTransport,
+            codexAttempt,
             onCorrectiveRetry: async (previous) => {
               if (totalAttempts >= maxRetries || abortController.signal.aborted || performance.now() >= deadline) {
                 return { ...previous, shouldRetry: false, failureReason: 'corrective_retry_budget_exhausted' };
@@ -1743,6 +1776,9 @@ export async function proxyHandler(
             if (!usesClientAuth) {
               if (credentialEntry) options.keyPool?.markSuccess(upstream.name, credentialEntry);
             }
+            // CS3/CS4: a served codex-account attempt clears the account's
+            // failure streak in the pool.
+            if (codexAttempt.accountId) options.codexAccountPool?.markSuccess(codexAttempt.accountId);
             if (isStreaming && result.usagePromise) {
               if (limiter)
                 limiter.recordUsage(proxyKeyName, telemetryUsage.inputTotal ?? 0, telemetryUsage.outputTotal ?? 0);
@@ -1819,6 +1855,18 @@ export async function proxyHandler(
               );
           } else if (!usesClientAuth && statusNeedsKeyCooldown(result.statusCode)) {
             if (credentialEntry) options.keyPool?.markFailure(upstream.name, credentialEntry);
+          }
+
+          // CS3/CS4: feed codex account failures back to the pool (401 →
+          // credential_expired: cooldown + engine refresh ask; 429 → quota
+          // cooldown from the retry-after hint; anything else counts strikes
+          // with KeyPool 3-strike semantics). Client cancels never count.
+          if (codexAttempt.accountId && !result.ok && result.statusCode !== 499) {
+            options.codexAccountPool?.markFailure(
+              codexAttempt.accountId,
+              classifyCodexAccountFailure(result.statusCode ?? 502, result.errorMessage),
+              result.retryAfterMs !== undefined ? { retryAfterMs: result.retryAfterMs } : undefined,
+            );
           }
 
           const duration = Date.now() - tryStart;
@@ -2081,6 +2129,8 @@ async function trySingleUpstream(options: {
     oauth?: OAuthConfig;
     bedrock?: { accessKeyId: string; secretAccessKey: string; sessionToken?: string; region: string };
     vertex?: { serviceAccountJson: string; location?: string };
+    /** CS3: presence activates the codex subscription-account transport. */
+    codexAccount?: { provider?: 'codex_oauth' };
     provider: string;
     presetId?: string;
     endpoint?: string;
@@ -2103,6 +2153,10 @@ async function trySingleUpstream(options: {
   elapsedMs: () => number;
   oauthResolver?: OAuthTokenResolver;
   providerTransports?: { bedrock?: ProviderTransportProfile; vertex?: ProviderTransportProfile };
+  codexAccountPool?: CodexAccountPoolContract;
+  codexAccountTransport?: ProviderTransportProfile;
+  /** CS3/CS4: receives the account id selected for this attempt (see call site). */
+  codexAttempt?: { accountId?: string };
   onAttemptSent?: () => Promise<void> | void;
   onCorrectiveRetry?: (previous: TryResult) => Promise<TryResult | undefined>;
 }): Promise<TryResult> {
@@ -2126,6 +2180,9 @@ async function trySingleUpstream(options: {
     onAttemptSent,
     onCorrectiveRetry,
     providerTransports,
+    codexAccountPool,
+    codexAccountTransport,
+    codexAttempt,
   } = options;
 
   const localCtl = new AbortController();
@@ -2173,16 +2230,47 @@ async function trySingleUpstream(options: {
     String(req.headers['content-type'] ?? '').startsWith('multipart/form-data');
   // C3b: a declared Bedrock/Vertex credential block activates its transport
   // profile (SigV4 / SA-token auth, provider URL shapes, eventstream decode).
-  // Scoped to anthropic-protocol upstreams: Claude-on-Bedrock/Vertex is the
-  // covered path; other protocol/transport combinations fail closed below.
+  // CS3: a codexAccount block activates the codex subscription-account
+  // transport (chatgpt.com backend codex responses wire, account-pool auth).
+  const codexAccountBlock = upstream.codexAccount;
   const transport: ProviderTransportProfile | undefined = upstream.bedrock
-    ? (options.providerTransports?.bedrock ?? bedrockTransportProfile)
+    ? (providerTransports?.bedrock ?? bedrockTransportProfile)
     : upstream.vertex
-      ? (options.providerTransports?.vertex ?? vertexTransportProfile)
-      : undefined;
-  if (transport && upstream.protocol !== 'anthropic') {
+      ? (providerTransports?.vertex ?? vertexTransportProfile)
+      : codexAccountBlock
+        ? codexAccountTransport
+        : undefined;
+  // CS3: a codexAccount upstream without the transport/pool wiring is a
+  // server configuration error — fail closed instead of silently falling
+  // through to static-key auth with no credential.
+  if (codexAccountBlock && (codexAccountTransport === undefined || codexAccountPool === undefined)) {
+    cleanupSignal();
+    return {
+      ok: false,
+      shouldRetry: false,
+      statusCode: 502,
+      errorMessage: 'Codex account transport is not configured',
+    };
+  }
+  // Scoped protocols: Claude-on-Bedrock/Vertex is the covered path for the
+  // provider transports; the codex wire is the responses protocol. Anything
+  // else fails closed below rather than half-bridging a payload.
+  const requiredProtocol = codexAccountBlock ? 'responses' : 'anthropic';
+  if (transport && upstream.protocol !== requiredProtocol) {
     cleanupSignal();
     return { ok: false, shouldRetry: false, statusCode: 422, errorMessage: 'unsupported_capability' };
+  }
+  // CS3/CS4: resolve the subscription account for this attempt before the URL
+  // and auth stages consume it. An empty pool fails closed (502) — account
+  // upstreams have no static-key fallback.
+  let codexSelection: CodexAccountSelection | null = null;
+  if (codexAccountBlock) {
+    codexSelection = codexAccountPool?.select() ?? null;
+    if (codexSelection === null) {
+      cleanupSignal();
+      return { ok: false, shouldRetry: false, statusCode: 502, errorMessage: 'No authenticated codex account' };
+    }
+    if (codexAttempt) codexAttempt.accountId = codexSelection.accountId;
   }
   const providerSettings = {
     apiKey: apiKey || undefined,
@@ -2198,6 +2286,17 @@ async function trySingleUpstream(options: {
       ? {
           serviceAccountJson: upstream.vertex.serviceAccountJson,
           ...(upstream.vertex.location ? { vertexLocation: upstream.vertex.location } : {}),
+        }
+      : {}),
+    ...(codexSelection !== null
+      ? {
+          codexAccount: {
+            accountId: codexSelection.accountId,
+            ...(codexSelection.accessToken !== undefined ? { accessToken: codexSelection.accessToken } : {}),
+            ...(codexSelection.chatgptAccountId !== undefined
+              ? { chatgptAccountId: codexSelection.chatgptAccountId }
+              : {}),
+          },
         }
       : {}),
   };
@@ -2233,11 +2332,15 @@ async function trySingleUpstream(options: {
   try {
     if (transport) {
       // C3b: the transport owns the URL shape (Bedrock invoke paths, Vertex
-      // rawPredict paths) — model and streaming intent ride the URL.
+      // rawPredict paths) — model and streaming intent ride the URL. CS3: the
+      // codex wire is the responses protocol — streaming rides the body
+      // (store/stream flags), never the URL.
+      const transportEndpoint =
+        transport.id === CODEX_ACCOUNT_TRANSPORT_ID ? 'responses' : isStreaming ? 'messages-stream' : 'messages';
       upstreamUrl = new URL(
         transport.buildUrl({
           baseUrl: upstream.baseUrl,
-          endpoint: isStreaming ? 'messages-stream' : 'messages',
+          endpoint: transportEndpoint,
           model: resolvedModel,
           stream: isStreaming,
           upstream: providerSettings,
@@ -2326,14 +2429,30 @@ async function trySingleUpstream(options: {
       }
     }
     // C3b: transport-level wire transforms (Bedrock drops `model` and injects
-    // anthropic_version in the body; Vertex injects its own version marker).
-    // Copy-on-write after the bridge transform: the input body is never mutated.
+    // anthropic_version in the body; Vertex injects its own version marker;
+    // CS3: codex applies the shared applyCodexOAuthTransform + instructions
+    // injection). Copy-on-write after the bridge transform: the input body is
+    // never mutated. A transport rejecting the wire body (codex
+    // FULL_CONTEXT_REQUIRED for previous_response_id, malformed shapes) is a
+    // client problem — 422, not a retryable upstream error.
     if (transport?.transformRequestBody && transformedBody && typeof transformedBody === 'object') {
-      const transportBody = transport.transformRequestBody(transformedBody, {
-        endpoint: isStreaming ? 'messages-stream' : 'messages',
-        model: resolvedModel,
-        stream: isStreaming,
-      });
+      let transportBody: Record<string, unknown> | null;
+      try {
+        transportBody = transport.transformRequestBody(transformedBody, {
+          endpoint:
+            transport.id === CODEX_ACCOUNT_TRANSPORT_ID ? 'responses' : isStreaming ? 'messages-stream' : 'messages',
+          model: resolvedModel,
+          stream: isStreaming,
+        });
+      } catch (error) {
+        cleanupSignal();
+        return {
+          ok: false,
+          shouldRetry: false,
+          statusCode: 422,
+          errorMessage: error instanceof Error ? error.message : 'upstream_body_rejected',
+        };
+      }
       if (transportBody) transformedBody = transportBody;
     }
     upstreamBodyBytes = Buffer.from(JSON.stringify(transformedBody), 'utf-8');
@@ -2683,7 +2802,13 @@ async function trySingleUpstream(options: {
       cleanupSignal();
       const retryableCredentialError =
         upstreamRes.status === 401 &&
-        (profile.id.startsWith('kimi-') || profile.id.startsWith('deepseek-') || profile.id.startsWith('custom-'));
+        (profile.id.startsWith('kimi-') ||
+          profile.id.startsWith('deepseek-') ||
+          profile.id.startsWith('custom-') ||
+          // CS3: a 401 from the codex account wire means the account
+          // credential expired — fail over to another pooled account (the
+          // pool's credential_expired cooldown skips the failed one).
+          transport?.id === CODEX_ACCOUNT_TRANSPORT_ID);
       return {
         ok: false,
         shouldRetry: retryableCredentialError || upstreamRes.status === 429,

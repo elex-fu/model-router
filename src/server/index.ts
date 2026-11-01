@@ -26,6 +26,8 @@ import { TelemetryWriteClient } from '../storage/telemetry-write-client.js';
 import { estimateCost, type PricingProfile, selectPrice } from '../telemetry/pricing.js';
 import { DEFAULT_CONFIG_PATH } from '../utils/paths.js';
 import { CircuitBreaker } from './circuitBreaker.js';
+import { CodexAccountPool } from './codex-account-pool.js';
+import { createCodexAccountTransport } from './codex-account-transport.js';
 import { reconcileObservedExternal } from './external-config-lifecycle.js';
 import { KeyPool } from './keyPool.js';
 import { type ManagedSaasStartOptions, startManagedSaasServer } from './managed-saas.js';
@@ -331,6 +333,20 @@ async function startLocalServer(
     startupOauthRefreshEngine = oauthRefreshEngine;
     oauthRefreshEngine.start();
     const oauthResolver = new OAuthTokenResolver(oauthAccounts, oauthRefreshEngine);
+    // CS3/CS4: codex subscription-account capability — the pool selects one
+    // 'codex_oauth' account per attempt (round-robin, cooldowns at account
+    // granularity) and the transport resolves live tokens through the same
+    // refresh engine. Constructed once so cooldown state survives requests.
+    const codexAccountPool = new CodexAccountPool({
+      // CS2's binding stores the chatgpt_account_id AS the account id (both
+      // the auth and import paths), so the structural chatgptAccountId the
+      // transport wants for the chatgpt-account-id header bridges from id
+      // here — one explicit place, not baked into the generic pool.
+      listing: () =>
+        oauthAccounts.list('codex_oauth').map((account) => ({ ...account, chatgptAccountId: account.id })),
+      engine: oauthRefreshEngine,
+    });
+    const codexAccountTransport = createCodexAccountTransport({ engine: oauthRefreshEngine });
 
     const control = new ControlService(
       configPath,
@@ -465,6 +481,8 @@ async function startLocalServer(
       metricsAuthToken: effectiveRaw.server.metricsAuthToken,
       sessionAffinity,
       oauthResolver,
+      codexAccountPool,
+      codexAccountTransport,
       maxRetries: effectiveRaw.server.maxAttempts,
       requestTimeoutMs: effectiveRaw.server.totalRequestTimeoutMs,
       connectTimeoutMs: effectiveRaw.server.connectTimeoutMs,
