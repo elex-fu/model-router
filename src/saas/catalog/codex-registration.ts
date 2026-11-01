@@ -1,5 +1,6 @@
 import {
   CODEX_CREDENTIAL_TYPE,
+  CODEX_CREDENTIAL_TYPE_PAT,
   CODEX_DISPLAY_NAME,
   CODEX_ENDPOINT,
   CODEX_PLACEHOLDER_MODELS,
@@ -22,6 +23,7 @@ import type {
 
 export {
   CODEX_CREDENTIAL_TYPE,
+  CODEX_CREDENTIAL_TYPE_PAT,
   CODEX_DISPLAY_NAME,
   CODEX_ENDPOINT,
   CODEX_PLACEHOLDER_MODELS,
@@ -42,12 +44,14 @@ export {
  * tests register the exact same identity everywhere.
  *
  * Identity contract (all sites must agree):
- * - provider `openai-codex`, product `codex-chatgpt`, credential type
- *   `oauth`, supply mode `platform`, region `global`, purpose `inference`;
+ * - provider `openai-codex`, product `codex-chatgpt`, credential types
+ *   `oauth` (P1c) and `pat` (P2c, sub2api parity: `at-*` personal access
+ *   tokens), supply mode `platform`, region `global`, purpose `inference`;
  * - protocol `responses`, endpoint scope `codex-responses`;
- * - the R4 refresh worker binds this same triple (its
+ * - the R4 refresh worker binds only the OAuth triple (its
  *   `openai-codex-oauth-v2` adapter) so platform accounts created against
- *   these rights are refreshed automatically.
+ *   these rights are refreshed automatically; PAT credentials match no
+ *   refresh binding and are skipped by construction.
  */
 
 export function codexProviderProductInput(): RegisterProviderProductInput {
@@ -111,6 +115,46 @@ export function codexPlatformRightsInput(
 /** Stable default rights id; operators may pass their own to `registerCodexProviderCatalog`. */
 export const CODEX_DEFAULT_RIGHTS_ID = 'codex-chatgpt-platform-oauth-v1';
 
+/**
+ * P2c sub2api parity: the PAT binding triple. Provider rights are single
+ * credential-type facts, so the `pat` credential type registers as a SECOND
+ * rights triple on the same provider/product/endpoint scope rather than
+ * widening the OAuth triple. Accounts created against it ride the same
+ * dispatch path; the credential is validated through the read-only
+ * auth.openai.com whoami and is never refreshed (the R4 refresh worker binds
+ * the OAuth triple only).
+ */
+export const CODEX_DEFAULT_PAT_RIGHTS_ID = 'codex-chatgpt-platform-pat-v1';
+
+export function codexPlatformPatRightsInput(
+  evidence: {
+    readonly rightsId: string;
+    readonly approvalReference: string;
+    readonly evidenceReference: string;
+    readonly sha256: string;
+    readonly effectiveAt: string;
+  },
+  audit?: ProviderRightsAuditContext,
+): RegisterProviderRightsVersionInput {
+  return {
+    rightsId: evidence.rightsId,
+    providerId: CODEX_PROVIDER_ID,
+    productId: CODEX_PRODUCT_ID,
+    credentialType: CODEX_CREDENTIAL_TYPE_PAT,
+    supplyMode: CODEX_SUPPLY_MODE,
+    region: CODEX_REGION,
+    purpose: CODEX_PURPOSE,
+    modelScope: [...CODEX_PLACEHOLDER_MODELS],
+    endpointScope: [CODEX_ENDPOINT],
+    effectiveAt: evidence.effectiveAt,
+    status: 'active',
+    approvalReference: evidence.approvalReference,
+    evidenceReference: evidence.evidenceReference,
+    evidenceSha256: evidence.sha256,
+    ...(audit === undefined ? {} : { audit }),
+  };
+}
+
 /** Registers product, capabilities and platform rights in one call (idempotent per catalog versioning). */
 export async function registerCodexProviderCatalog(
   catalog: Pick<
@@ -121,6 +165,7 @@ export async function registerCodexProviderCatalog(
     readonly evidenceVersion?: string;
     readonly effectiveAt?: string;
     readonly rightsId?: string;
+    readonly patRightsId?: string;
     readonly sha256?: string;
     readonly audit?: ProviderRightsAuditContext;
   } = {},
@@ -142,6 +187,18 @@ export async function registerCodexProviderCatalog(
         rightsId: options.rightsId ?? CODEX_DEFAULT_RIGHTS_ID,
         approvalReference: 'sub2api-parity-plan-phase-1',
         evidenceReference: `${CODEX_PROVIDER_ID}-${CODEX_PRODUCT_ID}-rights-preset`,
+        sha256,
+        effectiveAt,
+      },
+      options.audit,
+    ),
+  );
+  await catalog.registerProviderRightsVersion(
+    codexPlatformPatRightsInput(
+      {
+        rightsId: options.patRightsId ?? CODEX_DEFAULT_PAT_RIGHTS_ID,
+        approvalReference: 'sub2api-parity-plan-phase-2c',
+        evidenceReference: `${CODEX_PROVIDER_ID}-${CODEX_PRODUCT_ID}-pat-rights-preset`,
         sha256,
         effectiveAt,
       },

@@ -600,3 +600,66 @@ test('R2: catalog-rights incompatibility for embeddings fails closed as capabili
   assert.equal(incompatible.decision, 'block');
   if (incompatible.decision === 'block') assert.equal(incompatible.code, 'capability_unsupported');
 });
+
+test('P2-a: compiles an alpha search request with per-call bounds and the sanitized passthrough body', async () => {
+  const compiled = allowed(
+    await createProviderPayloadCompiler(
+      options({
+        operation: 'alpha_search',
+        clientOperation: 'alpha_search',
+        estimator: {
+          version: 'alpha-search-v1',
+          estimate: () => ({
+            inputTotalUpperBound: 0,
+            inputUncachedUpperBound: 0,
+            cacheReadUpperBound: 0,
+            cacheWriteUpperBound: 0,
+            cacheWrite5mUpperBound: 0,
+            cacheWrite1hUpperBound: 0,
+            outputTotalUpperBound: 0,
+            reasoningOutputUpperBound: 0,
+            feasibleInputBuckets: ['input'],
+            perUnitUnitsUpperBound: 1,
+          }),
+        },
+      }),
+    ).compile(
+      input({
+        model: 'public-alias',
+        commands: [{ type: 'web_search_run', query: 'hello' }],
+        prompt_cache_key: 'pc-key',
+        store: false,
+      }),
+    ),
+  );
+  assert.equal(compiled.providerProtocol, 'openai');
+  assert.equal(compiled.providerOperation, 'alpha_search');
+  assert.equal(compiled.usage.perUnitUnitsUpperBound, '1');
+  assert.equal(compiled.usage.outputTotalUpperBound, '0');
+  // The sub2api-documented Responses-only fields are stripped before the
+  // payload is signed; the resolved model replaces the requested one.
+  assert.deepEqual(JSON.parse(new TextDecoder().decode(compiled.payloadBytes)), {
+    model: 'provider-model',
+    commands: [{ type: 'web_search_run', query: 'hello' }],
+  });
+});
+
+test('P2-a: an alpha search request for a non-OpenAI provider protocol fails closed as capability_unsupported', async () => {
+  const bridged = await createProviderPayloadCompiler(
+    options({ operation: 'alpha_search', clientOperation: 'alpha_search', providerProtocol: 'anthropic' }),
+  ).compile(input({ model: 'public-alias', commands: [] }));
+  assert.equal(bridged.decision, 'block');
+  if (bridged.decision === 'block') assert.equal(bridged.code, 'capability_unsupported');
+});
+
+test('P2-a: catalog-rights incompatibility for alpha search fails closed as capability_unsupported', async () => {
+  const incompatible = await createProviderPayloadCompiler(
+    options({
+      operation: 'alpha_search',
+      clientOperation: 'alpha_search',
+      modelCompatibility: async (check) => check.providerOperation !== 'alpha_search',
+    }),
+  ).compile(input({ model: 'public-alias', commands: [] }));
+  assert.equal(incompatible.decision, 'block');
+  if (incompatible.decision === 'block') assert.equal(incompatible.code, 'capability_unsupported');
+});

@@ -10,6 +10,13 @@ import {
 } from '../observability/metrics.js';
 import type { GatewayCapabilityReadiness } from '../runtime/gateway-capability-readiness.js';
 import { resolveClientAddress } from './client-address.js';
+import { DEFAULT_CODEX_MODEL_MANIFEST } from './codex/models-manifest.js';
+import {
+  isCodexModelsManifestRequest,
+  matchesCodexModelsManifestEtag,
+  type RenderedCodexModelsManifest,
+  renderCodexModelsManifestResponse,
+} from './codex/models-manifest-http.js';
 import type { GatewayProtocol } from './contracts.js';
 import {
   COUNT_TOKENS_POLICY_HEADER,
@@ -19,13 +26,6 @@ import {
   estimateCountTokensInputTokens,
   resolveCountTokensPolicy,
 } from './count-tokens.js';
-import {
-  type RenderedCodexModelsManifest,
-  isCodexModelsManifestRequest,
-  matchesCodexModelsManifestEtag,
-  renderCodexModelsManifestResponse,
-} from './codex/models-manifest-http.js';
-import { DEFAULT_CODEX_MODEL_MANIFEST } from './codex/models-manifest.js';
 import { matchGeminiNativeContentPath, matchSaasEndpointEntry } from './endpoint-registry.js';
 import { FastGatewayExecutionError, type FastGatewayExecutorPort } from './fast/executor.js';
 import { type FastGatewayDiagnosticObserver, reportFastGatewayFailure } from './fast/failure-diagnostic.js';
@@ -240,6 +240,10 @@ const ROUTES = new Map<string, 'openai' | 'responses' | 'anthropic'>([
   // R2: the OpenAI embeddings operation rides the OpenAI inbound protocol
   // family; the per-route client operation below distinguishes it from chat.
   ['/v1/embeddings', 'openai'],
+  // P2-a: the Codex standalone web search rides the OpenAI inbound protocol
+  // family the same way (the R2 embeddings precedent); the per-route client
+  // operation below distinguishes the alpha_search operation.
+  ['/v1/alpha/search', 'openai'],
   // §4.3 (task #17): the standalone search endpoints ride the Responses
   // inbound family (the emulation constructs the outbound Responses body);
   // the per-route client operation below distinguishes web/x search.
@@ -286,6 +290,9 @@ const ROUTES = new Map<string, 'openai' | 'responses' | 'anthropic'>([
 const ROUTE_CLIENT_OPERATIONS = new Map<string, string>([
   ['/v1/responses/compact', 'responses.compact'],
   ['/v1/embeddings', 'embeddings'],
+  // P2-a: the Codex standalone web search (server-owned, path-derived,
+  // stateless — one call is the entire billable unit).
+  ['/v1/alpha/search', 'alpha_search'],
   // §4.3 (task #17): search operations (server-owned, path-derived).
   ['/v1/web_search', 'web_search'],
   ['/v1/x_search', 'x_search'],
@@ -1896,12 +1903,7 @@ export function createSaasGatewayHandler(options: SaasGatewayHttpOptions): SaasG
       if (isCodexModelsManifestRequest(requestQuery(req))) {
         const manifest = renderCodexModelsManifestResponse(DEFAULT_CODEX_MODEL_MANIFEST, models);
         if (manifest !== null) {
-          sendCodexModelsManifest(
-            res,
-            requestId,
-            manifest,
-            matchesCodexModelsManifestEtag(req.headers, manifest.etag),
-          );
+          sendCodexModelsManifest(res, requestId, manifest, matchesCodexModelsManifestEtag(req.headers, manifest.etag));
           return true;
         }
       }

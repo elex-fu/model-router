@@ -320,6 +320,8 @@ function operationForProtocol(protocol: RequestPreparationAuthority['route']['pr
  * operation. The trusted HTTP boundary derives it from the request path;
  * the authority records it as server-owned route provenance. Any other
  * operation mismatch fails closed.
+ * P2-a: the same rule admits the alpha_search operation (the Codex
+ * standalone web search, sub2api parity).
  */
 function routeOperations(
   protocol: RequestPreparationAuthority['route']['protocol'],
@@ -331,6 +333,9 @@ function routeOperations(
   }
   if (protocol === 'openai' && clientOperation === 'embeddings') {
     return { clientOperation: 'embeddings', providerOperation: 'embeddings' };
+  }
+  if (protocol === 'openai' && clientOperation === 'alpha_search') {
+    return { clientOperation: 'alpha_search', providerOperation: 'alpha_search' };
   }
   if (protocol === 'responses' && clientOperation === 'responses.compact') {
     return { clientOperation: 'responses.compact', providerOperation: 'responses.compact' };

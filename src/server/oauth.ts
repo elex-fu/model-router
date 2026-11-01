@@ -1,5 +1,6 @@
 import type { OAuthConfig } from '../config/types.js';
 import type { OAuthAccountStore } from './oauth-accounts.js';
+import type { OAuthRefreshEngine } from './oauth-refresh.js';
 
 interface TokenEntry {
   accessToken: string;
@@ -9,7 +10,16 @@ interface TokenEntry {
 export class OAuthTokenResolver {
   private cache = new Map<string, TokenEntry>();
 
-  constructor(private accountStore?: OAuthAccountStore) {}
+  constructor(
+    private accountStore?: OAuthAccountStore,
+    /**
+     * CS1 refresh engine for device_code accounts. When present it owns the
+     * account token lifecycle (refresh-before-expiry, backoff, revocation);
+     * when absent the legacy behavior below is preserved verbatim so bare
+     * resolver construction keeps working.
+     */
+    private refreshEngine?: OAuthRefreshEngine,
+  ) {}
 
   async resolve(config: OAuthConfig, provider?: 'github_copilot' | 'codex_oauth'): Promise<string> {
     const grantType = config.grantType ?? 'client_credentials';
@@ -25,10 +35,14 @@ export class OAuthTokenResolver {
       if (!account) {
         throw new Error(`No authenticated account for ${provider}`);
       }
+      if (this.refreshEngine) {
+        return this.refreshEngine.resolveAccessToken(provider);
+      }
       if (account.expiresAt && account.expiresAt < Date.now() + 60_000) {
         // refresh if expiring within 60s
         if (account.refreshToken) {
-          // refresh delegated to device flow manager in a real implementation
+          // Without an engine the refresh grant is unavailable; the account
+          // must be re-authenticated through the device flow.
           throw new Error(`Account token for ${provider} expired; re-authentication required`);
         }
       }

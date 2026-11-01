@@ -4,6 +4,8 @@ import { CLAUDE_CODE_MIMICRY_BETA_HEADER } from '../../../src/saas/gateway/claud
 import { buildCanonicalIdentity } from '../../../src/saas/gateway/codex/identity.js';
 import { grokCliIdentityHeaders } from '../../../src/saas/gateway/grok/constants.js';
 import {
+  CODEX_PAT_VALIDATION_MAX_RESPONSE_BYTES,
+  CODEX_PAT_VALIDATION_TIMEOUT_MS,
   credentialValidationCapabilityProtocol,
   isSupportedCredentialValidationTarget,
   KIMI_CODE_CREDENTIAL_VALIDATION_MAX_RESPONSE_BYTES,
@@ -1508,4 +1510,184 @@ test('Claude/Gemini OAuth adapters stay excluded from the API-key fixed probe re
       'the API-key account-probe path must never dial an OAuth endpoint',
     );
   }
+});
+
+/*
+ * P2c Codex PAT (`at-*`) whoami onboarding (sub2api parity). The pat
+ * credential type registers its own fixed adapter: a read-only
+ * auth.openai.com whoami GET whose JSON identity (chatgpt_account_id et al.)
+ * marks the credential verified and rides the success result.
+ */
+const codexPatTarget = {
+  providerId: 'openai-codex',
+  productId: 'codex-chatgpt',
+  model: 'gpt-5.3-codex',
+  endpoint: 'codex-responses',
+  url: 'https://auth.openai.com/api/accounts/v1/user-auth-credential/whoami',
+  adapterId: 'openai-codex-pat-whoami-v1',
+} as const;
+
+function codexPatJob(): ProviderCredentialValidationJobRecord {
+  return job({
+    providerId: codexPatTarget.providerId,
+    productId: codexPatTarget.productId,
+    credentialType: 'pat',
+    allowedModels: [codexPatTarget.model],
+    target: { model: codexPatTarget.model, endpoint: codexPatTarget.endpoint, version: 1 },
+  });
+}
+
+function codexPatSecret(overrides: Record<string, unknown> = {}): Buffer {
+  return Buffer.from(
+    JSON.stringify({
+      access_token: 'at-unit-pat-token',
+      chatgpt_account_id: 'acct-123',
+      token_type: 'Bearer',
+      ...overrides,
+    }),
+  );
+}
+
+function whoamiBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    email: 'user@example.com',
+    chatgpt_user_id: 'user-1',
+    chatgpt_account_id: 'acct-123',
+    chatgpt_plan_type: 'pro',
+    chatgpt_account_is_fedramp: false,
+    ...overrides,
+  };
+}
+
+test('the Codex PAT whoami probe dispatches the credential-plane GET and verifies the identity', async () => {
+  const candidate = codexPatJob();
+  assert.equal(isSupportedCredentialValidationTarget(candidate), true);
+  assert.equal(credentialValidationCapabilityProtocol(candidate), 'responses');
+  let calls = 0;
+  const result = await validateProviderCredential(candidate, codexPatSecret(), async (url, init) => {
+    calls += 1;
+    assert.equal(url.href, codexPatTarget.url);
+    assert.equal(init.method, 'GET');
+    assert.equal(init.redirect, 'manual');
+    assert.equal(init.body, undefined, 'the whoami GET carries no body');
+    const headers = new Headers(init.headers);
+    assert.equal(headers.get('authorization'), 'Bearer at-unit-pat-token');
+    assert.equal(headers.get('accept'), 'application/json');
+    const identity = buildCanonicalIdentity();
+    assert.equal(headers.get('user-agent'), identity.userAgent);
+    assert.equal(headers.get('originator'), identity.originator);
+    // Credential-plane request: the whoami resolves the account itself.
+    assert.equal(headers.get('chatgpt-account-id'), null);
+    assert.equal(headers.get('version'), null);
+    assert.equal(headers.get('openai-beta'), null);
+    assert.equal(headers.get('content-type'), null);
+    return jsonResponse(whoamiBody());
+  });
+  assert.equal(calls, 1);
+  assert.equal(result.state, 'verified');
+  if (result.state !== 'verified') throw new Error('expected whoami verification');
+  assert.equal(result.adapterId, codexPatTarget.adapterId);
+  assert.equal(result.httpStatus, 200);
+  assert.equal(result.resolvedChatgptAccountId, 'acct-123');
+  assert.equal(JSON.stringify(result).includes('at-unit-pat-token'), false);
+});
+
+test('the Codex PAT whoami probe surfaces the upstream account id, not a locally asserted one', async () => {
+  const result = await validateProviderCredential(codexPatJob(), codexPatSecret(), async () =>
+    jsonResponse(whoamiBody({ chatgpt_account_id: 'acct-upstream-999' })),
+  );
+  assert.equal(result.state, 'verified');
+  if (result.state !== 'verified') throw new Error('expected whoami verification');
+  assert.equal(result.resolvedChatgptAccountId, 'acct-upstream-999');
+});
+
+test('the Codex PAT whoami probe classifies upstream rejection like the OAuth probes', async () => {
+  const rejected = await validateProviderCredential(
+    codexPatJob(),
+    codexPatSecret(),
+    async () => new Response(null, { status: 401 }),
+  );
+  assert.equal(rejected.state, 'failed');
+  if (rejected.state !== 'failed') throw new Error('expected rejection');
+  assert.equal(rejected.errorCode, 'credential_rejected');
+  assert.equal(rejected.retryable, false);
+  assert.equal(rejected.adapterId, codexPatTarget.adapterId);
+});
+
+test('the Codex PAT whoami probe fails closed on a malformed whoami identity', async () => {
+  const candidate = codexPatJob();
+  for (const body of [
+    whoamiBody({ chatgpt_account_id: '' }),
+    whoamiBody({ chatgpt_plan_type: null }),
+    { ...whoamiBody(), chatgpt_account_is_fedramp: 'false' },
+    { status: 'ok' },
+  ]) {
+    const result = await validateProviderCredential(candidate, codexPatSecret(), async () => jsonResponse(body));
+    assert.equal(result.state, 'failed');
+    if (result.state !== 'failed') throw new Error('expected identity failure');
+    assert.equal(result.errorCode, 'provider_response_invalid');
+    assert.equal(result.retryable, false);
+  }
+  const nonJson = await validateProviderCredential(
+    candidate,
+    codexPatSecret(),
+    async () => new Response('user@example.com', { status: 200, headers: { 'content-type': 'text/plain' } }),
+  );
+  assert.equal(nonJson.state, 'failed');
+  if (nonJson.state !== 'failed') throw new Error('expected identity failure');
+  assert.equal(nonJson.errorCode, 'provider_response_invalid');
+});
+
+test('the Codex PAT whoami probe fails closed on malformed sealed material before transport', async () => {
+  const candidate = codexPatJob();
+  let calls = 0;
+  for (const secret of [
+    Buffer.from('at-plain-token'),
+    Buffer.from('{'),
+    Buffer.from(JSON.stringify({ chatgpt_account_id: 'acct-123' })),
+    Buffer.from(JSON.stringify({ access_token: 'codex-access-token', token_type: 'Bearer' })),
+    Buffer.from(JSON.stringify({ access_token: 'at-bad\ttoken' })),
+    Buffer.from(JSON.stringify({ access_token: 'at-unit-pat-token', chatgpt_account_id: 'bad id' })),
+  ]) {
+    const result = await validateProviderCredential(candidate, secret, async () => {
+      calls += 1;
+      return jsonResponse(whoamiBody());
+    });
+    assert.equal(result.state, 'failed');
+    if (result.state !== 'failed') throw new Error('expected format failure');
+    assert.equal(result.errorCode, 'credential_format_invalid');
+    assert.equal(result.adapterId, codexPatTarget.adapterId);
+  }
+  assert.equal(calls, 0);
+});
+
+test('the Codex PAT whoami probe keeps its own bounded budget', async () => {
+  assert.equal(CODEX_PAT_VALIDATION_TIMEOUT_MS, 15_000);
+  assert.equal(CODEX_PAT_VALIDATION_MAX_RESPONSE_BYTES, 16_384);
+  const oversized = await validateProviderCredential(codexPatJob(), codexPatSecret(), async () => {
+    const body = new ReadableStream<Uint8Array>();
+    return new Response(body, {
+      status: 200,
+      headers: {
+        'content-type': 'application/json',
+        'content-length': String(CODEX_PAT_VALIDATION_MAX_RESPONSE_BYTES + 1),
+      },
+    });
+  });
+  assert.equal(oversized.state, 'failed');
+  if (oversized.state !== 'failed') throw new Error('expected budget failure');
+  assert.equal(oversized.errorCode, 'provider_response_too_large');
+});
+
+test('the Codex PAT adapter stays excluded from the API-key fixed probe resolver', () => {
+  assert.equal(
+    resolveFixedCredentialProbeEndpoint({
+      providerId: codexPatTarget.providerId,
+      productId: codexPatTarget.productId,
+      credentialType: 'pat',
+      capabilityEndpoint: codexPatTarget.endpoint,
+    }),
+    null,
+    'the API-key account-probe path must never dial the PAT whoami endpoint',
+  );
 });

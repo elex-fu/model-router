@@ -629,12 +629,17 @@ function operationForProtocol(protocol: 'anthropic' | 'openai' | 'gemini' | 'res
 /**
  * R2: the OpenAI protocol family additionally hosts the embeddings
  * operation; no other protocol accepts a second operation.
+ * P2-a: the family also hosts the alpha_search operation (the Codex
+ * standalone web search, sub2api parity).
  */
 function operationAllowedForProtocol(
   protocol: 'anthropic' | 'openai' | 'gemini' | 'responses',
   operation: string,
 ): boolean {
-  return operation === operationForProtocol(protocol) || (protocol === 'openai' && operation === 'embeddings');
+  return (
+    operation === operationForProtocol(protocol) ||
+    (protocol === 'openai' && (operation === 'embeddings' || operation === 'alpha_search'))
+  );
 }
 
 function asInputDigest(value: unknown): string {
@@ -3083,7 +3088,9 @@ export class SaasMeteringService {
 }
 
 export type { MeteringServiceOptions };
-
 // Strict persisted-row decoders shared by same-transaction proof consumers.
-export { attemptColumns as storedAttemptColumns, mapAttempt as mapStoredAttemptRecord };
-export { mapRequest as mapStoredRequestRecord };
+export {
+  attemptColumns as storedAttemptColumns,
+  mapAttempt as mapStoredAttemptRecord,
+  mapRequest as mapStoredRequestRecord,
+};

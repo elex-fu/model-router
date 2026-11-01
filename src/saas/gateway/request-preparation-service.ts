@@ -231,11 +231,14 @@ export interface RequestPreparationEntitlement {
 }
 
 export interface RequestPreparationEntitlementPort {
-  resolve(input: {
-    readonly caller: RequestPreparationCaller;
-    readonly publicModel: string;
-    readonly protocol: GatewayProtocol;
-  }, options?: RequestPreparationSqlOptions): Promise<RequestPreparationDecision<RequestPreparationEntitlement>>;
+  resolve(
+    input: {
+      readonly caller: RequestPreparationCaller;
+      readonly publicModel: string;
+      readonly protocol: GatewayProtocol;
+    },
+    options?: RequestPreparationSqlOptions,
+  ): Promise<RequestPreparationDecision<RequestPreparationEntitlement>>;
 }
 
 /** Route identity is server-owned; it cannot be selected by the client body. */
@@ -444,7 +447,10 @@ export interface RequestPreparationAdmissionPort {
     options: RequestPreparationSqlOptions,
   ): Promise<RequestPreparationDecision<GatewayRequestCanonicalCompilation | null>>;
   lookupExisting?(
-    input: RequestPreparationReplayLookupInput & { readonly requestFingerprint: string; readonly requestFingerprintVersion: string },
+    input: RequestPreparationReplayLookupInput & {
+      readonly requestFingerprint: string;
+      readonly requestFingerprintVersion: string;
+    },
     options: RequestPreparationSqlOptions,
   ): Promise<RequestPreparationDecision<null>>;
   authorizeAndReserve(
@@ -750,11 +756,14 @@ function normalizeOperationForProtocol(value: unknown, protocol: GatewayProtocol
  * onto OpenAI-family providers.
  * §4.3 (task #17): the OpenAI family also hosts the async video create
  * operations with the same constraint.
+ * P2-a: the OpenAI family also hosts the alpha_search operation (the Codex
+ * standalone web search) with the same constraint.
  */
 function operationAllowedForProtocol(protocol: GatewayProtocol, operation: string): boolean {
   return (
     operation === canonicalOperationForProtocol(protocol) ||
-    (protocol === 'openai' && (operation === 'embeddings' || operation === 'images.generations')) ||
+    (protocol === 'openai' &&
+      (operation === 'embeddings' || operation === 'alpha_search' || operation === 'images.generations')) ||
     // §4.3 (task #17): the Responses family additionally hosts the
     // standalone search operations (the emulation rides /responses; the
     // payload compiler constructs the outbound body server-side) and the
@@ -2121,65 +2130,124 @@ export class SaasRequestPreparationService {
       const readCanonical = this.dependencies.admission.readCanonicalCompilation;
       const lookupExisting = this.dependencies.admission.lookupExisting;
       if (!transaction || !readCanonical || !lookupExisting) {
-        return failure('blocked', 'admission', 'capability_unavailable', 'Transactional canonical replay lookup is unavailable', ids);
+        return failure(
+          'blocked',
+          'admission',
+          'capability_unavailable',
+          'Transactional canonical replay lookup is unavailable',
+          ids,
+        );
       }
       const replayInput: RequestPreparationReplayLookupInput = {
-        caller, entitlement, publicModel: input.publicModel, protocol: input.protocol,
-        clientAddress: input.clientAddress, clientKey: input.idempotencyKey, requestId: ids.requestId,
+        caller,
+        entitlement,
+        publicModel: input.publicModel,
+        protocol: input.protocol,
+        clientAddress: input.clientAddress,
+        clientKey: input.idempotencyKey,
+        requestId: ids.requestId,
       };
       try {
         const replay = await transaction.transaction(async (executor): Promise<RequestPreparationResult | null> => {
           // Isolation is already READ COMMITTED from BEGIN ISOLATION LEVEL in
           // the transaction wrapper; no redundant SET round-trip here.
-          const canonicalDecision = await this.invokeDecision('admission', () =>
-            readCanonical.call(this.dependencies.admission, replayInput, { executor }), 'storage_failure');
+          const canonicalDecision = await this.invokeDecision(
+            'admission',
+            () => readCanonical.call(this.dependencies.admission, replayInput, { executor }),
+            'storage_failure',
+          );
           if (canonicalDecision.decision !== 'allow') return decisionFailure('admission', canonicalDecision, ids);
           const canonical = canonicalDecision.value;
           if (canonical === null) return null;
           let compatible: { authority: RequestPreparationAuthority; facts: RequestPreparationPayloadFacts } | undefined;
           for (const candidate of authority.candidates ?? [authority.candidate]) {
-            if (candidate.providerId !== canonical.providerId || candidate.productId !== canonical.productId ||
-              candidate.resolvedModel !== canonical.resolvedModel) continue;
+            if (
+              candidate.providerId !== canonical.providerId ||
+              candidate.productId !== canonical.productId ||
+              candidate.resolvedModel !== canonical.resolvedModel
+            )
+              continue;
             const current = authorityForCandidate(authority, candidate);
             const route = routeFacts(current, input.protocol, input.clientOperation);
-            if (current.route.endpoint !== canonical.endpoint || input.publicModel !== canonical.publicModel ||
-              route.clientProtocol !== canonical.clientProtocol || route.providerProtocol !== canonical.providerProtocol ||
-              route.clientOperation !== canonical.clientOperation || route.providerOperation !== canonical.providerOperation) continue;
+            if (
+              current.route.endpoint !== canonical.endpoint ||
+              input.publicModel !== canonical.publicModel ||
+              route.clientProtocol !== canonical.clientProtocol ||
+              route.providerProtocol !== canonical.providerProtocol ||
+              route.clientOperation !== canonical.clientOperation ||
+              route.providerOperation !== canonical.providerOperation
+            )
+              continue;
             const currentIssue = validateAuthority(current, caller, entitlement, input.publicModel, input.protocol);
             if (currentIssue) return failure('blocked', 'authority', currentIssue.code, currentIssue.message, ids);
             const resolution = modelResolutionFor(input.publicModel, candidate.resolvedModel, current);
             if ('code' in resolution) return failure('blocked', 'authority', resolution.code, resolution.message, ids);
-            if (candidate.providerId === canonical.providerId && candidate.productId === canonical.productId &&
-              candidate.resolvedModel === canonical.resolvedModel && current.route.endpoint === canonical.endpoint &&
-              input.publicModel === canonical.publicModel && route.clientProtocol === canonical.clientProtocol &&
-              route.providerProtocol === canonical.providerProtocol && route.clientOperation === canonical.clientOperation &&
+            if (
+              candidate.providerId === canonical.providerId &&
+              candidate.productId === canonical.productId &&
+              candidate.resolvedModel === canonical.resolvedModel &&
+              current.route.endpoint === canonical.endpoint &&
+              input.publicModel === canonical.publicModel &&
+              route.clientProtocol === canonical.clientProtocol &&
+              route.providerProtocol === canonical.providerProtocol &&
+              route.clientOperation === canonical.clientOperation &&
               route.providerOperation === canonical.providerOperation &&
               resolution.requestedModel === canonical.modelResolution.requestedModel &&
               resolution.mappedModel === canonical.modelResolution.mappedModel &&
               resolution.resolvedModel === canonical.modelResolution.resolvedModel &&
               resolution.mappingSource === canonical.modelResolution.mappingSource &&
-              resolution.mappingVersion === canonical.modelResolution.mappingVersion) {
+              resolution.mappingVersion === canonical.modelResolution.mappingVersion
+            ) {
               compatible = { authority: current, facts: { ...route, modelResolution: resolution } };
               break;
             }
           }
-          if (!compatible) return failure('blocked', 'authority', 'capability_unavailable',
-            'No currently authorized candidate has the canonical compilation identity', ids);
+          if (!compatible)
+            return failure(
+              'blocked',
+              'authority',
+              'capability_unavailable',
+              'No currently authorized candidate has the canonical compilation identity',
+              ids,
+            );
           const selected = compatible;
-          const compiled = await this.invokeDecision('payload', () => this.dependencies.payload.compile({
-            caller, entitlement, authority: selected.authority, clientRequest: input.clientRequest,
-            ...selected.facts,
-          }));
+          const compiled = await this.invokeDecision('payload', () =>
+            this.dependencies.payload.compile({
+              caller,
+              entitlement,
+              authority: selected.authority,
+              clientRequest: input.clientRequest,
+              ...selected.facts,
+            }),
+          );
           if (compiled.decision !== 'allow') return decisionFailure('payload', compiled, ids);
           const payloadIssue = validatePayload(compiled.value, selected.facts);
           if (payloadIssue) return failure('blocked', 'payload', payloadIssue.code, payloadIssue.message, ids);
-          const existing = await this.invokeDecision('admission', () => lookupExisting.call(this.dependencies.admission, {
-            ...replayInput,
-            requestFingerprint: normalizePreparedFingerprint(compiled.value.requestFingerprint, compiled.value.requestFingerprintVersion),
-            requestFingerprintVersion: compiled.value.requestFingerprintVersion.trim(),
-          }, { executor }), 'storage_failure');
+          const existing = await this.invokeDecision(
+            'admission',
+            () =>
+              lookupExisting.call(
+                this.dependencies.admission,
+                {
+                  ...replayInput,
+                  requestFingerprint: normalizePreparedFingerprint(
+                    compiled.value.requestFingerprint,
+                    compiled.value.requestFingerprintVersion,
+                  ),
+                  requestFingerprintVersion: compiled.value.requestFingerprintVersion.trim(),
+                },
+                { executor },
+              ),
+            'storage_failure',
+          );
           if (existing.decision !== 'allow') return decisionFailure('admission', existing, ids);
-          return failure('blocked', 'admission', 'storage_failure', 'Canonical lookup did not return a bound request', ids);
+          return failure(
+            'blocked',
+            'admission',
+            'storage_failure',
+            'Canonical lookup did not return a bound request',
+            ids,
+          );
         });
         if (replay !== null) return replay;
       } catch {
@@ -2748,13 +2816,14 @@ export class SaasRequestPreparationService {
 
     try {
       return await transaction.transaction(async (executor) => {
-        const result = this.dependencies.reuseTransactionFacts === true
-          ? await withPreparationTransactionFacts(
-              executor,
-              { tenantId: caller.tenantId, requestId: ids.requestId, attemptId: ids.attemptId, payloadSha256 },
-              durableWork,
-            )
-          : await durableWork(executor);
+        const result =
+          this.dependencies.reuseTransactionFacts === true
+            ? await withPreparationTransactionFacts(
+                executor,
+                { tenantId: caller.tenantId, requestId: ids.requestId, attemptId: ids.attemptId, payloadSha256 },
+                durableWork,
+              )
+            : await durableWork(executor);
         if (result.outcome !== 'prepared') throw new RequestPreparationTransactionRollback(result);
         return result;
       });

@@ -100,6 +100,23 @@ test('R2: the operation selector routes embeddings to the embeddings estimator a
   assert.equal(embeddings.outputTotalUpperBound, '0');
 });
 
+test('P2-a: the operation selector routes alpha_search to the per-call estimator', () => {
+  const defaultEstimator = {
+    version: 'default-v1',
+    estimate: () => ({ inputTotalUpperBound: 1 }),
+  };
+  const selector = selectUsageUpperBoundEstimatorByOperation({ default: defaultEstimator });
+  const alpha = selector.estimate(estimatorInput({ model: 'm', commands: [] }, 'alpha_search'));
+  assert.equal(alpha.inputTotalUpperBound, '0');
+  assert.equal(alpha.outputTotalUpperBound, '0');
+  assert.equal(alpha.perUnitUnitsUpperBound, '1');
+  // Everything else keeps its own estimator.
+  const chat = selector.estimate(estimatorInput({ model: 'm', messages: [] }, 'chat.completions'));
+  assert.equal(chat.inputTotalUpperBound, 1);
+  const embeddings = selector.estimate(estimatorInput({ model: 'm', input: 'abcd' }));
+  assert.equal(embeddings.inputTotalUpperBound, '1');
+});
+
 test('4.3: the operation selector routes the videos.* family to the video estimator', () => {
   const defaultEstimator = {
     version: 'default-v1',
@@ -109,7 +126,10 @@ test('4.3: the operation selector routes the videos.* family to the video estima
     default: defaultEstimator,
     videos: createVideoUsageUpperBoundEstimator(),
   });
-  assert.match(selector.version, /^default-v1\+embeddings-usage-upper-bound\/v1\+video-usage-upper-bound\/v1$/);
+  assert.match(
+    selector.version,
+    /^default-v1\+embeddings-usage-upper-bound\/v1\+alpha-search-usage-upper-bound\/v1\+video-usage-upper-bound\/v1$/,
+  );
   const video = selector.estimate(
     estimatorInput({ model: 'grok-imagine-video-1.5', prompt: 'p', resolution: '720p', n: 2 }, 'videos.generations'),
   );

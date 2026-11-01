@@ -10,7 +10,7 @@ import {
   SAAS_ENDPOINT_REGISTRY,
 } from '../../../src/saas/gateway/endpoint-registry.js';
 
-test('R2 §7.2 + G-B3: the registry declares exactly the six SaaS entries with the §4 declaration fields', () => {
+test('R2 §7.2 + G-B3: the registry declares exactly the seven SaaS entries with the §4 declaration fields', () => {
   assert.deepEqual(
     SAAS_ENDPOINT_REGISTRY.map((entry) => `${entry.method} ${entry.path}`),
     [
@@ -20,6 +20,7 @@ test('R2 §7.2 + G-B3: the registry declares exactly the six SaaS entries with t
       'POST /v1beta/models/:model:streamGenerateContent',
       'GET /v1beta/models',
       'POST /v1/rerank',
+      'POST /v1/alpha/search',
     ],
   );
   for (const entry of SAAS_ENDPOINT_REGISTRY) {
@@ -52,6 +53,19 @@ test('R2 §7.2: the Gemini native entries carry CHECK-legal provenance; the auxi
   // widening; their attempts ride the family-canonical operation.
   assert.equal(byId.get('anthropic.count_tokens')?.provenanceOperation, 'messages');
   assert.equal(byId.get('responses.compact')?.provenanceOperation, 'responses.compact');
+});
+
+test('P2-a: the Codex alpha search entry rides the OpenAI family with family-canonical provenance', () => {
+  const byId = new Map(SAAS_ENDPOINT_REGISTRY.map((entry) => [entry.id, entry]));
+  const alphaSearch = byId.get('openai.alpha_search');
+  assert.ok(alphaSearch);
+  assert.equal(alphaSearch.protocol, 'openai');
+  assert.equal(alphaSearch.operation, 'alpha_search');
+  // The attempt provenance stays family-canonical until a follow-up
+  // migration widens the 029/104/134 CHECK to (openai, 'alpha_search').
+  assert.equal(alphaSearch.provenanceOperation, 'chat.completions');
+  assert.equal(alphaSearch.inputShape, 'json');
+  assert.equal(alphaSearch.method, 'POST');
 });
 
 test('R2 §7.2: matchGeminiNativeContentPath parses the public model from the path', () => {
@@ -94,6 +108,7 @@ test('R2 §7.2: matchSaasEndpointEntry answers method routing with 405 semantics
     ['DELETE', '/v1/responses/compact'],
     ['POST', '/v1beta/models'],
     ['GET', '/v1/rerank'],
+    ['GET', '/v1/alpha/search'],
   ] as const) {
     const match = matchSaasEndpointEntry(method, path);
     assert.ok(match.matched, `${method} ${path} must still match the registry`);

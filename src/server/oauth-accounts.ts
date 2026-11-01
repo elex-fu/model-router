@@ -2,6 +2,13 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
+/**
+ * Refresh-scheduling status for the classic OAuth refresh engine
+ * (src/server/oauth-refresh.ts). Absent means 'active' (every account file
+ * written before the engine existed loads unchanged).
+ */
+export type OAuthAccountStatus = 'active' | 'refreshing' | 'revoked';
+
 export interface OAuthAccount {
   id: string;
   provider: 'github_copilot' | 'codex_oauth';
@@ -10,6 +17,30 @@ export interface OAuthAccount {
   refreshToken?: string;
   expiresAt?: number;
   isDefault: boolean;
+  /** Refresh lifecycle state; absent means 'active'. */
+  status?: OAuthAccountStatus;
+  /** Wall-clock ms of the last refresh attempt (success or failure). */
+  lastRefreshAt?: number;
+  /** Consecutive refresh failures since the last success. */
+  failureCount?: number;
+  /** Earliest wall-clock ms at which another refresh attempt may run (backoff stamp). */
+  nextRetryAt?: number;
+}
+
+/**
+ * Token/lifecycle patch applied by the refresh engine. Omitted fields keep
+ * their stored value; `nextRetryAt: null` clears the backoff stamp.
+ */
+export interface OAuthTokenUpdate {
+  accessToken?: string;
+  /** Only provided when the provider actually rotated the refresh token. */
+  refreshToken?: string;
+  expiresAt?: number;
+  status?: OAuthAccountStatus;
+  lastRefreshAt?: number;
+  failureCount?: number;
+  /** null clears the stored backoff stamp. */
+  nextRetryAt?: number | null;
 }
 
 /** The deliberately small part of SecretStore required by OAuth accounts. */
@@ -238,6 +269,49 @@ export class OAuthAccountStore {
     );
     this.writeMetadata(next);
     this.accounts = next;
+  }
+
+  /**
+   * Atomically patches one account's tokens and refresh-scheduling state
+   * through the same temp-file save discipline as add()/remove(). The stored
+   * refresh token is only replaced when `update.refreshToken` is provided
+   * (OAuth providers that do not rotate refresh tokens must keep the old one).
+   * Returns the updated hydrated account, or undefined when no such account
+   * exists.
+   */
+  updateTokens(provider: string, id: string, update: OAuthTokenUpdate): OAuthAccount | undefined {
+    const index = this.accounts.findIndex((a) => a.provider === provider && a.id === id);
+    if (index < 0) return undefined;
+    const current = this.accounts[index];
+    const hydrated = this.hydrate(current);
+    const secretRef = current.secretRef;
+    const previousSecret = this.secrets.get(secretRef);
+    const nextAccessToken = update.accessToken ?? hydrated.accessToken;
+    const nextRefreshToken = update.refreshToken !== undefined ? update.refreshToken : hydrated.refreshToken;
+    this.secrets.put(
+      secretRef,
+      JSON.stringify({
+        accessToken: nextAccessToken,
+        ...(nextRefreshToken === undefined ? {} : { refreshToken: nextRefreshToken }),
+      }),
+    );
+    const stored: StoredAccount = { ...current };
+    if (update.expiresAt !== undefined) stored.expiresAt = update.expiresAt;
+    if (update.status !== undefined) stored.status = update.status;
+    if (update.lastRefreshAt !== undefined) stored.lastRefreshAt = update.lastRefreshAt;
+    if (update.failureCount !== undefined) stored.failureCount = update.failureCount;
+    if (update.nextRetryAt === null) delete stored.nextRetryAt;
+    else if (update.nextRetryAt !== undefined) stored.nextRetryAt = update.nextRetryAt;
+    const next = this.accounts.slice();
+    next[index] = stored;
+    try {
+      this.writeMetadata(next);
+      this.accounts = next;
+    } catch (error) {
+      if (previousSecret !== undefined) this.secrets.put(secretRef, previousSecret);
+      throw error;
+    }
+    return this.hydrate(stored);
   }
 
   getDefault(provider: string): OAuthAccount | undefined {

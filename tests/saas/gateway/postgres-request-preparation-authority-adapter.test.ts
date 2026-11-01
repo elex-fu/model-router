@@ -757,6 +757,8 @@ test('trusted native protocol mapping preserves client identity and verifies the
 
   const denied = await authority.resolve({ ...input, clientOperation: 'embeddings' });
   assert.equal(denied.decision, 'reject', 'native-only operations must not bridge');
+  const alphaDenied = await authority.resolve({ ...input, clientOperation: 'alpha_search' });
+  assert.equal(alphaDenied.decision, 'reject', 'the alpha_search native operation must not bridge either');
   fixture.eligibilityResult = eligibility();
   assert.equal((await authority.resolve(input)).decision, 'reject', 'the actual native capability must match');
 });

@@ -1,3 +1,4 @@
+import { createAlphaSearchUsageUpperBoundEstimator } from './codex/alpha-search.js';
 import type {
   ProviderUsageUpperBoundEstimate,
   ProviderUsageUpperBoundEstimator,
@@ -81,23 +82,32 @@ export function createEmbeddingsUsageUpperBoundEstimator(): EmbeddingsUsageUpper
 
 /**
  * Composition helper: selects the embeddings estimator for embeddings
- * traffic, the video estimator for the §4.3 video create family, and the
- * default estimator for everything else, so a runtime module can keep one
- * `providerPayload.estimator` dependency.
+ * traffic, the per-call alpha search estimator for the alpha_search
+ * operation (P2-a), the video estimator for the §4.3 video create family,
+ * and the default estimator for everything else, so a runtime module can
+ * keep one `providerPayload.estimator` dependency.
  */
 export function selectUsageUpperBoundEstimatorByOperation(options: {
   readonly default: ProviderUsageUpperBoundEstimator;
   readonly embeddings?: ProviderUsageUpperBoundEstimator;
+  /** P2-a: the Codex standalone alpha_search per-call estimator. */
+  readonly alphaSearch?: ProviderUsageUpperBoundEstimator;
   /** §4.3 (task #17): the videos.* create operations' per-unit hold estimator. */
   readonly videos?: ProviderUsageUpperBoundEstimator;
 }): ProviderUsageUpperBoundEstimator {
   const embeddings = options.embeddings ?? createEmbeddingsUsageUpperBoundEstimator();
+  const alphaSearch = options.alphaSearch ?? createAlphaSearchUsageUpperBoundEstimator();
   const videos = options.videos ?? null;
   return {
-    version: `${options.default.version}+${embeddings.version}${videos === null ? '' : `+${videos.version}`}`,
+    version: `${options.default.version}+${embeddings.version}+${alphaSearch.version}${
+      videos === null ? '' : `+${videos.version}`
+    }`,
     estimate(input) {
       if (input.normalizedRequest.providerOperation === 'embeddings') {
         return embeddings.estimate(input);
+      }
+      if (input.normalizedRequest.providerOperation === 'alpha_search') {
+        return alphaSearch.estimate(input);
       }
       if (
         videos !== null &&

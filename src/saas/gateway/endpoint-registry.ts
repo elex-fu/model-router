@@ -136,6 +136,24 @@ export const SAAS_ENDPOINT_REGISTRY: readonly SaasEndpointRegistration[] = [
     transformVersion: 'rerank-boundary/v1',
     supportedFeatures: ['reserved'],
   },
+  {
+    // P2-a (docs/standalone-relay-capability-plan-2026-10-30.md; sub2api
+    // openai_alpha_search.go parity): the Codex standalone web search. The
+    // operation rides the OpenAI family (the R2 embeddings precedent) and is
+    // passthrough-only onto the pinned ChatGPT codex alpha target, dispatched
+    // with a codex OAuth account and billed per successful (2xx) call. The
+    // provenance rides the OpenAI chat family until a follow-up migration
+    // widens the 029/104/134 CHECK to (openai, 'alpha_search').
+    id: 'openai.alpha_search',
+    method: 'POST',
+    path: '/v1/alpha/search',
+    protocol: 'openai',
+    operation: 'alpha_search',
+    provenanceOperation: 'chat.completions',
+    inputShape: 'json',
+    transformVersion: 'codex-alpha-search-boundary/v1',
+    supportedFeatures: ['non-streaming'],
+  },
 ];
 
 /** Bounded, printable path-segment model identifiers (mirrors QUERY_PATH_PARAMETER). */

@@ -1,17 +1,19 @@
-import { consumeBuiltinProviderSecret } from './builtin-provider-secret-callback.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { ManagedSaasGatewayProductionOptions } from '../../server/managed-saas-gateway.js';
 import type { SaasDatabase } from '../db/types.js';
 import { BedrockPreparedEvidenceTransport, parseBedrockCredentialMaterial } from '../gateway/bedrock/transport.js';
 import { ClaudePreparedEvidenceTransport } from '../gateway/claude/transport.js';
 import { CnProvidersPreparedEvidenceTransport } from '../gateway/cn-providers/transport.js';
+import { CODEX_ALPHA_SEARCH_URL, createAlphaSearchMediaUsagePlan } from '../gateway/codex/alpha-search.js';
 import { buildCanonicalIdentity } from '../gateway/codex/identity.js';
-import { CODEX_NATIVE_WS_BETA, CODEX_NATIVE_WS_ENDPOINT, prepareCodexNativeWsConnector } from '../gateway/codex/native-ws-connector.js';
+import {
+  CODEX_NATIVE_WS_BETA,
+  CODEX_NATIVE_WS_ENDPOINT,
+  prepareCodexNativeWsConnector,
+} from '../gateway/codex/native-ws-connector.js';
 import { CodexNativeWsSessionError } from '../gateway/codex/native-ws-session.js';
 import { CodexNativeWsPreparedEvidenceTransport } from '../gateway/codex/native-ws-transport.js';
 import { CODEX_RESPONSES_ENDPOINT, CodexPreparedEvidenceTransport } from '../gateway/codex/transport.js';
-import { BUILTIN_PAYLOAD_COMPILER_VERSION } from './builtin-payload-compiler-version.js';
-import { resolveCodexBoundSendProfile } from './codex-trusted-bound-profiles.js';
 import { applyGeminiCodeAssistTransform } from '../gateway/gemini/transform.js';
 import { GeminiPreparedEvidenceTransport } from '../gateway/gemini/transport.js';
 import { parseGrokApiKeyMaterial, parseGrokOAuthCredentialMaterial } from '../gateway/grok/identity.js';
@@ -44,6 +46,9 @@ import {
   PostgresProviderQuotaSnapshotStore,
 } from '../supply/provider-account-quota-snapshot-store-postgres.js';
 import type { ProviderCredentialDispatchProofReader } from '../supply/types.js';
+import { BUILTIN_PAYLOAD_COMPILER_VERSION } from './builtin-payload-compiler-version.js';
+import { consumeBuiltinProviderSecret } from './builtin-provider-secret-callback.js';
+import { resolveCodexBoundSendProfile } from './codex-trusted-bound-profiles.js';
 import type { GatewayProviderCredentialUnsealer } from './gateway-provider-credential-unsealer.js';
 import type { ProviderBundleConfiguration } from './gateway-runtime-module.js';
 import { providerBundleManifest } from './provider-bundles.js';
@@ -202,7 +207,10 @@ export function createBuiltinProviderEvidenceTransportFactory(options: {
               }
             } catch (error) {
               callbackFailed = true;
-              if (error instanceof CodexNativeWsSessionError) { safeSessionError = error; return; }
+              if (error instanceof CodexNativeWsSessionError) {
+                safeSessionError = error;
+                return;
+              }
               return unavailable();
             } finally {
               if (secret instanceof Uint8Array) secret.fill(0);
@@ -231,17 +239,35 @@ export function createBuiltinProviderEvidenceTransportFactory(options: {
           if (input.evidence.providerId === 'openai-codex' || proof.evidence.providerId === 'openai-codex') {
             const evidence = input.evidence;
             const operation = evidence.providerOperation;
-            if (evidence.providerProtocol !== 'responses' || (operation !== 'responses' && operation !== 'responses.compact')) return unavailable();
-            if (proof.evidence.providerId !== evidence.providerId || proof.evidence.productId !== evidence.productId || proof.evidence.resolvedModel !== evidence.resolvedModel || rows.rows[0]?.payload_compiler_version !== evidence.payloadCompilerVersion) return unavailable();
+            if (
+              evidence.providerProtocol !== 'responses' ||
+              (operation !== 'responses' && operation !== 'responses.compact')
+            )
+              return unavailable();
+            if (
+              proof.evidence.providerId !== evidence.providerId ||
+              proof.evidence.productId !== evidence.productId ||
+              proof.evidence.resolvedModel !== evidence.resolvedModel ||
+              rows.rows[0]?.payload_compiler_version !== evidence.payloadCompilerVersion
+            )
+              return unavailable();
             const native = input.codexNativeWsSession !== undefined;
             const compact = operation === 'responses.compact';
-            const profile = resolveCodexBoundSendProfile(evidence.payloadCompilerVersion ?? '', BUILTIN_PAYLOAD_COMPILER_VERSION, {
-              endpoint: compact ? `${CODEX_RESPONSES_ENDPOINT}/compact` : native ? CODEX_NATIVE_WS_ENDPOINT : CODEX_RESPONSES_ENDPOINT,
-              productId: proof.evidence.productId,
-              model: evidence.resolvedModel ?? '',
-              operation,
-              transport: native ? 'websocket' : 'http',
-            });
+            const profile = resolveCodexBoundSendProfile(
+              evidence.payloadCompilerVersion ?? '',
+              BUILTIN_PAYLOAD_COMPILER_VERSION,
+              {
+                endpoint: compact
+                  ? `${CODEX_RESPONSES_ENDPOINT}/compact`
+                  : native
+                    ? CODEX_NATIVE_WS_ENDPOINT
+                    : CODEX_RESPONSES_ENDPOINT,
+                productId: proof.evidence.productId,
+                model: evidence.resolvedModel ?? '',
+                operation,
+                transport: native ? 'websocket' : 'http',
+              },
+            );
             if (!profile) return unavailable();
           }
           return requests.run(
@@ -384,47 +410,84 @@ export function createBuiltinProviderEvidenceTransportFactory(options: {
     const transports: GatewayProviderEvidenceTransports = {};
     if (enabled.has('codex')) {
       const http = new CodexPreparedEvidenceTransport({
-          ...common,
-          resolveCredential: (input, use) =>
-            withSecret(input, async (secret) => {
-              const value = material(secret);
-              return use({
-                accessToken: text(value.access_token),
-                chatgptAccountId: text(value.chatgpt_account_id),
-                chatgptUserId: text(value.chatgpt_user_id),
-              });
-            }),
-          resolveRequestContext: () => ({
-            proxyKeyId: text(requests.getStore()?.proxyKeyId),
-            clientSessionId: null,
-            clientConversationId: null,
-            fingerprintMode: 'off',
-            fingerprintSeed: null,
+        ...common,
+        resolveCredential: (input, use) =>
+          withSecret(input, async (secret) => {
+            const value = material(secret);
+            return use({
+              accessToken: text(value.access_token),
+              chatgptAccountId: text(value.chatgpt_account_id),
+              chatgptUserId: text(value.chatgpt_user_id),
+            });
           }),
-          writeQuotaSnapshot: sinks.codexQuotaSnapshot,
-        });
+        resolveRequestContext: () => ({
+          proxyKeyId: text(requests.getStore()?.proxyKeyId),
+          clientSessionId: null,
+          clientConversationId: null,
+          fingerprintMode: 'off',
+          fingerprintSeed: null,
+        }),
+        writeQuotaSnapshot: sinks.codexQuotaSnapshot,
+      });
       const native = new CodexNativeWsPreparedEvidenceTransport({
         maxFrameBytes: 1024 * 1024,
         maxQueueBytes: 4 * 1024 * 1024,
         timeoutMs: options.timeoutMs,
-        withAuthorizedContext: (input, use) => withSecret({ accountId: input.evidence.accountId, credentialId: input.evidence.credentialId, credentialVersion: input.evidence.credentialVersion, signal: input.signal }, async (secret) => {
-          const request = requests.getStore();
-          if (!request) return unavailable();
-          const value = material(secret);
-          const profile = (await core.resolveEgressProfile?.(dispatchProfileInput(input.signal))) ?? {};
-          const connector = await prepareCodexNativeWsConnector({ signal: input.signal, profile, timeoutMs: options.timeoutMs, ...(core.resolveAddresses ? { resolveAddresses: core.resolveAddresses } : {}), ...(core.createConnector ? { createConnector: core.createConnector } : {}), ...(core.egressAllowlist ? { egressAllowlist: core.egressAllowlist } : {}) });
-          const identity = buildCanonicalIdentity();
-          return use({ connector, identity: {
-            tenantId: input.tenantId, projectId: input.projectId, proxyKeyId: request.proxyKeyId,
-            providerId: 'openai-codex', productId: request.productId, accountId: input.evidence.accountId,
-            credentialId: input.evidence.credentialId, credentialVersion: input.evidence.credentialVersion,
-            credentialAuthzVersion: request.credentialAuthzVersion, publicModel: input.evidence.publicModel, model: input.evidence.resolvedModel ?? '',
-            endpoint: CODEX_NATIVE_WS_ENDPOINT, egressIdentity: connector.egressIdentity,
-          }, headers: { authorization: `Bearer ${text(value.access_token)}`, 'chatgpt-account-id': text(value.chatgpt_account_id), 'user-agent': identity.userAgent, originator: identity.originator, version: identity.version, 'openai-beta': CODEX_NATIVE_WS_BETA } });
-        }),
+        withAuthorizedContext: (input, use) =>
+          withSecret(
+            {
+              accountId: input.evidence.accountId,
+              credentialId: input.evidence.credentialId,
+              credentialVersion: input.evidence.credentialVersion,
+              signal: input.signal,
+            },
+            async (secret) => {
+              const request = requests.getStore();
+              if (!request) return unavailable();
+              const value = material(secret);
+              const profile = (await core.resolveEgressProfile?.(dispatchProfileInput(input.signal))) ?? {};
+              const connector = await prepareCodexNativeWsConnector({
+                signal: input.signal,
+                profile,
+                timeoutMs: options.timeoutMs,
+                ...(core.resolveAddresses ? { resolveAddresses: core.resolveAddresses } : {}),
+                ...(core.createConnector ? { createConnector: core.createConnector } : {}),
+                ...(core.egressAllowlist ? { egressAllowlist: core.egressAllowlist } : {}),
+              });
+              const identity = buildCanonicalIdentity();
+              return use({
+                connector,
+                identity: {
+                  tenantId: input.tenantId,
+                  projectId: input.projectId,
+                  proxyKeyId: request.proxyKeyId,
+                  providerId: 'openai-codex',
+                  productId: request.productId,
+                  accountId: input.evidence.accountId,
+                  credentialId: input.evidence.credentialId,
+                  credentialVersion: input.evidence.credentialVersion,
+                  credentialAuthzVersion: request.credentialAuthzVersion,
+                  publicModel: input.evidence.publicModel,
+                  model: input.evidence.resolvedModel ?? '',
+                  endpoint: CODEX_NATIVE_WS_ENDPOINT,
+                  egressIdentity: connector.egressIdentity,
+                },
+                headers: {
+                  authorization: `Bearer ${text(value.access_token)}`,
+                  'chatgpt-account-id': text(value.chatgpt_account_id),
+                  'user-agent': identity.userAgent,
+                  originator: identity.originator,
+                  version: identity.version,
+                  'openai-beta': CODEX_NATIVE_WS_BETA,
+                },
+              });
+            },
+          ),
       });
       closeNativeTransports.push(() => native.close());
-      transports.codexEvidenceTransport = bound({ send: (input) => input.codexNativeWsSession ? native.send(input) : http.send(input) });
+      transports.codexEvidenceTransport = bound({
+        send: (input) => (input.codexNativeWsSession ? native.send(input) : http.send(input)),
+      });
     }
     if (enabled.has('codex')) {
       const accounts = new AsyncLocalStorage<string>();
@@ -434,6 +497,12 @@ export function createBuiltinProviderEvidenceTransportFactory(options: {
             const accountId = accounts.getStore();
             if (!accountId) return unavailable();
             const identity = buildCanonicalIdentity();
+            // P2-a (sub2api stripOpenAIAlphaSearchResponsesHeaders parity):
+            // alpha/search is not a /responses sub-request — the official
+            // SearchClient wire shape carries no OpenAI-Beta header, so the
+            // codex responses experiment flag is added only for every other
+            // codex operation.
+            const alphaSearch = requests.getStore()?.evidence.providerOperation === 'alpha_search';
             return options.fetch(url, {
               ...init,
               headers: {
@@ -442,19 +511,38 @@ export function createBuiltinProviderEvidenceTransportFactory(options: {
                 'user-agent': identity.userAgent,
                 originator: identity.originator,
                 version: identity.version,
-                'openai-beta': 'responses=experimental',
+                ...(alphaSearch ? {} : { 'openai-beta': 'responses=experimental' }),
               },
             });
           },
-          resolveDispatchProfile: async (input) =>
-            input.endpoint === 'codex-responses' &&
-            input.providerProtocol === 'responses' &&
-            input.providerOperation === 'responses.compact'
-              ? {
-                  url: 'https://chatgpt.com/backend-api/codex/responses/compact',
-                  ...(await core.resolveEgressProfile?.(input)),
-                }
-              : null,
+          resolveDispatchProfile: async (input) => {
+            if (
+              input.endpoint === 'codex-responses' &&
+              input.providerProtocol === 'responses' &&
+              input.providerOperation === 'responses.compact'
+            ) {
+              return {
+                url: 'https://chatgpt.com/backend-api/codex/responses/compact',
+                ...(await core.resolveEgressProfile?.(input)),
+              };
+            }
+            // P2-a: the standalone alpha/search target is operation-owned —
+            // the compact dispatch-profile precedent applied to the Codex
+            // SearchRequest protocol. The openai-family operation rides this
+            // codex OAuth transport (the routing wrapper binds it), so the
+            // provider protocol check differs from the compact branch.
+            if (
+              input.endpoint === 'codex-responses' &&
+              input.providerProtocol === 'openai' &&
+              input.providerOperation === 'alpha_search'
+            ) {
+              return {
+                url: CODEX_ALPHA_SEARCH_URL,
+                ...(await core.resolveEgressProfile?.(input)),
+              };
+            }
+            return null;
+          },
           resolveCredential: (input, use) =>
             withSecret(input, async (secret) => {
               const value = material(secret);
@@ -467,6 +555,9 @@ export function createBuiltinProviderEvidenceTransportFactory(options: {
                 token.fill(0);
               }
             }),
+          // P2-a: the per-call alpha search usage plan rides the 2xx JSON
+          // observation branch (the images mediaUsagePlan seam precedent).
+          mediaUsagePlan: createAlphaSearchMediaUsagePlan,
           endpointPolicy: { allowedHosts: ['chatgpt.com'], allowedPorts: [443] },
           ...(core.createConnector ? { createConnector: core.createConnector } : {}),
           ...(core.egressAllowlist ? { egressAllowlist: core.egressAllowlist } : {}),

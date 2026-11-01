@@ -9,6 +9,14 @@
 export const CODEX_PROVIDER_ID = 'openai-codex';
 export const CODEX_PRODUCT_ID = 'codex-chatgpt';
 export const CODEX_CREDENTIAL_TYPE = 'oauth';
+/**
+ * P2c sub2api parity: codex personal access tokens (`at-*`) are a second
+ * credential type on the SAME provider/product/endpoint binding. PATs ride
+ * the same dispatch path (the sealed envelope still carries `access_token` +
+ * `chatgpt_account_id`) but are validated via the read-only auth.openai.com
+ * whoami and never refreshed.
+ */
+export const CODEX_CREDENTIAL_TYPE_PAT = 'pat';
 export const CODEX_SUPPLY_MODE = 'platform' as const;
 export const CODEX_REGION = 'global';
 export const CODEX_PURPOSE = 'inference';

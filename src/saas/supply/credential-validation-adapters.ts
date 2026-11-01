@@ -16,6 +16,7 @@ import {
 } from '../gateway/cn-providers/constants.js';
 import {
   CODEX_CREDENTIAL_TYPE,
+  CODEX_CREDENTIAL_TYPE_PAT,
   CODEX_ENDPOINT,
   CODEX_PRODUCT_ID,
   CODEX_PROTOCOL,
@@ -47,6 +48,13 @@ import {
   OPENROUTER_PRODUCT_ID,
   OPENROUTER_PROVIDER_ID,
 } from '../gateway/openrouter/catalog-identity.js';
+import {
+  buildCodexPatWhoamiRequest,
+  CODEX_PAT_WHOAMI_URL,
+  type CodexPatWhoamiIdentity,
+  isCodexPatShape,
+  parseCodexPatWhoamiResponse,
+} from '../platform/codex-pat/pat-validation.js';
 import { isCustomCredentialValidationModel } from './credential-validation-targets.js';
 import {
   buildClaudeOAuthProbeRequest,
@@ -85,6 +93,13 @@ export const KIMI_CODE_CREDENTIAL_VALIDATION_MAX_RESPONSE_BYTES = 65_536;
  */
 export const PROVIDER_OAUTH_VALIDATION_TIMEOUT_MS = 20_000;
 export const PROVIDER_OAUTH_VALIDATION_MAX_RESPONSE_BYTES = 65_536;
+/**
+ * P2c Codex PAT whoami probe budget. The whoami is a read-only metadata GET
+ * (sub2api uses a 20s upstream timeout); the deadline stays below the
+ * worker's 30s default lease TTL so the completion write can still land.
+ */
+export const CODEX_PAT_VALIDATION_TIMEOUT_MS = 15_000;
+export const CODEX_PAT_VALIDATION_MAX_RESPONSE_BYTES = 16_384;
 
 export type CredentialValidationProbeKind =
   | 'models'
@@ -93,7 +108,8 @@ export type CredentialValidationProbeKind =
   | 'chat'
   | 'oauth-responses'
   | 'oauth-anthropic'
-  | 'oauth-gemini';
+  | 'oauth-gemini'
+  | 'codex-pat-whoami';
 
 export type OAuthValidationProvider = 'codex' | 'grok' | 'claude' | 'gemini';
 
@@ -102,6 +118,21 @@ function isOAuthProbeKind(
   kind: CredentialValidationProbeKind,
 ): kind is Extract<CredentialValidationProbeKind, 'oauth-responses' | 'oauth-anthropic' | 'oauth-gemini'> {
   return kind === 'oauth-responses' || kind === 'oauth-anthropic' || kind === 'oauth-gemini';
+}
+
+/** True for the P2c Codex PAT whoami probe (a challenge-free credential-plane metadata read). */
+function isCodexPatWhoamiProbeKind(kind: CredentialValidationProbeKind): kind is 'codex-pat-whoami' {
+  return kind === 'codex-pat-whoami';
+}
+
+/** Credential-plane probes never ride the api-key account-probe resolver. */
+function isSecretMaterialProbeKind(
+  kind: CredentialValidationProbeKind,
+): kind is Extract<
+  CredentialValidationProbeKind,
+  'oauth-responses' | 'oauth-anthropic' | 'oauth-gemini' | 'codex-pat-whoami'
+> {
+  return isOAuthProbeKind(kind) || isCodexPatWhoamiProbeKind(kind);
 }
 
 export type ProviderCredentialValidationErrorCode =
@@ -124,6 +155,14 @@ export interface ProviderCredentialValidationSuccess {
   readonly adapterId: string;
   readonly httpStatus: number;
   readonly durationMs: number;
+  /**
+   * P2c Codex PAT only: the `chatgpt_account_id` resolved by the whoami
+   * probe. The credential is marked verified and the resolved account id is
+   * surfaced so the importing/persisting layer can stamp it into the sealed
+   * envelope (the envelope contract keeps codex dispatch unchanged). Absent
+   * for every other probe kind.
+   */
+  readonly resolvedChatgptAccountId?: string;
 }
 
 export interface ProviderCredentialValidationFailure {
@@ -366,6 +405,27 @@ const FIXED_ADAPTERS: readonly FixedProviderValidationAdapter[] = Object.freeze(
     oauthProvider: 'codex',
   }),
   Object.freeze({
+    // P2c PAT onboarding (sub2api parity): the codex `pat` credential type is
+    // validated through the read-only auth.openai.com whoami — the same
+    // endpoint the Codex client uses for `at-*` personal access tokens. A
+    // valid whoami identity (chatgpt_account_id et al.) marks the credential
+    // verified; the resolved account id travels on the success result. The
+    // capability endpoint stays `codex-responses` because a verified PAT
+    // account dispatches on the same codex transport as OAuth accounts.
+    providerId: CODEX_PROVIDER_ID,
+    productId: CODEX_PRODUCT_ID,
+    credentialType: CODEX_CREDENTIAL_TYPE_PAT,
+    capabilityEndpoint: CODEX_ENDPOINT,
+    capabilityProtocol: CODEX_PROTOCOL,
+    adapterId: 'openai-codex-pat-whoami-v1',
+    url: CODEX_PAT_WHOAMI_URL,
+    probe: 'codex-pat-whoami',
+    limits: Object.freeze({
+      timeoutMs: CODEX_PAT_VALIDATION_TIMEOUT_MS,
+      maxResponseBytes: CODEX_PAT_VALIDATION_MAX_RESPONSE_BYTES,
+    }),
+  }),
+  Object.freeze({
     // T02 OAuth onboarding for the Grok CLI subscription. The CLI proxy
     // rejects non-CLI fingerprints, so the shared builder stamps the exact
     // pinned Grok CLI identity headers. A plain bearer probe would not prove
@@ -519,12 +579,12 @@ export function resolveFixedCredentialProbeEndpoint(input: {
       candidate.productId === input.productId &&
       candidate.credentialType === input.credentialType &&
       candidate.capabilityEndpoint === input.capabilityEndpoint &&
-      // This resolver backs the API-key account-probe path only. OAuth
-      // categories have dedicated probe categories with their own secret
+      // This resolver backs the API-key account-probe path only. OAuth and
+      // PAT categories have dedicated probe categories with their own secret
       // material and must never be sent through a bearer api-key probe.
-      !isOAuthProbeKind(candidate.probe),
+      !isSecretMaterialProbeKind(candidate.probe),
   );
-  if (adapter === undefined || isOAuthProbeKind(adapter.probe)) return null;
+  if (adapter === undefined || isSecretMaterialProbeKind(adapter.probe)) return null;
   return { adapterId: adapter.adapterId, url: adapter.url, probe: adapter.probe };
 }
 
@@ -779,11 +839,44 @@ function validOAuthChallengeResponse(
   return validOAuthResponsesResponse(response, bytes, probe.challenge);
 }
 
+/**
+ * P2c Codex PAT whoami response contract: a JSON body that parses into a
+ * complete whoami identity. The identity (not just a boolean) is returned so
+ * the success result can surface the resolved `chatgpt_account_id`; null for
+ * any other shape, never a partial identity.
+ */
+function validCodexPatWhoamiResponse(
+  response: ProviderCredentialValidationResponse,
+  bytes: Uint8Array,
+): CodexPatWhoamiIdentity | null {
+  if (response.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase() !== 'application/json') return null;
+  try {
+    return parseCodexPatWhoamiResponse(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)));
+  } catch {
+    return null;
+  }
+}
+
 /** Protocol-owned allowlist; never merges job/operator/client supplied headers. */
 export function createCredentialValidationProbeRequest(
   probe: CredentialValidationProbe,
   secret: Buffer,
 ): CredentialValidationProbeRequest | null {
+  if (isCodexPatWhoamiProbeKind(probe.kind)) {
+    // The PAT credential uses the same sealed-envelope material contract as
+    // codex OAuth (access_token + chatgpt_account_id), minus the OAuth-only
+    // fields (sub2api strips refresh_token/id_token/expires_at/expires_in/
+    // client_id from PAT credentials).
+    const material = parseOAuthSecret(secret);
+    if (!material) return null;
+    const pat = oauthMaterialText(material.access_token);
+    if (pat === null || !isCodexPatShape(pat)) return null;
+    const rawAccountId = material.chatgpt_account_id;
+    if (rawAccountId !== undefined && rawAccountId !== null && oauthMaterialText(rawAccountId) === null) return null;
+    const built = buildCodexPatWhoamiRequest({ pat });
+    if (!built) return null;
+    return { method: built.method, headers: built.headers, redirect: 'manual' };
+  }
   if (isOAuthProbeKind(probe.kind)) {
     if (!probe.oauthProvider || !probe.challenge) return null;
     const material = parseOAuthSecret(secret);
@@ -910,16 +1003,27 @@ export async function readCredentialValidationProbeResponse(
     );
   }
   if (success) {
-    if (
-      probe.kind !== 'models' &&
-      probe.kind !== 'key' &&
-      (!bodyResult.bytes ||
-        !(probe.kind === 'messages'
-          ? validMessageResponse(response, bodyResult.bytes, probe.custom)
-          : probe.kind === 'chat'
-            ? validChatResponse(response, bodyResult.bytes)
-            : validOAuthChallengeResponse(probe, response, bodyResult.bytes)))
-    ) {
+    // P2c: the PAT whoami branch parses the identity (not just validity) so
+    // the resolved chatgpt_account_id can ride the success result; the
+    // credential is marked verified with that value surfaced for persistence
+    // into the sealed envelope.
+    let patIdentity: CodexPatWhoamiIdentity | null = null;
+    let responseValid: boolean;
+    if (probe.kind === 'models' || probe.kind === 'key') {
+      responseValid = true;
+    } else if (!bodyResult.bytes) {
+      responseValid = false;
+    } else if (probe.kind === 'messages') {
+      responseValid = validMessageResponse(response, bodyResult.bytes, probe.custom);
+    } else if (probe.kind === 'chat') {
+      responseValid = validChatResponse(response, bodyResult.bytes);
+    } else if (isCodexPatWhoamiProbeKind(probe.kind)) {
+      patIdentity = validCodexPatWhoamiResponse(response, bodyResult.bytes);
+      responseValid = patIdentity !== null;
+    } else {
+      responseValid = validOAuthChallengeResponse(probe, response, bodyResult.bytes);
+    }
+    if (!responseValid) {
       return failed('provider_response_invalid', false, probe.adapterId, response.status, completedDurationMs);
     }
     return {
@@ -927,6 +1031,7 @@ export async function readCredentialValidationProbeResponse(
       adapterId: probe.adapterId,
       httpStatus: response.status,
       durationMs: completedDurationMs,
+      ...(patIdentity === null ? {} : { resolvedChatgptAccountId: patIdentity.chatgptAccountId }),
     };
   }
   if (response.status === 401 || response.status === 403)

@@ -1,10 +1,10 @@
 import { createHash, createPublicKey, type KeyObject, randomUUID, verify as verifySignature } from 'node:crypto';
 import { saasAdvisoryKey, sortAndDedupeAdvisoryKeys } from '../db/advisory-lock-keys.js';
 import type { SaasDatabase, SqlExecutor } from '../db/index.js';
-import { mapStoredAttemptRecord, storedAttemptColumns } from '../metering/service.js';
-import type { AttemptRecord } from '../metering/types.js';
 import { createPreparedSqlStatement, queryPreparedOrAnonymous } from '../db/prepared-statements.js';
 import type { PreparedSqlStatement } from '../db/types.js';
+import { mapStoredAttemptRecord, storedAttemptColumns } from '../metering/service.js';
+import type { AttemptRecord } from '../metering/types.js';
 import type { ModelResolutionProvenance } from './contracts.js';
 import { takePreparationTransactionFacts } from './postgres-request-admission-guard.js';
 
@@ -541,11 +541,13 @@ function operationForProtocol(protocol: PreparedEvidenceProtocol): string {
 /**
  * R2: the OpenAI protocol family additionally hosts the embeddings
  * operation; no other protocol accepts a second operation.
+ * P2-a: the family also hosts the alpha_search operation (the Codex
+ * standalone web search).
  */
 function operationAllowedForProtocol(protocol: PreparedEvidenceProtocol, operation: string): boolean {
   return (
     operation === operationForProtocol(protocol) ||
-    (protocol === 'openai' && operation === 'embeddings') ||
+    (protocol === 'openai' && (operation === 'embeddings' || operation === 'alpha_search')) ||
     (protocol === 'responses' && operation === 'responses.compact')
   );
 }

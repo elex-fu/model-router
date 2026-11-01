@@ -1350,6 +1350,22 @@ test('stateless embeddings requests carry no sticky scheduling reference', async
   assert.equal(setup.preparationInputs[0]?.clientOperation, 'embeddings');
 });
 
+test('P2-a: alpha search requests ride the openai family with the path-derived alpha_search operation', async () => {
+  const setup = harness({
+    stickyScheduling: true,
+    request: {
+      url: '/v1/alpha/search',
+      body: JSON.stringify({ model: 'public-model', commands: [] }),
+    },
+  });
+  assert.equal(await setup.handler(asRequest(setup.request), asResponse(setup.response)), true);
+  assert.equal(setup.preparationInputs[0]?.protocol, 'openai');
+  // Stateless (one call is the whole billable unit): no content-derived
+  // sticky session, exactly like embeddings.
+  assert.equal(setup.preparationInputs[0]?.scheduling, undefined);
+  assert.equal(setup.preparationInputs[0]?.clientOperation, 'alpha_search');
+});
+
 test('anthropic bodies without text leave scheduling undefined', async () => {
   const setup = harness({
     stickyScheduling: true,
@@ -1678,7 +1694,6 @@ test('G-B2: a JSON b64_json STT body takes the direct path without any staging',
   );
   assert.equal(setup.preparationInputs[0].clientOperation, 'audio.stt');
 });
-
 
 test('fast failure diagnostics preserve generic and typed HTTP errors without strict fallback', async () => {
   for (const error of [

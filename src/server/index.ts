@@ -33,6 +33,7 @@ import { createMetricsRegistry } from './metrics.js';
 import { OAuthTokenResolver } from './oauth.js';
 import { createOAuthAccountAdminAdapters } from './oauth-account-admin.js';
 import { OAuthAccountStore } from './oauth-accounts.js';
+import { OAuthRefreshEngine } from './oauth-refresh.js';
 import { createPlaygroundExecutor } from './playground-executor.js';
 import { proxyHandler } from './proxy.js';
 import { SessionAffinityStore } from './sticky-affinity.js';
@@ -205,6 +206,7 @@ async function startLocalServer(
   let startupAdmin: ReturnType<typeof createAdminServer> | null = null;
   let startupPurgeTimer: NodeJS.Timeout | undefined;
   let startupConfigWatch = false;
+  let startupOauthRefreshEngine: OAuthRefreshEngine | undefined;
   try {
     const quotaRedisUrl = process.env.MODEL_ROUTER_QUOTA_REDIS_URL;
     const quotaNamespace = process.env.MODEL_ROUTER_QUOTA_NAMESPACE ?? 'model-router';
@@ -319,7 +321,16 @@ async function startLocalServer(
         })
       : undefined;
     const oauthAccounts = new OAuthAccountStore(configPath, controlStore.secrets);
-    const oauthResolver = new OAuthTokenResolver(oauthAccounts);
+    // CS1: classic-mode OAuth refresh engine — proactive refresh-before-expiry
+    // for device_code accounts (codex_oauth / github_copilot) so they stop
+    // expiring into forced re-authentication.
+    const oauthRefreshEngine = new OAuthRefreshEngine(oauthAccounts, {
+      onError: (error, context) =>
+        console.error(`OAuth token refresh failed for ${context.provider} account ${context.accountId}:`, error),
+    });
+    startupOauthRefreshEngine = oauthRefreshEngine;
+    oauthRefreshEngine.start();
+    const oauthResolver = new OAuthTokenResolver(oauthAccounts, oauthRefreshEngine);
 
     const control = new ControlService(
       configPath,
@@ -629,6 +640,7 @@ async function startLocalServer(
         }
       }
       let shutdownError: unknown;
+      await oauthRefreshEngine.close();
       try {
         await telemetryWriteClient?.close(5_000);
       } catch {
@@ -670,6 +682,7 @@ async function startLocalServer(
   } catch (startupError) {
     if (startupPurgeTimer) clearTimeout(startupPurgeTimer);
     if (startupConfigWatch) fs.unwatchFile(configPath);
+    await startupOauthRefreshEngine?.close();
     startupHealthMonitor?.stop();
     startupProxyServer?.closeAllConnections();
     startupAdmin?.server.closeAllConnections();

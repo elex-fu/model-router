@@ -56,6 +56,7 @@ import {
 } from '../gateway/cn-providers/catalog-identity.js';
 import {
   CODEX_CREDENTIAL_TYPE,
+  CODEX_CREDENTIAL_TYPE_PAT,
   CODEX_DISPLAY_NAME,
   CODEX_ENDPOINT,
   CODEX_PRODUCT_ID,
@@ -180,7 +181,10 @@ export const PROVIDER_BUNDLE_MANIFESTS: readonly ProviderBundleManifest[] = Obje
     providerId: CODEX_PROVIDER_ID,
     displayName: CODEX_DISPLAY_NAME,
     productIds: [CODEX_PRODUCT_ID],
-    credentialTypes: [CODEX_CREDENTIAL_TYPE],
+    // P2c: `pat` (at-* personal access tokens, sub2api parity) rides the same
+    // codex dispatch transport as `oauth`; same one-bundle-two-credential-types
+    // shape as the grok subscription/api-key pair.
+    credentialTypes: [CODEX_CREDENTIAL_TYPE, CODEX_CREDENTIAL_TYPE_PAT],
     supplyMode: 'platform',
     protocols: [CODEX_PROTOCOL],
     endpointScopes: [CODEX_ENDPOINT],

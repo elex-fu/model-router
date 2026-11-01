@@ -1,9 +1,10 @@
-import { codexContinuationMode, codexUpstreamTransport } from './codex/continuation-metadata.js';
 import { createHash } from 'node:crypto';
 import { type Bridge, type Protocol, pickBridge } from '../../protocol/bridge.js';
 import { UnsupportedBridgeFeatureError } from '../../protocol/openai-gemini.js';
 import { BridgeToolChoiceSelectionError } from '../../protocol/openai-to-anth.js';
 import { ttsBillingRunes } from './audio/tts.js';
+import { sanitizeAlphaSearchBody } from './codex/alpha-search.js';
+import { codexContinuationMode, codexUpstreamTransport } from './codex/continuation-metadata.js';
 import type { GatewayProtocol, ModelResolutionProvenance } from './contracts.js';
 import type { PreparedRequestUsageEnvelope } from './prepared-request-evidence-service.js';
 import {
@@ -44,6 +45,7 @@ export type ProviderPayloadOperation =
   | 'responses.compact'
   | 'generateContent'
   | 'embeddings'
+  | 'alpha_search'
   | 'images.generations'
   | 'web_search'
   | 'x_search'
@@ -63,10 +65,13 @@ export type ProviderPayloadOperation =
  * (generations / edits / extensions) — passthrough-only onto
  * OpenAI-protocol-family providers (the xAI Imagine video surface), never
  * bridged.
+ * P2-a: the family also hosts the Codex standalone alpha_search operation —
+ * passthrough-only onto the pinned ChatGPT codex alpha target, never bridged.
  */
 const OPENAI_FAMILY_OPERATIONS: ReadonlySet<string> = new Set([
   'chat.completions',
   'embeddings',
+  'alpha_search',
   'images.generations',
   'videos.generations',
   'videos.edits',
@@ -440,6 +445,7 @@ function normalizeOperation(value: unknown): ProviderPayloadOperation {
   if (value === 'responses.compact') return 'responses.compact';
   if (value === 'generateContent') return 'generateContent';
   if (value === 'embeddings') return 'embeddings';
+  if (value === 'alpha_search') return 'alpha_search';
   if (value === 'images.generations') return 'images.generations';
   if (value === 'web_search') return 'web_search';
   if (value === 'x_search') return 'x_search';
@@ -602,7 +608,12 @@ function normalizeRoute(input: ProviderPayloadCompilerInput, options: Normalized
   // an unsupported capability, not as a transient outage. Checked before the
   // generic operation/bridge pair validation so the family mismatch is never
   // shadowed by an UNSUPPORTED_OPERATION fallback.
-  if (normalizedClientOperation === 'embeddings' && resolvedProviderProtocol !== 'openai') {
+  // P2-a: the alpha_search operation shares the gate — the Codex standalone
+  // search is passthrough-only onto OpenAI-family providers.
+  if (
+    (normalizedClientOperation === 'embeddings' || normalizedClientOperation === 'alpha_search') &&
+    resolvedProviderProtocol !== 'openai'
+  ) {
     compilerFailure('CAPABILITY_UNSUPPORTED');
   }
   // §4.2 (task #16): the same gate applies to the image generation
@@ -788,6 +799,16 @@ function validateClientBody(body: unknown, route: NormalizedRoute, publicModel: 
     if (!Object.hasOwn(body, 'input')) compilerFailure('INVALID_INPUT');
     assertJsonCompatible(body.input);
     return body;
+  }
+  // P2-a (sub2api parity): a Codex alpha/search request is its own standalone
+  // SearchRequest protocol, not a /responses sub-request. The model is
+  // required (the publicModel equality above already enforces it) and is
+  // replaced by the catalog-resolved model at the normalize step (sub2api's
+  // normalizeOpenAIModelForUpstream equivalent); the Responses-only fields
+  // some clients forward are stripped here (sanitizeAlphaSearchBody) before
+  // the body is signed. Every other field rides opaque passthrough.
+  if (route.clientOperation === 'alpha_search') {
+    return sanitizeAlphaSearchBody(body);
   }
   // §4.2 (task #16): an image generations request carries a non-empty
   // `prompt`; `n`/`size`/`response_format`/`quality`/`service_tier` stay
@@ -1021,7 +1042,11 @@ async function estimateUsage(
   estimator: ProviderUsageUpperBoundEstimator | null,
   normalizedRequest: ProviderNormalizedRequest,
   compiledPayloadBytes: Uint8Array,
-): Promise<{ readonly usage: PreparedRequestUsageEnvelope; readonly version: string; readonly trustedBoundEvidenceDigest?: string }> {
+): Promise<{
+  readonly usage: PreparedRequestUsageEnvelope;
+  readonly version: string;
+  readonly trustedBoundEvidenceDigest?: string;
+}> {
   if (
     estimator === null ||
     !isObjectLike(estimator) ||
@@ -1056,7 +1081,11 @@ async function estimateUsage(
     ),
   );
   const trustedBoundEvidenceDigest = isRecord(result) ? result.trustedBoundEvidenceDigest : undefined;
-  if (trustedBoundEvidenceDigest !== undefined && (typeof trustedBoundEvidenceDigest !== 'string' || !SHA256.test(trustedBoundEvidenceDigest))) compilerFailure('USAGE_BOUND_INVALID');
+  if (
+    trustedBoundEvidenceDigest !== undefined &&
+    (typeof trustedBoundEvidenceDigest !== 'string' || !SHA256.test(trustedBoundEvidenceDigest))
+  )
+    compilerFailure('USAGE_BOUND_INVALID');
   return { usage, version, ...(typeof trustedBoundEvidenceDigest === 'string' ? { trustedBoundEvidenceDigest } : {}) };
 }
 
@@ -1066,7 +1095,9 @@ function safeDecision(error: ProviderPayloadCompilerError): RequestPreparationDe
       ? 'payload_bounds_unavailable'
       : error.code === 'CAPABILITY_UNSUPPORTED'
         ? 'capability_unsupported'
-        : error.code === 'UNSUPPORTED_OPERATION' || error.code === 'MODEL_INCOMPATIBLE' || error.code === 'UNSUPPORTED_BRIDGE_FEATURE'
+        : error.code === 'UNSUPPORTED_OPERATION' ||
+            error.code === 'MODEL_INCOMPATIBLE' ||
+            error.code === 'UNSUPPORTED_BRIDGE_FEATURE'
           ? 'capability_unavailable'
           : 'payload_invalid';
   return blockRequestPreparation(payloadCode, error.message);
@@ -1101,6 +1132,7 @@ export class ProviderPayloadCompiler implements RequestPreparationPayloadCompile
     // incompatibility which stays a closed 503.
     // §4.2: the images.generations operation shares the rule.
     // §4.3: the videos.* create family shares it too.
+    // P2-a: the alpha_search operation shares it as well.
     let embeddingsOperation = false;
     try {
       if (this.configurationError !== null || this.options === null) {
@@ -1116,6 +1148,7 @@ export class ProviderPayloadCompiler implements RequestPreparationPayloadCompile
       embeddingsOperation =
         route.providerOperation === 'responses.compact' ||
         route.providerOperation === 'embeddings' ||
+        route.providerOperation === 'alpha_search' ||
         route.providerOperation === 'images.generations' ||
         route.providerOperation === 'videos.generations' ||
         route.providerOperation === 'videos.edits' ||
@@ -1187,16 +1220,21 @@ export class ProviderPayloadCompiler implements RequestPreparationPayloadCompile
        * bridge-pair assertion below still gates the protocol pair. The TTS
        * audio passthrough bypasses it the same way: the client body IS the
        * outbound body (model already resolved), so there is nothing to
-       * bridge.
+       * bridge. P2-a: the Codex alpha_search passthrough joins them — the
+       * sanitized client body IS the outbound SearchRequest.
        */
       const searchOperation = route.clientOperation === 'web_search' || route.clientOperation === 'x_search';
       const audioTtsOperation = route.clientOperation === 'audio.tts';
       const compactOperation = route.clientOperation === 'responses.compact';
+      // P2-a: the Codex standalone alpha/search body is not a chat body —
+      // the validated (sanitized, model-resolved) client body rides upstream
+      // verbatim, the TTS/compact passthrough precedent.
+      const alphaSearchOperation = route.clientOperation === 'alpha_search';
 
       let bridge: Bridge | null;
       try {
         bridge =
-          searchOperation || audioTtsOperation || compactOperation
+          searchOperation || audioTtsOperation || compactOperation || alphaSearchOperation
             ? null
             : pickBridge(route.clientProtocol as Protocol, route.providerProtocol as Protocol, {
                 provider: providerId,
@@ -1226,17 +1264,21 @@ export class ProviderPayloadCompiler implements RequestPreparationPayloadCompile
             searchRequest,
             resolvedModel,
           );
-        } else if (audioTtsOperation || compactOperation) {
+        } else if (audioTtsOperation || compactOperation || alphaSearchOperation) {
           // §4.3 (task #17): the TTS passthrough — the validated client body
           // (with the catalog-resolved model) rides upstream verbatim.
+          // P2-a: the alpha/search passthrough — the sanitized body with the
+          // resolved model is the whole outbound SearchRequest.
           transformed = normalizedRequest.body;
         } else {
           transformed = (bridge as Bridge).transformRequest(normalizedRequest.body);
         }
         // P1c provider-layer hook (codex compile step): applied to the
         // bridge-transformed body; an unset hook keeps the exact previous
-        // payload bytes.
-        if (!compactOperation && this.options.providerRequestTransform !== null) {
+        // payload bytes. Alpha/search bypasses it like compact — the codex
+        // /responses compile step (instructions injection and friends) must
+        // never reshape the standalone SearchRequest protocol.
+        if (!compactOperation && !alphaSearchOperation && this.options.providerRequestTransform !== null) {
           if (!isRecord(transformed)) compilerFailure('TRANSFORM_FAILED');
           transformed = this.options.providerRequestTransform({
             upstreamTransport: normalizedRequest.upstreamTransport,
@@ -1262,7 +1304,17 @@ export class ProviderPayloadCompiler implements RequestPreparationPayloadCompile
       }
 
       const estimated = await estimateUsage(this.options.estimator, normalizedRequest, payloadBytes);
-      const boundCompilerVersion = estimated.trustedBoundEvidenceDigest === undefined ? this.options.compilerVersion : `cb1:${createHash('sha256').update(JSON.stringify({ compilerVersion: this.options.compilerVersion, trustedBoundEvidenceDigest: estimated.trustedBoundEvidenceDigest })).digest('base64url')}`;
+      const boundCompilerVersion =
+        estimated.trustedBoundEvidenceDigest === undefined
+          ? this.options.compilerVersion
+          : `cb1:${createHash('sha256')
+              .update(
+                JSON.stringify({
+                  compilerVersion: this.options.compilerVersion,
+                  trustedBoundEvidenceDigest: estimated.trustedBoundEvidenceDigest,
+                }),
+              )
+              .digest('base64url')}`;
       const requestFingerprint = createHash('sha256').update(payloadBytes).digest('hex');
       if (!SHA256.test(requestFingerprint)) compilerFailure('SERIALIZATION_FAILED');
       return allowRequestPreparation({
@@ -1271,7 +1323,9 @@ export class ProviderPayloadCompiler implements RequestPreparationPayloadCompile
         requestFingerprintVersion: boundCompilerVersion,
         usage: estimated.usage,
         compilerVersion: boundCompilerVersion,
-        ...(estimated.trustedBoundEvidenceDigest ? { trustedBoundEvidenceDigest: estimated.trustedBoundEvidenceDigest } : {}),
+        ...(estimated.trustedBoundEvidenceDigest
+          ? { trustedBoundEvidenceDigest: estimated.trustedBoundEvidenceDigest }
+          : {}),
         providerProtocol: route.providerProtocol,
         providerOperation: route.providerOperation,
         estimatorVersion: estimated.version,
