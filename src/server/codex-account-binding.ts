@@ -29,7 +29,9 @@ import type { OAuthAccount } from './oauth-accounts.js';
 
 // --- Codex OAuth public client constants (drift anchor: saas codex-oauth/oauth.ts) ---
 
-export const CODEX_OAUTH_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
+import { CODEX_OAUTH_CLIENT_ID } from '../saas/platform/codex-oauth/oauth.js';
+
+export { CODEX_OAUTH_CLIENT_ID };
 export const CODEX_OAUTH_AUTHORIZE_ENDPOINT = 'https://auth.openai.com/oauth/authorize';
 export const CODEX_OAUTH_TOKEN_ENDPOINT = 'https://auth.openai.com/oauth/token';
 export const CODEX_OAUTH_REDIRECT_URI = 'http://localhost:1455/auth/callback';

@@ -79,7 +79,8 @@ export class GitHubDeviceFlow implements DeviceFlowManager {
   }
 }
 
-const CODEX_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
+import { CODEX_OAUTH_CLIENT_ID as CODEX_CLIENT_ID } from '../saas/platform/codex-oauth/oauth.js';
+
 const DEVICE_AUTH_USERCODE_URL = 'https://auth.openai.com/api/accounts/deviceauth/usercode';
 const DEVICE_AUTH_TOKEN_URL = 'https://auth.openai.com/api/accounts/deviceauth/token';
 const OAUTH_TOKEN_URL = 'https://auth.openai.com/oauth/token';

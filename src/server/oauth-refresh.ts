@@ -1,120 +1,76 @@
-import { createHash } from 'node:crypto';
+import { type OAuthRefreshAdapter, resolveAdapter, resolvePassthroughAdapter } from '../oauth-refresh/adapters.js';
+import {
+  type CoreRefreshErrorCode,
+  OAUTH_REFRESH_MAX_BACKOFF_MS,
+  OAUTH_REFRESH_MIN_BACKOFF_MS,
+  type OAuthRefreshAttempt,
+  type OAuthRefreshCommitResult,
+  type OAuthRefreshFetch,
+  performOAuthRefresh,
+  type RefreshableCredential,
+  refreshBackoffMs,
+  shouldRefresh,
+} from '../oauth-refresh/core.js';
 import type { OAuthAccount, OAuthTokenUpdate } from './oauth-accounts.js';
+import { type OAuthRefreshAccountStore, OAuthRefreshStoreAdapter } from './oauth-refresh-store.js';
+
+export type { OAuthRefreshFetch } from '../oauth-refresh/core.js';
+export {
+  NON_RETRYABLE_OAUTH_ERRORS,
+  OAUTH_REFRESH_MAX_BACKOFF_MS,
+  OAUTH_REFRESH_MAX_EXPIRES_IN_SECONDS,
+  OAUTH_REFRESH_MAX_RESPONSE_BYTES,
+  OAUTH_REFRESH_MIN_BACKOFF_MS,
+  OAUTH_REFRESH_TIMEOUT_MS,
+} from '../oauth-refresh/core.js';
+export type { OAuthRefreshAccountStore } from './oauth-refresh-store.js';
 
 /**
  * Classic-mode OAuth refresh engine (capability plan task CS1,
  * docs/standalone-relay-capability-plan-2026-10-30.md D1).
  *
- * The request building, response parsing and failure classification are
- * ported from the SaaS refresh worker (src/saas/supply/oauth-token-refresh-
- * worker.ts) so both planes keep identical provider semantics, but this
- * module is deliberately saas-free: no PG, no Redis, no src/saas imports.
- * Scheduling state lives on the JSON-backed OAuthAccountStore.
+ * Re-cored (docs/oauth-refresh-engine-unification-plan-20261101.md R1+R2):
+ * every internal path — provider resolution, the refresh round-trip, the
+ * failure taxonomy and the backoff ladder — now delegates to the neutral
+ * core/adapter modules shared with the SaaS refresh worker. This shell keeps
+ * only the classic scheduling design: the JSON-backed OAuthAccountStore (via
+ * the shape-mapping OAuthRefreshStoreAdapter), the 60s sweep loop and the
+ * process-internal singleflight.
  *
- * Provider constants are COPIES of the public OAuth client constants in
- * src/saas/platform/codex-oauth/oauth.ts (lines 19-36) — classic must not
- * import from the saas tree, so the values are duplicated here with this
- * comment as the drift anchor. Nothing here is confidential (RFC 6749 §2.1
- * public clients).
+ * Semantics union note (the stricter implementation won each divergence):
+ * the response byte cap is 4_096 (SaaS), a missing content-type header is
+ * rejected (SaaS), token text must be printable 0x21-0x7e (SaaS), a failed
+ * body read is a retryable network error (SaaS), token endpoints must be
+ * canonical https URLs with no explicit port (SaaS). The failure backoff cap
+ * stays 24h (classic) and the revoked-account terminal classification stays
+ * classic-only. See the DIVERGENCE comments in src/oauth-refresh/core.ts.
  */
 
-export const OAUTH_REFRESH_TIMEOUT_MS = 5_000;
-export const OAUTH_REFRESH_MAX_RESPONSE_BYTES = 65_536;
-export const OAUTH_REFRESH_MAX_EXPIRES_IN_SECONDS = 31_536_000;
 /** Refresh when less than this remains (SaaS schedules at expires_in × 0.8). */
 export const OAUTH_REFRESH_DEFAULT_MARGIN_MS = 10 * 60_000;
-export const OAUTH_REFRESH_MIN_BACKOFF_MS = 60_000;
-export const OAUTH_REFRESH_MAX_BACKOFF_MS = 24 * 60 * 60_000;
 
 /**
- * Terminal RFC 6749 §5.2 / provider-specific rejections: the grant is gone
- * (revoked, expired or rotated elsewhere). An account that fails with one of
- * these is marked 'revoked' and never auto-refreshed again.
+ * The fixed public OAuth client binding for one provider/account pair.
+ * Structurally the neutral core's adapter (fail-closed, never guessed).
  */
-export const NON_RETRYABLE_OAUTH_ERRORS: readonly string[] = Object.freeze([
-  'invalid_grant',
-  'refresh_token_reused',
-  'token_expired',
-  'app_session_terminated',
-  'refresh_token_invalidated',
-]);
-
-// --- Provider registry (copied from src/saas/platform/codex-oauth/oauth.ts lines 19-36) ---
-
-const CODEX_OAUTH_TOKEN_ENDPOINT = 'https://auth.openai.com/oauth/token';
-const CODEX_OAUTH_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
-/** Refresh scope drops offline_access — the refresh token already exists. */
-const CODEX_OAUTH_REFRESH_SCOPE = 'openid profile email';
-const CODEX_OAUTH_USER_AGENT = 'codex_cli_rs/0.146.0 (Mac OS X 15.0; arm64) Terminal';
-
-const GITHUB_COPILOT_TOKEN_ENDPOINT = 'https://github.com/login/oauth/access_token';
-const DEFAULT_USER_AGENT = 'model-router';
-
-export interface OAuthRefreshProviderSpec {
-  readonly tokenEndpoint: string;
-  readonly clientId: string;
-  /** null sends no scope parameter (the endpoint keeps the original grant's scopes). */
-  readonly refreshScope: string | null;
-  readonly userAgent: string;
-}
-
-const CODEX_OAUTH_REFRESH_PROVIDER: OAuthRefreshProviderSpec = Object.freeze({
-  tokenEndpoint: CODEX_OAUTH_TOKEN_ENDPOINT,
-  clientId: CODEX_OAUTH_CLIENT_ID,
-  refreshScope: CODEX_OAUTH_REFRESH_SCOPE,
-  userAgent: CODEX_OAUTH_USER_AGENT,
-});
-
-/** Optional per-account provider binding fields the generic passthrough understands. */
-interface ProviderBindingFields {
-  tokenEndpoint?: unknown;
-  clientId?: unknown;
-  refreshScope?: unknown;
-  userAgent?: unknown;
-}
-
-function httpsUrl(value: string): boolean {
-  try {
-    const url = new URL(value);
-    return (
-      url.protocol === 'https:' && url.username === '' && url.password === '' && url.search === '' && url.hash === ''
-    );
-  } catch {
-    return false;
-  }
-}
+export type OAuthRefreshProviderSpec = OAuthRefreshAdapter;
 
 /**
- * Resolves the refresh binding for one provider/account pair. Only
- * compile-time-fixed public bindings are refreshed (fail-closed, never
- * guessed): 'codex_oauth' always; every other provider goes through the
- * generic passthrough and refreshes only when the account itself carries the
- * binding (clientId plus, for github_copilot, GitHub's token endpoint as the
+ * Resolves the refresh binding for one provider/account pair. The fixed
+ * registry bindings resolve by provider key ('codex_oauth' and the SaaS
+ * triple spellings); every other provider goes through the generic
+ * passthrough and refreshes only when the account itself carries the binding
+ * (clientId plus, for github_copilot, GitHub's token endpoint as the
  * default). Otherwise null — the account is cleanly unsupported.
  */
 export function resolveOAuthRefreshProviderSpec(
   provider: string,
   account: OAuthAccount,
 ): OAuthRefreshProviderSpec | null {
-  if (provider === 'codex_oauth') return CODEX_OAUTH_REFRESH_PROVIDER;
-  const binding = account as OAuthAccount & ProviderBindingFields;
-  const clientId = typeof binding.clientId === 'string' && binding.clientId.length > 0 ? binding.clientId : null;
-  if (clientId === null) return null;
-  const endpointCandidate =
-    typeof binding.tokenEndpoint === 'string' && binding.tokenEndpoint.length > 0 ? binding.tokenEndpoint : null;
-  const endpoint = endpointCandidate ?? (provider === 'github_copilot' ? GITHUB_COPILOT_TOKEN_ENDPOINT : null);
-  if (endpoint === null || !httpsUrl(endpoint)) return null;
-  return {
-    tokenEndpoint: endpoint,
-    clientId,
-    refreshScope:
-      typeof binding.refreshScope === 'string' && binding.refreshScope.length > 0 ? binding.refreshScope : null,
-    userAgent:
-      typeof binding.userAgent === 'string' && binding.userAgent.length > 0 ? binding.userAgent : DEFAULT_USER_AGENT,
-  };
+  return resolveAdapter(provider) ?? resolvePassthroughAdapter({ ...account, provider });
 }
 
-// --- Refresh result taxonomy ---
+// --- Refresh result taxonomy (classic public API) ---
 
 export type RefreshFailureErrorCode =
   /** No fixed refresh binding for this provider/account (not an account fault). */
@@ -156,8 +112,6 @@ export interface RefreshFailure {
 
 export type RefreshResult = RefreshSuccess | RefreshFailure;
 
-export type OAuthRefreshFetch = (url: string, init: RequestInit) => Promise<Response>;
-
 function failure(
   errorCode: RefreshFailureErrorCode,
   retryable: boolean,
@@ -168,26 +122,66 @@ function failure(
   return { state: 'failure', retryable, terminal, errorCode, oauthError, httpStatus };
 }
 
-/** Printable ASCII token text (RFC 6749 §1.4 vsvar); never logged. */
-function tokenText(value: unknown, maxLength: number): string | null {
-  if (typeof value !== 'string' || value.length < 1 || value.length > maxLength) return null;
-  for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index);
-    if (code < 0x20 || code > 0x7e) return null;
+/** Maps a core error code onto the classic public failure code. */
+function classicErrorCode(code: CoreRefreshErrorCode): RefreshFailureErrorCode {
+  switch (code) {
+    case 'network_error':
+      return 'network_error';
+    case 'timeout':
+      return 'timeout';
+    case 'rate_limited':
+      return 'rate_limited';
+    case 'provider_unavailable':
+      return 'provider_unavailable';
+    case 'endpoint_rejected':
+      return 'endpoint_rejected';
+    case 'adapter_unsupported':
+      return 'provider_unsupported';
+    case 'credential_invalid':
+      return 'account_unrefreshable';
+    case 'redirect_rejected':
+    case 'endpoint_unsupported':
+      return 'endpoint_unsupported';
+    case 'response_invalid':
+    case 'response_too_large':
+      return 'response_invalid';
   }
-  return value;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+/** Maps a neutral core attempt onto the classic public RefreshResult. */
+function classicResult(attempt: OAuthRefreshAttempt): RefreshResult {
+  const { outcome, writeback } = attempt;
+  if (outcome.kind === 'success' && writeback !== null) {
+    return {
+      state: 'success',
+      accessToken: writeback.accessToken,
+      refreshToken: writeback.refreshToken,
+      idToken: writeback.idToken,
+      expiresInSeconds: writeback.expiresInSeconds,
+    };
+  }
+  const code = outcome.errorCode;
+  const errorCode = code === null ? 'response_invalid' : classicErrorCode(code);
+  const retryable = outcome.kind === 'retryable';
+  const terminal = outcome.kind === 'terminal';
+  // The classic taxonomy never attached a transport status or provider code
+  // to transport-level failures.
+  const isTransport = code === 'network_error' || code === 'timeout';
+  return failure(
+    errorCode,
+    retryable,
+    terminal,
+    isTransport ? null : outcome.oauthError,
+    isTransport ? null : outcome.httpStatus,
+  );
 }
 
 /**
- * Single refresh_token grant call against the provider token endpoint.
- * Ported from the SaaS worker's requestOauthTokenRefresh: form-urlencoded
- * grant, client_id, scope narrowing when the binding carries one, pinned
- * User-Agent, manual redirects and the bounded response contract. Never
- * throws; every failure mode is a classified RefreshFailure.
+ * Single refresh_token grant call against the provider token endpoint
+ * (thin wrapper over the neutral core's performOAuthRefresh): same contract,
+ * same failure taxonomy, same constants — the core is the single
+ * implementation shared with the SaaS refresh worker. Never throws; every
+ * failure mode is a classified RefreshFailure.
  */
 export async function refreshOAuthAccount(input: {
   account: OAuthAccount;
@@ -196,127 +190,25 @@ export async function refreshOAuthAccount(input: {
   nowMs?: number;
 }): Promise<RefreshResult> {
   const { account, provider } = input;
-  const fetcher = input.fetchImpl ?? ((url, init) => fetch(url, init));
-  const spec = resolveOAuthRefreshProviderSpec(provider, account);
-  if (spec === null) return failure('provider_unsupported', false, false, null, null);
+  const adapter = resolveOAuthRefreshProviderSpec(provider, account);
+  if (adapter === null) return failure('provider_unsupported', false, false, null, null);
   const refreshToken = account.refreshToken;
-  if (typeof refreshToken !== 'string' || tokenText(refreshToken, 4096) === null) {
+  if (typeof refreshToken !== 'string') {
     return failure('account_unrefreshable', false, false, null, null);
   }
-
-  const form =
-    `grant_type=refresh_token&refresh_token=${encodeURIComponent(refreshToken)}` +
-    `&client_id=${encodeURIComponent(spec.clientId)}` +
-    (spec.refreshScope === null ? '' : `&scope=${encodeURIComponent(spec.refreshScope)}`);
-  const deadline = AbortSignal.timeout(OAUTH_REFRESH_TIMEOUT_MS);
-  let response: Response;
-  try {
-    deadline.throwIfAborted();
-    response = await fetcher(spec.tokenEndpoint, {
-      method: 'POST',
-      headers: {
-        accept: 'application/json',
-        'content-type': 'application/x-www-form-urlencoded',
-        'user-agent': spec.userAgent,
-      },
-      body: form,
-      redirect: 'manual',
-      signal: deadline,
-    });
-  } catch {
-    return failure(deadline.aborted ? 'timeout' : 'network_error', true, false, null, null);
-  }
-
-  if (response.status < 200 || response.status >= 300) {
-    if (response.status >= 300 && response.status < 400) {
-      return failure('endpoint_unsupported', false, false, null, response.status);
-    }
-    if (response.status === 400 || response.status === 401 || response.status === 403) {
-      const oauthError = await rejectionCode(response);
-      const terminal = oauthError !== null && NON_RETRYABLE_OAUTH_ERRORS.includes(oauthError);
-      return failure('endpoint_rejected', false, terminal, oauthError, response.status);
-    }
-    if (response.status === 429) return failure('rate_limited', true, false, null, response.status);
-    if (response.status >= 500) return failure('provider_unavailable', true, false, null, response.status);
-    return failure('endpoint_unsupported', false, false, null, response.status);
-  }
-
-  const contentType = response.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase();
-  if (contentType !== undefined && contentType !== 'application/json') {
-    return failure('response_invalid', false, false, null, response.status);
-  }
-  let bytes: Uint8Array;
-  try {
-    const declared = response.headers.get('content-length');
-    if (declared !== null && /^\d{1,12}$/.test(declared) && Number(declared) > OAUTH_REFRESH_MAX_RESPONSE_BYTES) {
-      return failure('response_invalid', false, false, null, response.status);
-    }
-    const buffer = await response.arrayBuffer();
-    if (buffer.byteLength > OAUTH_REFRESH_MAX_RESPONSE_BYTES) {
-      return failure('response_invalid', false, false, null, response.status);
-    }
-    bytes = new Uint8Array(buffer);
-  } catch {
-    return failure(deadline.aborted ? 'timeout' : 'response_invalid', deadline.aborted, false, null, response.status);
-  }
-  return parseTokenResponse(bytes, response.status);
-}
-
-/** Best-effort RFC 6749 §5.2 error-code extraction from a rejection body; never throws. */
-async function rejectionCode(response: Response): Promise<string | null> {
-  try {
-    const text = await response.text();
-    if (text.length > OAUTH_REFRESH_MAX_RESPONSE_BYTES) return null;
-    const parsed: unknown = JSON.parse(text);
-    if (!isRecord(parsed)) return null;
-    return tokenText(parsed.error, 64);
-  } catch {
-    return null;
-  }
-}
-
-function parseTokenResponse(bytes: Uint8Array, httpStatus: number): RefreshResult {
-  let body: Record<string, unknown>;
-  try {
-    const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-    const parsed: unknown = JSON.parse(text);
-    if (!isRecord(parsed)) return failure('response_invalid', false, false, null, httpStatus);
-    body = parsed;
-  } catch {
-    return failure('response_invalid', false, false, null, httpStatus);
-  }
-  const accessToken = tokenText(body.access_token, 4096);
-  if (accessToken === null) return failure('response_invalid', false, false, null, httpStatus);
-  let refreshToken: string | null = null;
-  if (body.refresh_token !== undefined) {
-    refreshToken = tokenText(body.refresh_token, 4096);
-    if (refreshToken === null) return failure('response_invalid', false, false, null, httpStatus);
-  }
-  let idToken: string | null = null;
-  if (body.id_token !== undefined) {
-    idToken = tokenText(body.id_token, 32_768);
-    if (idToken === null) return failure('response_invalid', false, false, null, httpStatus);
-  }
-  let expiresInSeconds: number | null = null;
-  if (body.expires_in !== undefined) {
-    const raw = body.expires_in;
-    const parsed =
-      typeof raw === 'number' ? raw : typeof raw === 'string' && /^\d{1,10}$/.test(raw) ? Number(raw) : Number.NaN;
-    if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > OAUTH_REFRESH_MAX_EXPIRES_IN_SECONDS) {
-      return failure('response_invalid', false, false, null, httpStatus);
-    }
-    expiresInSeconds = parsed;
-  }
-  return { state: 'success', accessToken, refreshToken, idToken, expiresInSeconds };
+  const credential: RefreshableCredential = {
+    key: `${provider}:${account.id}`,
+    providerId: provider,
+    refreshToken,
+    expiresAtMs: account.expiresAt ?? null,
+  };
+  const attempt = await performOAuthRefresh(credential, adapter, input.fetchImpl, {
+    ...(input.nowMs === undefined ? {} : { nowMs: input.nowMs }),
+  });
+  return classicResult(attempt);
 }
 
 // --- Backoff ---
-
-function jitterFraction(key: string): number {
-  const digest = createHash('sha256').update('oauth-refresh-jitter').update(key).digest();
-  const unit = digest.readUInt32BE(0) / 0xffffffff;
-  return (unit * 2 - 1) * 0.1;
-}
 
 /** Exponential backoff 60s → 24h with deterministic ±10% jitter keyed by account. */
 export function oauthRefreshBackoffMs(
@@ -324,27 +216,14 @@ export function oauthRefreshBackoffMs(
   failureCount: number,
   options: { minBackoffMs?: number; maxBackoffMs?: number } = {},
 ): number {
-  const min = options.minBackoffMs ?? OAUTH_REFRESH_MIN_BACKOFF_MS;
-  const max = options.maxBackoffMs ?? OAUTH_REFRESH_MAX_BACKOFF_MS;
-  const attempts = Math.max(1, failureCount);
-  let base = min;
-  for (let index = 1; index < attempts; index += 1) {
-    base = Math.min(max, base * 2);
-    if (base >= max) break;
-  }
-  const jittered = Math.round(Math.min(max, base) * (1 + jitterFraction(key)));
-  return Math.min(max, Math.max(min, jittered));
+  return refreshBackoffMs(failureCount, {
+    ...(options.minBackoffMs === undefined ? {} : { min: options.minBackoffMs }),
+    ...(options.maxBackoffMs === undefined ? {} : { max: options.maxBackoffMs }),
+    jitterKey: key,
+  });
 }
 
 // --- Engine ---
-
-/** The part of OAuthAccountStore the engine needs (satisfied by the real store and test fakes). */
-export interface OAuthRefreshAccountStore {
-  get(provider: string, id: string): OAuthAccount | undefined;
-  getDefault(provider: string): OAuthAccount | undefined;
-  list(provider?: string): OAuthAccount[];
-  updateTokens(provider: string, id: string, update: OAuthTokenUpdate): OAuthAccount | undefined;
-}
 
 export interface OAuthRefreshEngineOptions {
   /** Refresh when less than this remains; default 10 minutes. */
@@ -375,14 +254,16 @@ export class OAuthRefreshEngine {
   private readonly inFlight = new Map<string, Promise<void>>();
   private sweepTimer: NodeJS.Timeout | undefined;
   private closed = false;
+  private readonly accounts: OAuthRefreshStoreAdapter;
   private readonly refreshMarginMs: number;
   private readonly minBackoffMs: number;
   private readonly maxBackoffMs: number;
 
   constructor(
-    private readonly store: OAuthRefreshAccountStore,
+    store: OAuthRefreshAccountStore,
     private readonly options: OAuthRefreshEngineOptions = {},
   ) {
+    this.accounts = new OAuthRefreshStoreAdapter(store);
     this.refreshMarginMs = options.refreshMarginMs ?? OAUTH_REFRESH_DEFAULT_MARGIN_MS;
     this.minBackoffMs = options.minBackoffMs ?? OAUTH_REFRESH_MIN_BACKOFF_MS;
     this.maxBackoffMs = options.maxBackoffMs ?? OAUTH_REFRESH_MAX_BACKOFF_MS;
@@ -393,12 +274,8 @@ export class OAuthRefreshEngine {
    * stored token is inside the expiry margin. Throws the re-authentication
    * error for revoked accounts and the no-account error when none is stored.
    */
-  async resolveAccessToken(
-    provider: string,
-    accountId?: string,
-    options?: { force?: boolean },
-  ): Promise<string> {
-    const account = this.getAccount(provider, accountId);
+  async resolveAccessToken(provider: string, accountId?: string, options?: { force?: boolean }): Promise<string> {
+    const account = this.accounts.getAccount(provider, accountId);
     if (account === undefined) throw new Error(`No authenticated account for ${provider}`);
     if (isRevoked(account)) throw reauthenticationRequired(provider);
     // `force` bypasses the expiry-margin check: a live 401 from the upstream
@@ -411,7 +288,7 @@ export class OAuthRefreshEngine {
       return account.accessToken;
     }
     await this.runExclusive(provider, account.id, options?.force === true);
-    const updated = this.getAccount(provider, accountId);
+    const updated = this.accounts.getAccount(provider, accountId);
     if (updated === undefined) throw new Error(`No authenticated account for ${provider}`);
     if (isRevoked(updated)) throw reauthenticationRequired(provider);
     return updated.accessToken;
@@ -427,16 +304,14 @@ export class OAuthRefreshEngine {
     void this.sweep();
   }
 
-  /** One proactive pass over every stored account (singleflight applies). */
+  /** One proactive pass over every due stored account (singleflight applies). */
   async sweep(): Promise<void> {
     if (this.closed) return;
-    const accounts = this.store.list();
-    for (const account of accounts) {
+    const due = this.accounts.listDue(this.now(), this.refreshMarginMs, Number.POSITIVE_INFINITY);
+    for (const credential of due) {
       if (this.closed) return;
-      if (isRevoked(account)) continue;
-      if (!this.shouldRefresh(account) || this.withinBackoff(account)) continue;
       try {
-        await this.runExclusive(account.provider, account.id);
+        await this.runExclusive(credential.providerId, credential.key.slice(credential.providerId.length + 1));
       } catch {
         // refreshAccount reports unexpected errors through onError; a sweep
         // must never abort the remaining accounts.
@@ -454,10 +329,6 @@ export class OAuthRefreshEngine {
     await Promise.allSettled([...this.inFlight.values()]);
   }
 
-  private getAccount(provider: string, accountId?: string): OAuthAccount | undefined {
-    return accountId === undefined ? this.store.getDefault(provider) : this.store.get(provider, accountId);
-  }
-
   private now(): number {
     return this.options.nowMs?.() ?? Date.now();
   }
@@ -468,10 +339,9 @@ export class OAuthRefreshEngine {
    * stale-'refreshing' reclamation predicate).
    */
   private shouldRefresh(account: OAuthAccount): boolean {
-    if (account.expiresAt === undefined) return false;
     if (typeof account.refreshToken !== 'string' || account.refreshToken.length === 0) return false;
     if (resolveOAuthRefreshProviderSpec(account.provider, account) === null) return false;
-    return account.expiresAt <= this.now() + this.refreshMarginMs;
+    return shouldRefresh(account.expiresAt ?? null, this.refreshMarginMs, this.now(), false);
   }
 
   private withinBackoff(account: OAuthAccount): boolean {
@@ -490,20 +360,16 @@ export class OAuthRefreshEngine {
   }
 
   private async refreshAccount(provider: string, accountId: string, force = false): Promise<void> {
-    const account = this.store.get(provider, accountId);
+    const account = this.accounts.getAccount(provider, accountId);
     if (account === undefined || isRevoked(account)) return;
+    const refreshToken = account.refreshToken;
+    if (typeof refreshToken !== 'string' || refreshToken.length === 0) return;
     // `force` bypasses the expiry margin (a live 401 is definitive expiry
     // evidence) but never the backoff or the provider binding: a forced
     // refresh still needs a refresh token and a provider that supports it.
     if ((!force && !this.shouldRefresh(account)) || this.withinBackoff(account)) return;
-    if (
-      force &&
-      (typeof account.refreshToken !== 'string' ||
-        account.refreshToken.length === 0 ||
-        resolveOAuthRefreshProviderSpec(account.provider, account) === null)
-    ) {
-      return;
-    }
+    const adapter = resolveOAuthRefreshProviderSpec(provider, account);
+    if (adapter === null) return;
 
     // Crash-observability stamp before the network call: a crash in this
     // window leaves 'refreshing' on disk, which loads as active (a crashed
@@ -511,72 +377,67 @@ export class OAuthRefreshEngine {
     // singleflight prevents concurrent in-process retries).
     this.updateQuiet(provider, accountId, { status: 'refreshing' });
 
-    let result: RefreshResult;
+    const credential: RefreshableCredential = {
+      key: `${provider}:${accountId}`,
+      providerId: provider,
+      refreshToken,
+      expiresAtMs: account.expiresAt ?? null,
+    };
+    let attempt: OAuthRefreshAttempt;
     try {
-      result = await refreshOAuthAccount({
-        account,
-        provider,
-        fetchImpl: this.options.fetchImpl,
+      attempt = await performOAuthRefresh(credential, adapter, this.options.fetchImpl, {
+        nowMs: this.now(),
       });
     } catch (error) {
       this.options.onError?.(error, { provider, accountId });
-      this.recordFailure(provider, accountId, account, this.maxBackoffMs);
-      return;
-    }
-
-    if (result.state === 'success') {
-      const now = this.now();
-      this.updateQuiet(provider, accountId, {
-        accessToken: result.accessToken,
-        ...(result.refreshToken !== null ? { refreshToken: result.refreshToken } : {}),
-        ...(result.expiresInSeconds !== null ? { expiresAt: now + result.expiresInSeconds * 1000 } : {}),
-        status: 'active',
-        lastRefreshAt: now,
-        failureCount: 0,
-        nextRetryAt: null,
+      this.commitQuiet(credential, {
+        outcome: { kind: 'failure', errorCode: null, oauthError: null, httpStatus: null },
+        writeback: null,
+        nowMs: this.now(),
+        backoffMs: this.maxBackoffMs,
       });
       return;
     }
-    if (result.terminal) {
-      this.updateQuiet(provider, accountId, {
-        status: 'revoked',
-        lastRefreshAt: this.now(),
-        failureCount: (account.failureCount ?? 0) + 1,
-        nextRetryAt: null,
-      });
-      return;
-    }
-    if (result.errorCode === 'provider_unsupported' || result.errorCode === 'account_unrefreshable') {
-      // Not an account fault and nothing to schedule: the account cannot be
-      // refreshed in its current shape; restore active so the stamp is clean.
-      this.updateQuiet(provider, accountId, { status: 'active' });
-      return;
-    }
-    const backoffMs = result.retryable
-      ? oauthRefreshBackoffMs(`${provider}:${accountId}`, (account.failureCount ?? 0) + 1, {
-          minBackoffMs: this.minBackoffMs,
-          maxBackoffMs: this.maxBackoffMs,
-        })
-      : this.maxBackoffMs;
-    this.recordFailure(provider, accountId, account, backoffMs);
+    this.commitQuiet(credential, this.commitInput(attempt, provider, accountId, account));
   }
 
-  private recordFailure(provider: string, accountId: string, account: OAuthAccount, backoffMs: number): void {
-    const now = this.now();
-    this.updateQuiet(provider, accountId, {
-      status: 'active',
-      lastRefreshAt: now,
-      failureCount: (account.failureCount ?? 0) + 1,
-      nextRetryAt: now + backoffMs,
-    });
+  /** Scheduling policy the classic shell owns: backoff ladder bounds per engine options. */
+  private commitInput(
+    attempt: OAuthRefreshAttempt,
+    provider: string,
+    accountId: string,
+    account: OAuthAccount,
+  ): OAuthRefreshCommitResult {
+    const { outcome, writeback } = attempt;
+    const nowMs = this.now();
+    if (outcome.kind === 'success' || outcome.kind === 'unsupported') {
+      return { outcome, writeback, nowMs };
+    }
+    const backoffMs =
+      outcome.kind === 'retryable'
+        ? oauthRefreshBackoffMs(`${provider}:${accountId}`, (account.failureCount ?? 0) + 1, {
+            minBackoffMs: this.minBackoffMs,
+            maxBackoffMs: this.maxBackoffMs,
+          })
+        : this.maxBackoffMs;
+    return { outcome, writeback: null, nowMs, backoffMs };
   }
 
   /** Store writes must never take down request-path token resolution. */
   private updateQuiet(provider: string, accountId: string, update: OAuthTokenUpdate): void {
     try {
-      this.store.updateTokens(provider, accountId, update);
+      this.accounts.applyUpdate(provider, accountId, update);
     } catch (error) {
       this.options.onError?.(error, { provider, accountId });
+    }
+  }
+
+  private commitQuiet(credential: RefreshableCredential, result: OAuthRefreshCommitResult): void {
+    try {
+      this.accounts.commit(credential, result);
+    } catch (error) {
+      const { providerId, key } = credential;
+      this.options.onError?.(error, { provider: providerId, accountId: key.slice(providerId.length + 1) });
     }
   }
 }

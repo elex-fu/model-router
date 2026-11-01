@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { type Dispatcher, type RequestInit as UndiciRequestInit, fetch as undiciFetch } from 'undici';
+import { geminiOAuthRefreshAdapter, type OAuthRefreshAdapter, resolveAdapter } from '../../oauth-refresh/adapters.js';
+import { type CoreRefreshErrorCode, performOAuthRefresh } from '../../oauth-refresh/core.js';
 import {
   createProviderCredentialContext,
   PROVIDER_CREDENTIAL_CONTEXT_VERSION,
@@ -15,28 +17,11 @@ import type { SaasDatabase, SqlExecutor } from '../db/index.js';
 import type { ProviderHttpEgressAllowlist, ProviderHttpPinnedConnector } from '../gateway/provider-http-address.js';
 import { createProviderEgressProxyConnection } from '../gateway/provider-http-address.js';
 import {
-  CLAUDE_OAUTH_CLIENT_ID,
-  CLAUDE_OAUTH_REFRESH_SCOPE,
-  CLAUDE_OAUTH_TOKEN_ENDPOINT,
-  CLAUDE_OAUTH_TOKEN_USER_AGENT,
-} from '../platform/claude-oauth/oauth.js';
-import {
   CODEX_OAUTH_CLIENT_ID,
   CODEX_OAUTH_REFRESH_SCOPE,
   CODEX_OAUTH_TOKEN_ENDPOINT,
 } from '../platform/codex-oauth/oauth.js';
-import {
-  GEMINI_OAUTH_CLIENT_ID,
-  GEMINI_OAUTH_TOKEN_ENDPOINT,
-  GEMINI_OAUTH_TOKEN_USER_AGENT,
-  resolveGeminiOauthClientSecret,
-} from '../platform/gemini-oauth/oauth.js';
-import {
-  GROK_OAUTH_CLIENT_ID,
-  GROK_OAUTH_REFRESH_SCOPE,
-  GROK_OAUTH_TOKEN_ENDPOINT,
-  GROK_OAUTH_TOKEN_USER_AGENT,
-} from '../platform/grok-oauth/oauth.js';
+import { resolveGeminiOauthClientSecret } from '../platform/gemini-oauth/oauth.js';
 import { readEgressProxyForAccount } from './egress-proxy-lookup.js';
 import { assembleEgressProxyUrl } from './egress-proxy-record.js';
 import { withUnsealedEgressProxyCredentials } from './egress-proxy-seal.js';
@@ -267,26 +252,26 @@ export const GROK_OAUTH_ENVELOPE_PASSTHROUGH_FIELDS: readonly string[] = Object.
 ]);
 
 /*
- * The only verified OAuth token bindings. Both are public OAuth clients
- * (RFC 6749 §2.1: the client id is not a secret) for the subscription
+ * The only verified OAuth token bindings. Every entry is a public OAuth
+ * client (RFC 6749 §2.1: the client id is not a secret) for the subscription
  * accounts this router's users actually connect; every product absent here
  * is skipped by the due scan (fail-closed, never guessed).
  * - Claude Code subscription: https://console.anthropic.com/v1/oauth/token
  * - Codex CLI ChatGPT account: https://auth.openai.com/oauth/token
+ *
+ * Entries whose shape aligns with the unified registry
+ * (src/oauth-refresh/adapters.ts — the single source both refresh planes
+ * share) are DERIVED from that registry through registryAdapter below so the
+ * binding constants cannot drift between the two planes. The two codex
+ * bindings stay local: the unified registry collapses both codex triples
+ * onto one adapter (openai-codex-oauth-v2) pinned to the CLI user-agent,
+ * while this worker keeps its distinct adapterIds (v1 legacy CLI binding /
+ * v2 ChatGPT subscription) and the 'model-router' user-agent its grants have
+ * always sent (the endpoints fingerprint callers).
  */
-const FIXED_OAUTH_TOKEN_ADAPTERS: readonly FixedOauthTokenAdapter[] = Object.freeze([
-  Object.freeze({
-    providerId: 'anthropic',
-    productId: 'claude-code',
-    credentialType: 'oauth',
-    adapterId: 'anthropic-claude-code-oauth-v1',
-    tokenEndpoint: 'https://console.anthropic.com/v1/oauth/token',
-    clientId: '9d1c250a-e61b-44d9-88ed-5944d1962f5e',
-    refreshScope: null,
-    passthroughFields: [],
-    userAgent: 'model-router',
-  }),
-  Object.freeze({
+const FIXED_OAUTH_TOKEN_ADAPTERS: readonly FixedOauthTokenAdapter[] = Object.freeze(
+  [
+    registryAdapter({ providerId: 'anthropic', productId: 'claude-code', credentialType: 'oauth' }),
     // R5 Claude Code subscription category package
     // (src/saas/gateway/claude/catalog-identity.ts). Same public OAuth client
     // as the legacy claude-code identity above but the platform.claude.com
@@ -294,75 +279,108 @@ const FIXED_OAUTH_TOKEN_ADAPTERS: readonly FixedOauthTokenAdapter[] = Object.fre
     // the captured axios UA keeps the grant off non-CLI fingerprints. The
     // organization/account envelope metadata survives rotations through
     // CLAUDE_OAUTH_ENVELOPE_PASSTHROUGH_FIELDS.
-    providerId: 'anthropic-claude',
-    productId: 'claude-subscription',
-    credentialType: 'oauth',
-    adapterId: 'anthropic-claude-subscription-oauth-v1',
-    tokenEndpoint: CLAUDE_OAUTH_TOKEN_ENDPOINT,
-    clientId: CLAUDE_OAUTH_CLIENT_ID,
-    refreshScope: CLAUDE_OAUTH_REFRESH_SCOPE,
-    passthroughFields: CLAUDE_OAUTH_ENVELOPE_PASSTHROUGH_FIELDS,
-    userAgent: CLAUDE_OAUTH_TOKEN_USER_AGENT,
-  }),
-  Object.freeze({
-    providerId: 'openai',
-    productId: 'codex-cli',
-    credentialType: 'oauth',
-    adapterId: 'openai-codex-oauth-v1',
-    // P1b Codex binding (docs/sub2api-parity-upgrade-plan-2026-10-15.md
-    // Phase 1.3): the constants live in platform/codex-oauth/oauth.ts so the
-    // binding flow and the refresh grant can never drift apart. The refresh
-    // scope drops offline_access — the refresh token already exists. The
-    // refresh_token grant response only overwrites the stored refresh token
-    // when the endpoint truly returns a new one (OpenAI rotation semantics),
-    // which requestOauthTokenRefresh plus the caller's
-    // `refreshToken ?? previousRefreshToken` already implement.
-    tokenEndpoint: CODEX_OAUTH_TOKEN_ENDPOINT,
-    clientId: CODEX_OAUTH_CLIENT_ID,
-    refreshScope: CODEX_OAUTH_REFRESH_SCOPE,
-    passthroughFields: CODEX_OAUTH_ENVELOPE_PASSTHROUGH_FIELDS,
-    userAgent: 'model-router',
-  }),
-  Object.freeze({
-    // P1c catalog identity for ChatGPT-backed Codex subscription accounts
-    // (src/saas/gateway/codex/catalog-registration.ts). Same upstream grant as
-    // the codex-cli binding above; registered separately so the catalog
-    // provider (openai-codex) and the legacy CLI identity both stay
-    // refreshable.
-    providerId: 'openai-codex',
-    productId: 'codex-chatgpt',
-    credentialType: 'oauth',
-    adapterId: 'openai-codex-oauth-v2',
-    tokenEndpoint: CODEX_OAUTH_TOKEN_ENDPOINT,
-    clientId: CODEX_OAUTH_CLIENT_ID,
-    refreshScope: CODEX_OAUTH_REFRESH_SCOPE,
-    passthroughFields: CODEX_OAUTH_ENVELOPE_PASSTHROUGH_FIELDS,
-    userAgent: 'model-router',
-  }),
-  Object.freeze({
+    registryAdapter({ providerId: 'anthropic-claude', productId: 'claude-subscription', credentialType: 'oauth' }),
+    Object.freeze({
+      providerId: 'openai',
+      productId: 'codex-cli',
+      credentialType: 'oauth',
+      adapterId: 'openai-codex-oauth-v1',
+      // P1b Codex binding (docs/sub2api-parity-upgrade-plan-2026-10-15.md
+      // Phase 1.3): the constants live in platform/codex-oauth/oauth.ts so the
+      // binding flow and the refresh grant can never drift apart. The refresh
+      // scope drops offline_access — the refresh token already exists. The
+      // refresh_token grant response only overwrites the stored refresh token
+      // when the endpoint truly returns a new one (OpenAI rotation semantics),
+      // which requestOauthTokenRefresh plus the caller's
+      // `refreshToken ?? previousRefreshToken` already implement.
+      tokenEndpoint: CODEX_OAUTH_TOKEN_ENDPOINT,
+      clientId: CODEX_OAUTH_CLIENT_ID,
+      refreshScope: CODEX_OAUTH_REFRESH_SCOPE,
+      passthroughFields: CODEX_OAUTH_ENVELOPE_PASSTHROUGH_FIELDS,
+      userAgent: 'model-router',
+    }),
+    Object.freeze({
+      // P1c catalog identity for ChatGPT-backed Codex subscription accounts
+      // (src/saas/gateway/codex/catalog-registration.ts). Same upstream grant as
+      // the codex-cli binding above; registered separately so the catalog
+      // provider (openai-codex) and the legacy CLI identity both stay
+      // refreshable.
+      providerId: 'openai-codex',
+      productId: 'codex-chatgpt',
+      credentialType: 'oauth',
+      adapterId: 'openai-codex-oauth-v2',
+      tokenEndpoint: CODEX_OAUTH_TOKEN_ENDPOINT,
+      clientId: CODEX_OAUTH_CLIENT_ID,
+      refreshScope: CODEX_OAUTH_REFRESH_SCOPE,
+      passthroughFields: CODEX_OAUTH_ENVELOPE_PASSTHROUGH_FIELDS,
+      userAgent: 'model-router',
+    }),
     // Batch-3 Grok CLI subscription category package
-    // (src/saas/gateway/grok/catalog-identity.ts). The xAI public OAuth
-    // client refreshes at auth.x.ai/oauth2/token; the refresh grant sends no
-    // scope parameter so the endpoint keeps the original grant's scopes
-    // (grok-cli:access / api:access must survive every rotation). The
-    // subscription tier and account coordinates survive rotations through
+    // (src/saas/gateway/grok/catalog-identity.ts). The xAI public OAuth client
+    // refreshes at auth.x.ai/oauth2/token; the refresh grant sends no scope
+    // parameter so the endpoint keeps the original grant's scopes (grok-cli:
+    // access / api:access must survive every rotation). The subscription tier
+    // and account coordinates survive rotations through
     // GROK_OAUTH_ENVELOPE_PASSTHROUGH_FIELDS (the tier is only ever derived
     // from an access token, and the rotated-away token's copy is the durable
     // one). The pinned CLI workspace UA keeps the grant off non-CLI
     // fingerprints — the token endpoint fingerprints callers like the proxy
     // does.
-    providerId: 'xai-grok',
-    productId: 'grok-subscription',
-    credentialType: 'oauth',
-    adapterId: 'xai-grok-oauth-v1',
-    tokenEndpoint: GROK_OAUTH_TOKEN_ENDPOINT,
-    clientId: GROK_OAUTH_CLIENT_ID,
-    refreshScope: GROK_OAUTH_REFRESH_SCOPE,
-    passthroughFields: GROK_OAUTH_ENVELOPE_PASSTHROUGH_FIELDS,
-    userAgent: GROK_OAUTH_TOKEN_USER_AGENT,
-  }),
-  ...geminiOauthTokenAdapters(),
-]);
+    registryAdapter({ providerId: 'xai-grok', productId: 'grok-subscription', credentialType: 'oauth' }),
+    ...geminiOauthTokenAdapters(),
+  ].flatMap((adapter) => (adapter === null ? [] : [adapter])),
+);
+
+/**
+ * The unified-registry key convention for a SaaS binding triple:
+ * `${providerId}/${productId}/${credentialType}` — the same normalized key
+ * the classic plane's aliases resolve onto.
+ */
+function saasAdapterRegistryKey(credential: {
+  readonly providerId: string;
+  readonly productId: string;
+  readonly credentialType: string;
+}): string {
+  return `${credential.providerId}/${credential.productId}/${credential.credentialType}`;
+}
+
+/** Projects a unified-registry adapter onto this worker's binding shape. */
+function fromSharedAdapter(
+  credential: {
+    readonly providerId: string;
+    readonly productId: string;
+    readonly credentialType: string;
+  },
+  shared: OAuthRefreshAdapter,
+): FixedOauthTokenAdapter {
+  return Object.freeze({
+    providerId: credential.providerId,
+    productId: credential.productId,
+    credentialType: credential.credentialType,
+    adapterId: shared.id,
+    tokenEndpoint: shared.tokenEndpoint,
+    clientId: shared.clientId,
+    refreshScope: shared.refreshScope,
+    passthroughFields: shared.passthroughFields ?? [],
+    userAgent: shared.userAgent,
+    ...(shared.clientSecret === undefined ? {} : { clientSecret: shared.clientSecret }),
+  });
+}
+
+/**
+ * Resolves a SaaS binding triple through the unified registry. null (the
+ * registry does not bind the triple) keeps the binding out of this worker's
+ * table, so the due scan excludes it — fail-closed, exactly like every other
+ * unbound triple.
+ */
+function registryAdapter(credential: {
+  readonly providerId: string;
+  readonly productId: string;
+  readonly credentialType: string;
+}): FixedOauthTokenAdapter | null {
+  const shared = resolveAdapter(saasAdapterRegistryKey(credential));
+  return shared === null ? null : fromSharedAdapter(credential, shared);
+}
 
 /**
  * Envelope fields the Gemini subscription binding preserves across a
@@ -380,33 +398,27 @@ export const GEMINI_OAUTH_ENVELOPE_PASSTHROUGH_FIELDS: readonly string[] = Objec
 
 /**
  * The F4 Gemini Code Assist subscription adapter
- * (src/saas/gateway/gemini/catalog-identity.ts). Google's public
- * installed-app client refreshes at oauth2.googleapis.com and REQUIRES
- * client_secret in the grant; that value is provider-shaped, so it lives
- * only in the MODEL_ROUTER_GEMINI_OAUTH_CLIENT_SECRET environment variable
- * (the platform binding service reads the same variable). When the
- * environment is unconfigured the adapter is absent and gemini credentials
- * are excluded by the due scan — fail-closed, never guessed, and no refresh
- * is ever attempted that could burn the refresh token against a grant
- * missing its secret.
+ * (src/saas/gateway/gemini/catalog-identity.ts), derived from the unified
+ * registry's gemini binding. Google's public installed-app client refreshes
+ * at oauth2.googleapis.com and REQUIRES client_secret in the grant; that
+ * value is provider-shaped, so it lives only in the
+ * MODEL_ROUTER_GEMINI_OAUTH_CLIENT_SECRET environment variable (the platform
+ * binding service reads the same variable). When the environment is
+ * unconfigured the adapter is absent and gemini credentials are excluded by
+ * the due scan — fail-closed, never guessed, and no refresh is ever
+ * attempted that could burn the refresh token against a grant missing its
+ * secret.
  */
 export function geminiOauthTokenAdapters(
   clientSecret: string | null = resolveGeminiOauthClientSecret(),
 ): readonly FixedOauthTokenAdapter[] {
-  if (clientSecret === null) return [];
+  const shared = geminiOAuthRefreshAdapter(clientSecret);
+  if (shared === null) return [];
   return [
-    Object.freeze({
-      providerId: 'google-gemini',
-      productId: 'gemini-subscription',
-      credentialType: 'oauth',
-      adapterId: 'google-gemini-oauth-v1',
-      tokenEndpoint: GEMINI_OAUTH_TOKEN_ENDPOINT,
-      clientId: GEMINI_OAUTH_CLIENT_ID,
-      refreshScope: null,
-      passthroughFields: GEMINI_OAUTH_ENVELOPE_PASSTHROUGH_FIELDS,
-      userAgent: GEMINI_OAUTH_TOKEN_USER_AGENT,
-      clientSecret,
-    }),
+    fromSharedAdapter(
+      { providerId: 'google-gemini', productId: 'gemini-subscription', credentialType: 'oauth' },
+      shared,
+    ),
   ];
 }
 
@@ -419,6 +431,14 @@ export function oauthEnvelopePassthroughFields(credential: {
   return resolveOauthTokenAdapter(credential)?.passthroughFields ?? [];
 }
 
+/**
+ * Triple-exact lookup over this worker's fixed binding table. The table is
+ * derived from the unified adapter registry (src/oauth-refresh/adapters.ts)
+ * wherever the two shapes align, so this resolves to the same adapter
+ * instances the classic plane's engine resolves — minus the registry's codex
+ * aliasing, which this worker must not apply (the two codex triples keep
+ * their distinct adapterIds here).
+ */
 export function resolveOauthTokenAdapter(credential: {
   readonly providerId: string;
   readonly productId: string;
@@ -453,24 +473,66 @@ function failedResult(
   return { state: 'failed', errorCode, retryable, adapterId, httpStatus, durationMs, providerError };
 }
 
-function canonicalAdapterUrl(value: string): URL | null {
-  try {
-    const url = new URL(value);
-    if (
-      url.protocol !== 'https:' ||
-      url.username !== '' ||
-      url.password !== '' ||
-      url.port !== '' ||
-      url.search !== '' ||
-      url.hash !== '' ||
-      url.href !== value
-    ) {
-      return null;
-    }
-    return url;
-  } catch {
-    return null;
-  }
+/**
+ * Neutral core error codes (src/oauth-refresh/core.ts CoreRefreshErrorCode)
+ * mapped onto this worker's public error ladder. The map is total: a core
+ * vocabulary change fails compilation here instead of silently
+ * misclassifying a failure.
+ */
+const CORE_ERROR_CODE_TO_SAAS: Readonly<Record<CoreRefreshErrorCode, OauthTokenRefreshErrorCode>> = Object.freeze({
+  adapter_unsupported: 'adapter_unsupported',
+  credential_invalid: 'credential_format_invalid',
+  network_error: 'provider_network_error',
+  timeout: 'provider_timeout',
+  rate_limited: 'provider_rate_limited',
+  provider_unavailable: 'provider_unavailable',
+  // 400/401/403 with the RFC 6749 §5.2 code in outcome.oauthError. The core
+  // may classify these 'terminal' (NON_RETRYABLE_OAUTH_ERRORS, e.g.
+  // invalid_grant); both kinds map to the same non-retryable SaaS code.
+  //
+  // TODO(P1b/R4 refresh-race recovery, sub2api's tryRecoverFromRefreshRace):
+  // sub2api re-reads the account credential and validates the new refresh
+  // token when a refresh hits invalid_grant. This worker's claim design
+  // already covers that race structurally and a dedicated re-read is not
+  // implementable without changing the claim transaction: the credential row
+  // is locked FOR UPDATE (SKIP LOCKED lease) from claim through the token
+  // call, and the envelope unsealed in that same transaction is the CURRENT
+  // credential version — so a concurrent rotation is either blocked by the
+  // lease or already committed and re-read by the next claim (including the
+  // stale-'refreshing' reclamation). An invalid_grant observed while holding
+  // the lease can therefore only mean genuine revocation; the failure ladder
+  // re-claims (and thus re-reads the envelope, validating whatever refresh
+  // token is now current) after the backoff. Do not add an in-transaction
+  // re-read: it would observe the same locked row.
+  endpoint_rejected: 'credential_rejected',
+  redirect_rejected: 'provider_redirect_rejected',
+  endpoint_unsupported: 'provider_endpoint_unsupported',
+  response_invalid: 'provider_response_invalid',
+  response_too_large: 'provider_response_too_large',
+});
+
+/**
+ * Projects this worker's resolved binding (resolveOauthTokenAdapter's return
+ * shape) onto the unified adapter the engine core consumes.
+ */
+function toCoreAdapter(adapter: {
+  readonly adapterId: string;
+  readonly tokenEndpoint: string;
+  readonly clientId: string;
+  readonly refreshScope: string | null;
+  readonly passthroughFields: readonly string[];
+  readonly userAgent: string;
+  readonly clientSecret?: string;
+}): OAuthRefreshAdapter {
+  return {
+    id: adapter.adapterId,
+    tokenEndpoint: adapter.tokenEndpoint,
+    clientId: adapter.clientId,
+    refreshScope: adapter.refreshScope,
+    userAgent: adapter.userAgent,
+    passthroughFields: adapter.passthroughFields,
+    ...(adapter.clientSecret === undefined ? {} : { clientSecret: adapter.clientSecret }),
+  };
 }
 
 /** Printable ASCII token text (RFC 6749 §1.4 vschar); never logged. */
@@ -551,133 +613,16 @@ export function buildOauthCredentialMaterial(
   return Buffer.from(JSON.stringify(material), 'utf8');
 }
 
-function cancelResponseBody(response: Response): void {
-  if (!response.body) return;
-  try {
-    void response.body.cancel().catch(() => undefined);
-  } catch {
-    // Body content is neither consumed nor surfaced.
-  }
-}
-
-type BoundedBodyResult =
-  | { readonly state: 'ok'; readonly bytes: Uint8Array }
-  | { readonly state: 'too_large' }
-  | { readonly state: 'read_error' }
-  | { readonly state: 'timeout' };
-
-async function boundedResponseBody(response: Response, signal: AbortSignal): Promise<BoundedBodyResult> {
-  if (signal.aborted) {
-    cancelResponseBody(response);
-    return { state: 'timeout' };
-  }
-  if (!response.body) return { state: 'ok', bytes: new Uint8Array() };
-  const reader = response.body.getReader();
-  const buffer = new Uint8Array(OAUTH_TOKEN_REFRESH_MAX_RESPONSE_BYTES);
-  let bytesRead = 0;
-  const cancel = () => {
-    void reader.cancel().catch(() => undefined);
-  };
-  signal.addEventListener('abort', cancel, { once: true });
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (signal.aborted) return { state: 'timeout' };
-      if (done) return { state: 'ok', bytes: buffer.subarray(0, bytesRead) };
-      if (!(value instanceof Uint8Array)) {
-        cancel();
-        return { state: 'read_error' };
-      }
-      if (value.byteLength > OAUTH_TOKEN_REFRESH_MAX_RESPONSE_BYTES - bytesRead) {
-        cancel();
-        return { state: 'too_large' };
-      }
-      buffer.set(value, bytesRead);
-      bytesRead += value.byteLength;
-    }
-  } catch {
-    cancel();
-    return { state: signal.aborted ? 'timeout' : 'read_error' };
-  } finally {
-    signal.removeEventListener('abort', cancel);
-    try {
-      reader.releaseLock();
-    } catch {
-      // A cancelled or errored stream may already have released its reader.
-    }
-  }
-}
-
-/** Only access_token, refresh_token and expires_in survive plus codex passthrough metadata. */
-function parseTokenEndpointResponse(
-  bytes: Uint8Array,
-  fields: readonly string[] = CODEX_OAUTH_ENVELOPE_PASSTHROUGH_FIELDS,
-): {
-  accessToken: string;
-  refreshToken: string | null;
-  expiresInSeconds: number | null;
-  passthrough: Record<string, string>;
-} | null {
-  let body: Fields | null;
-  try {
-    body = record(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)));
-  } catch {
-    return null;
-  }
-  if (!body) return null;
-  const accessToken = tokenText(body.access_token);
-  if (accessToken === null) return null;
-  let refreshToken: string | null = null;
-  if (body.refresh_token !== undefined) {
-    refreshToken = tokenText(body.refresh_token);
-    if (refreshToken === null) return null;
-  }
-  let expiresInSeconds: number | null = null;
-  if (body.expires_in !== undefined) {
-    const raw = body.expires_in;
-    const parsed =
-      typeof raw === 'number' ? raw : typeof raw === 'string' && /^\d{1,10}$/.test(raw) ? Number(raw) : Number.NaN;
-    if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > OAUTH_REFRESH_MAX_EXPIRES_IN_SECONDS) return null;
-    expiresInSeconds = parsed;
-  }
-  const passthrough: Record<string, string> = {};
-  for (const field of fields) {
-    const value = body[field];
-    // A non-string (or empty) value is discarded rather than trusted: the
-    // old envelope's copy stays authoritative.
-    if (typeof value === 'string' && value.length > 0) passthrough[field] = value;
-  }
-  return { accessToken, refreshToken, expiresInSeconds, passthrough };
-}
-
 /**
- * Best-effort RFC 6749 §5.2 error-code extraction from a rejection body.
- * Bounded, never throws, never surfaces anything but a short printable code.
- */
-async function providerRejectionCode(response: Response, signal: AbortSignal): Promise<string | null> {
-  const body = await boundedResponseBody(response, signal);
-  if (body.state !== 'ok') return null;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(body.bytes));
-  } catch {
-    return null;
-  }
-  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
-  const code = (parsed as Fields).error;
-  if (typeof code !== 'string' || code.length < 1 || code.length > 64) return null;
-  for (let index = 0; index < code.length; index += 1) {
-    const char = code.charCodeAt(index);
-    if (char < 0x21 || char > 0x7e) return null;
-  }
-  return code;
-}
-
-/**
- * Calls the fixed provider OAuth token endpoint with the refresh_token grant.
- * Every failure mode returns state 'failed'; this function never throws and
- * never surfaces token material in its results beyond the parsed secrets,
- * which the caller seals or discards.
+ * Calls the fixed provider OAuth token endpoint with the refresh_token grant
+ * through the shared engine core (src/oauth-refresh/core.ts
+ * performOAuthRefresh): the core builds the grant form, runs the bounded
+ * round-trip, parses the token response and classifies every failure mode;
+ * this function is the SaaS-plane adapter that maps the core's neutral
+ * outcome onto this worker's public OauthTokenRefreshResult contract. Every
+ * failure mode returns state 'failed'; this function never throws and never
+ * surfaces token material in its results beyond the parsed secrets, which
+ * the caller seals or discards.
  */
 export async function requestOauthTokenRefresh(
   credential: { readonly providerId: string; readonly productId: string; readonly credentialType: string },
@@ -689,122 +634,44 @@ export async function requestOauthTokenRefresh(
   const elapsed = () => Math.max(0, Math.round(performance.now() - startedAt));
   const adapter = resolveOauthTokenAdapter(credential);
   if (!adapter) return failedResult('adapter_unsupported', false, null, null, 0);
-  const url = canonicalAdapterUrl(adapter.tokenEndpoint);
-  if (!url) return failedResult('adapter_unsupported', false, adapter.adapterId, null, 0);
-  if (tokenText(refreshToken) === null) {
-    return failedResult('credential_format_invalid', false, adapter.adapterId, null, elapsed());
+  const attempt = await performOAuthRefresh(
+    {
+      // Lease/singleflight key: the SaaS plane keys refresh attempts by the
+      // binding triple (the store's row lease owns the real identity); the
+      // core only echoes it on the writeback this adapter consumes.
+      key: saasAdapterRegistryKey(credential),
+      providerId: credential.providerId,
+      refreshToken,
+      expiresAtMs: null,
+    },
+    toCoreAdapter(adapter),
+    (url, init) => fetcher(new URL(url), init),
+    signal ? { signal } : {},
+  );
+  const { outcome } = attempt;
+  const writeback = attempt.writeback;
+  if (outcome.kind === 'success' && writeback !== null) {
+    return {
+      state: 'refreshed',
+      accessToken: writeback.accessToken,
+      refreshToken: writeback.refreshToken,
+      expiresInSeconds: writeback.expiresInSeconds,
+      passthrough: writeback.passthrough ?? {},
+      adapterId: adapter.adapterId,
+      httpStatus: outcome.httpStatus ?? 200,
+      durationMs: elapsed(),
+    };
   }
-
-  const deadline = AbortSignal.timeout(OAUTH_TOKEN_REFRESH_TIMEOUT_MS);
-  const timeoutSignal = signal ? AbortSignal.any([deadline, signal]) : deadline;
-  const form =
-    `grant_type=refresh_token&refresh_token=${encodeURIComponent(refreshToken)}` +
-    `&client_id=${encodeURIComponent(adapter.clientId)}` +
-    (adapter.refreshScope === null ? '' : `&scope=${encodeURIComponent(adapter.refreshScope)}`) +
-    (adapter.clientSecret === undefined || adapter.clientSecret === null || adapter.clientSecret === ''
-      ? ''
-      : `&client_secret=${encodeURIComponent(adapter.clientSecret)}`);
-  let response: Response;
-  try {
-    timeoutSignal.throwIfAborted();
-    response = await fetcher(url, {
-      method: 'POST',
-      headers: {
-        accept: 'application/json',
-        'content-type': 'application/x-www-form-urlencoded',
-        'user-agent': adapter.userAgent,
-      },
-      body: form,
-      redirect: 'manual',
-      signal: timeoutSignal,
-    });
-  } catch (error) {
-    const isTimeout = timeoutSignal.aborted || (error instanceof Error && error.name === 'TimeoutError');
-    return failedResult(
-      isTimeout ? 'provider_timeout' : 'provider_network_error',
-      true,
-      adapter.adapterId,
-      null,
-      elapsed(),
-    );
-  }
-
-  if (timeoutSignal.aborted) {
-    cancelResponseBody(response);
-    return failedResult('provider_timeout', true, adapter.adapterId, response.status, elapsed());
-  }
-  const contentLength = response.headers.get('content-length');
-  const declaredBytes = contentLength !== null && /^\d{1,12}$/.test(contentLength) ? Number(contentLength) : null;
-  if (declaredBytes !== null && declaredBytes > OAUTH_TOKEN_REFRESH_MAX_RESPONSE_BYTES) {
-    cancelResponseBody(response);
-    return failedResult('provider_response_too_large', false, adapter.adapterId, response.status, elapsed());
-  }
-  if (response.status >= 300 && response.status < 400) {
-    cancelResponseBody(response);
-    return failedResult('provider_redirect_rejected', false, adapter.adapterId, response.status, elapsed());
-  }
-  if (response.status < 200 || response.status >= 300) {
-    if (response.status === 400 || response.status === 401 || response.status === 403) {
-      // Structured rejection signal (RFC 6749 §5.2, e.g. 'invalid_grant') so
-      // callers can distinguish a rotated refresh token from a revoked one.
-      //
-      // TODO(P1b/R4 refresh-race recovery, sub2api's tryRecoverFromRefreshRace):
-      // sub2api re-reads the account credential and validates the new refresh
-      // token when a refresh hits invalid_grant. This worker's claim design
-      // already covers that race structurally and a dedicated re-read is not
-      // implementable without changing the claim transaction: the credential
-      // row is locked FOR UPDATE (SKIP LOCKED lease) from claim through the
-      // token call, and the envelope unsealed in that same transaction is the
-      // CURRENT credential version — so a concurrent rotation is either
-      // blocked by the lease or already committed and re-read by the next
-      // claim (including the stale-'refreshing' reclamation). An invalid_grant
-      // observed while holding the lease can therefore only mean genuine
-      // revocation; the failure ladder re-claims (and thus re-reads the
-      // envelope, validating whatever refresh token is now current) after the
-      // backoff. Do not add an in-transaction re-read here: it would observe
-      // the same locked row.
-      const providerError = await providerRejectionCode(response, timeoutSignal);
-      return failedResult('credential_rejected', false, adapter.adapterId, response.status, elapsed(), providerError);
-    }
-    if (response.status === 429) {
-      return failedResult('provider_rate_limited', true, adapter.adapterId, response.status, elapsed());
-    }
-    if (response.status >= 500) {
-      return failedResult('provider_unavailable', true, adapter.adapterId, response.status, elapsed());
-    }
-    return failedResult('provider_endpoint_unsupported', false, adapter.adapterId, response.status, elapsed());
-  }
-  if (response.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase() !== 'application/json') {
-    cancelResponseBody(response);
-    return failedResult('provider_response_invalid', false, adapter.adapterId, response.status, elapsed());
-  }
-  const bodyResult = await boundedResponseBody(response, timeoutSignal);
-  if (bodyResult.state === 'too_large') {
-    return failedResult('provider_response_too_large', false, adapter.adapterId, response.status, elapsed());
-  }
-  if (bodyResult.state === 'read_error' || bodyResult.state === 'timeout') {
-    return failedResult(
-      bodyResult.state === 'timeout' ? 'provider_timeout' : 'provider_network_error',
-      true,
-      adapter.adapterId,
-      response.status,
-      elapsed(),
-    );
-  }
-  const parsed = parseTokenEndpointResponse(bodyResult.bytes, adapter.passthroughFields);
-  if (!parsed) {
-    return failedResult('provider_response_invalid', false, adapter.adapterId, response.status, elapsed());
-  }
-  return {
-    state: 'refreshed',
-    accessToken: parsed.accessToken,
-    refreshToken: parsed.refreshToken,
-    expiresInSeconds: parsed.expiresInSeconds,
-    passthrough: parsed.passthrough,
-    adapterId: adapter.adapterId,
-    httpStatus: response.status,
-    durationMs: elapsed(),
-  };
+  const errorCode =
+    outcome.errorCode === null ? 'provider_response_invalid' : CORE_ERROR_CODE_TO_SAAS[outcome.errorCode];
+  return failedResult(
+    errorCode,
+    outcome.kind === 'retryable',
+    adapter.adapterId,
+    outcome.httpStatus,
+    elapsed(),
+    outcome.oauthError,
+  );
 }
 
 /** Exponential failure backoff: 1m, 2m, 4m, ... capped at 6h, stateless across restarts. */
