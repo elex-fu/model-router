@@ -1,5 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+
+import {
+  CODEX_QUOTA_SNAPSHOT_MAX_AGE_MS,
+  type CodexRateLimitSnapshot,
+} from '../../src/saas/gateway/codex/quota-headers.js';
 import {
   CODEX_ACCOUNT_CREDENTIAL_COOLDOWN_MS,
   CodexAccountPool,
@@ -202,4 +207,114 @@ test('pool: listing changes are picked up on the next select', () => {
   accounts.push(account('b'));
   assert.equal(pool.select()!.accountId, 'b');
   assert.equal(pool.select()!.accountId, 'a');
+});
+
+/*
+ * CS3 fix 2 (已知未闭合项 2): passive x-codex-* quota snapshots gate selection
+ * through the shared SaaS quota kernel (classifyQuotaPause): pause at the
+ * threshold until the classified reset time, stale snapshots stop gating.
+ */
+
+function quotaSnapshot(overrides: Partial<CodexRateLimitSnapshot> = {}): CodexRateLimitSnapshot {
+  return {
+    used5hPercent: 10,
+    reset5hSeconds: null,
+    window5hMinutes: 300,
+    used7dPercent: null,
+    reset7dSeconds: null,
+    window7dMinutes: null,
+    ...overrides,
+  };
+}
+
+test('pool: quota snapshot pauses the account until the reset deadline', () => {
+  let now = 1_000_000;
+  const pool = new CodexAccountPool({ listing: () => [account('a'), account('b')], nowMs: () => now });
+  pool.markQuotaSnapshot('a', quotaSnapshot({ used5hPercent: 100, reset5hSeconds: 3600 }), now);
+  // 5h window fully used with an hour to go: only b is schedulable.
+  assert.equal(pool.select()!.accountId, 'b');
+  assert.equal(pool.availableCount(), 1);
+  now += 3_599_000;
+  assert.equal(pool.select()!.accountId, 'b');
+  now += 1_000;
+  // Reset deadline reached: the window no longer trips the threshold gate.
+  assert.equal(pool.select()!.accountId, 'a');
+  assert.equal(pool.availableCount(), 2);
+});
+
+test('pool: quota snapshot with an already-passed reset deadline never pauses', () => {
+  let now = 5_000;
+  const pool = new CodexAccountPool({ listing: () => [account('a'), account('b')], nowMs: () => now });
+  pool.markQuotaSnapshot('a', quotaSnapshot({ used5hPercent: 100, reset5hSeconds: 1 }), now);
+  now += 2_000;
+  assert.equal(pool.select()!.accountId, 'a');
+});
+
+test('pool: a snapshot older than two hours stops gating (probe-allowed)', () => {
+  const now = 10_000_000;
+  const pool = new CodexAccountPool({ listing: () => [account('a'), account('b')], nowMs: () => now });
+  // The reset deadline is still 24h out — only the staleness rule can let a
+  // through (exactly one self-healing probe; the pool admits it).
+  pool.markQuotaSnapshot(
+    'a',
+    quotaSnapshot({ used5hPercent: 100, reset5hSeconds: 86_400 }),
+    now - CODEX_QUOTA_SNAPSHOT_MAX_AGE_MS - 1,
+  );
+  assert.equal(pool.select()!.accountId, 'a');
+  assert.equal(pool.availableCount(), 2);
+});
+
+test('pool: the 7d window pauses independently of the 5h window', () => {
+  const now = 1_000_000;
+  const pool = new CodexAccountPool({ listing: () => [account('a'), account('b')], nowMs: () => now });
+  pool.markQuotaSnapshot('a', quotaSnapshot({ used7dPercent: 100, reset7dSeconds: 86_400 }), now);
+  assert.equal(pool.select()!.accountId, 'b');
+  assert.equal(pool.availableCount(), 1);
+});
+
+test('pool: quota-pause thresholds are pool options (default pauses at 100)', () => {
+  const now = 1_000_000;
+  const stricter = new CodexAccountPool({
+    listing: () => [account('a'), account('b')],
+    nowMs: () => now,
+    quotaPauseThresholds: { pause5hUsedPercent: 90, pause7dUsedPercent: 90 },
+  });
+  stricter.markQuotaSnapshot('a', quotaSnapshot({ used5hPercent: 90, reset5hSeconds: 600 }), now);
+  assert.equal(stricter.select()!.accountId, 'b');
+  // Below the DEFAULT threshold (100): the default-configured pool keeps a.
+  const pool = new CodexAccountPool({ listing: () => [account('a'), account('b')], nowMs: () => now });
+  pool.markQuotaSnapshot('a', quotaSnapshot({ used5hPercent: 90, reset5hSeconds: 600 }), now);
+  assert.equal(pool.select()!.accountId, 'a');
+});
+
+test('pool: markSuccess clears failures but not the quota pause', () => {
+  const now = 1_000_000;
+  const pool = new CodexAccountPool({ listing: () => [account('a'), account('b')], nowMs: () => now });
+  pool.markQuotaSnapshot('a', quotaSnapshot({ used5hPercent: 100, reset5hSeconds: 3600 }), now);
+  pool.markSuccess('a');
+  // The snapshot describes upstream state; a served attempt does not un-pause
+  // a window the upstream still reports as exhausted.
+  assert.equal(pool.select()!.accountId, 'b');
+});
+
+test('pool: a malformed quota snapshot call records nothing', () => {
+  const now = 1_000_000;
+  const pool = new CodexAccountPool({ listing: () => [account('a')], nowMs: () => now });
+  pool.markQuotaSnapshot('', quotaSnapshot({ used5hPercent: 100, reset5hSeconds: 3600 }), now);
+  pool.markQuotaSnapshot('a', null as unknown as CodexRateLimitSnapshot, now);
+  assert.equal(pool.select()!.accountId, 'a');
+});
+
+test('pool: selection carries the chatgpt user id for the identity namespace', () => {
+  const pool = new CodexAccountPool({
+    listing: () => [account('a', { chatgptAccountId: 'chatgpt-42', chatgptUserId: 'user-42' }), account('b')],
+  });
+  assert.deepEqual(pool.select(), {
+    accountId: 'a',
+    accessToken: 'tok-a',
+    chatgptAccountId: 'chatgpt-42',
+    chatgptUserId: 'user-42',
+  });
+  // Absent stays absent (the transport falls back to the account id).
+  assert.deepEqual(pool.select(), { accountId: 'b', accessToken: 'tok-b' });
 });

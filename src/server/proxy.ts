@@ -41,6 +41,7 @@ import {
   selectRouteTargets,
 } from '../router/routes.js';
 import { selectUpstreams } from '../router/upstream.js';
+import { parseCodexRateLimitHeaders } from '../saas/gateway/codex/quota-headers.js';
 import type { ResponseOwnershipStore } from '../storage/response-ownership.js';
 import type { SQLiteTelemetryStore } from '../storage/telemetry-store.js';
 import type { CostEstimate } from '../telemetry/pricing.js';
@@ -54,7 +55,13 @@ import { authenticateProxyKey } from './auth.js';
 import type { CircuitBreaker } from './circuitBreaker.js';
 import { getClientIp } from './clientIp.js';
 import type { CodexAccountPoolContract, CodexAccountSelection } from './codex-account-pool.js';
-import { CODEX_ACCOUNT_TRANSPORT_ID, classifyCodexAccountFailure } from './codex-account-transport.js';
+import {
+  aggregateCodexSseResponse,
+  CODEX_ACCOUNT_TRANSPORT_ID,
+  type CodexRequestIdentity,
+  type CodexSseAggregation,
+  classifyCodexAccountFailure,
+} from './codex-account-transport.js';
 import { optimizeCopilotBody, optimizeCopilotHeaders } from './copilotOptimizer.js';
 import { keyIpAllowed } from './key-ip-policy.js';
 import type { KeyPool } from './keyPool.js';
@@ -62,7 +69,7 @@ import { extractMultipartStringField, multipartBoundary } from './multipart.js';
 import type { OAuthTokenResolver } from './oauth.js';
 import { preprocessRequest } from './preprocess.js';
 import { bedrockTransportProfile } from './providers/bedrock.js';
-import type { ProviderTransportProfile } from './providers/types.js';
+import type { ProviderRequestBodyContext, ProviderTransportProfile } from './providers/types.js';
 import { vertexTransportProfile } from './providers/vertex-sa.js';
 import {
   isThinkingBudgetError,
@@ -1696,6 +1703,9 @@ export async function proxyHandler(
             codexAccountPool: options.codexAccountPool,
             codexAccountTransport: options.codexAccountTransport,
             codexAttempt,
+            // CS3 fix 1: the classic proxy key name is the keyId coordinate of
+            // the per-account session identity namespace (SaaS `proxyKeyId`).
+            proxyKeyId: proxyKeyName,
             onCorrectiveRetry: async (previous) => {
               if (totalAttempts >= maxRetries || abortController.signal.aborted || performance.now() >= deadline) {
                 return { ...previous, shouldRetry: false, failureReason: 'corrective_retry_budget_exhausted' };
@@ -1987,6 +1997,22 @@ export async function proxyHandler(
   }
 }
 
+/**
+ * CS3 fix 1: extracts the client's session/conversation ids (when present)
+ * for the codex account transport's per-account identity namespace — the
+ * values ride ProviderAuthRequest.headers and the transport rewrites them.
+ */
+function codexSessionHeaderInputs(req: IncomingMessage): Record<string, string> {
+  const inputs: Record<string, string> = {};
+  const sessionValue = req.headers['session_id'];
+  const sessionId = Array.isArray(sessionValue) ? sessionValue[0] : sessionValue;
+  if (typeof sessionId === 'string' && sessionId.length > 0) inputs.session_id = sessionId;
+  const conversationValue = req.headers['conversation_id'];
+  const conversationId = Array.isArray(conversationValue) ? conversationValue[0] : conversationValue;
+  if (typeof conversationId === 'string' && conversationId.length > 0) inputs.conversation_id = conversationId;
+  return inputs;
+}
+
 interface TryResult {
   ok: boolean;
   responseId?: string;
@@ -2157,6 +2183,11 @@ async function trySingleUpstream(options: {
   codexAccountTransport?: ProviderTransportProfile;
   /** CS3/CS4: receives the account id selected for this attempt (see call site). */
   codexAttempt?: { accountId?: string };
+  /**
+   * CS3 fix 1: the proxy key identity (classic keys are keyed by name) whose
+   * client session ids the codex transport namespaces per account.
+   */
+  proxyKeyId?: string;
   onAttemptSent?: () => Promise<void> | void;
   onCorrectiveRetry?: (previous: TryResult) => Promise<TryResult | undefined>;
 }): Promise<TryResult> {
@@ -2183,6 +2214,7 @@ async function trySingleUpstream(options: {
     codexAccountPool,
     codexAccountTransport,
     codexAttempt,
+    proxyKeyId,
   } = options;
 
   const localCtl = new AbortController();
@@ -2296,10 +2328,26 @@ async function trySingleUpstream(options: {
             ...(codexSelection.chatgptAccountId !== undefined
               ? { chatgptAccountId: codexSelection.chatgptAccountId }
               : {}),
+            ...(codexSelection.chatgptUserId !== undefined ? { chatgptUserId: codexSelection.chatgptUserId } : {}),
+            ...(proxyKeyId !== undefined && proxyKeyId !== '' ? { proxyKeyId } : {}),
           },
         }
       : {}),
   };
+  // CS3 fix 1: identity coordinates for the per-account session namespace —
+  // the same coordinates the body transform rewrites prompt_cache_key with.
+  const codexIdentity: CodexRequestIdentity | undefined =
+    codexSelection !== null &&
+    typeof codexSelection.chatgptAccountId === 'string' &&
+    codexSelection.chatgptAccountId !== '' &&
+    proxyKeyId !== undefined &&
+    proxyKeyId !== ''
+      ? {
+          proxyKeyId,
+          chatgptAccountId: codexSelection.chatgptAccountId,
+          ...(codexSelection.chatgptUserId !== undefined ? { chatgptUserId: codexSelection.chatgptUserId } : {}),
+        }
+      : undefined;
   const configuredCompactEndpoint = upstream.compactEndpoint;
   if (clientPath === '/v1/responses/compact' && (!profile.nativeResponses || !configuredCompactEndpoint)) {
     cleanupSignal();
@@ -2436,14 +2484,20 @@ async function trySingleUpstream(options: {
     // FULL_CONTEXT_REQUIRED for previous_response_id, malformed shapes) is a
     // client problem — 422, not a retryable upstream error.
     if (transport?.transformRequestBody && transformedBody && typeof transformedBody === 'object') {
+      // CS3 fix 1: the codex body transform namespaces the client's
+      // prompt_cache_key under the selected account — the identity rides the
+      // context as a structural extension (ProviderRequestBodyContext, the
+      // shared contract, stays untouched).
+      const transportBodyContext: ProviderRequestBodyContext & { codexIdentity?: CodexRequestIdentity } = {
+        endpoint:
+          transport.id === CODEX_ACCOUNT_TRANSPORT_ID ? 'responses' : isStreaming ? 'messages-stream' : 'messages',
+        model: resolvedModel,
+        stream: isStreaming,
+        ...(codexIdentity !== undefined ? { codexIdentity } : {}),
+      };
       let transportBody: Record<string, unknown> | null;
       try {
-        transportBody = transport.transformRequestBody(transformedBody, {
-          endpoint:
-            transport.id === CODEX_ACCOUNT_TRANSPORT_ID ? 'responses' : isStreaming ? 'messages-stream' : 'messages',
-          model: resolvedModel,
-          stream: isStreaming,
-        });
+        transportBody = transport.transformRequestBody(transformedBody, transportBodyContext);
       } catch (error) {
         cleanupSignal();
         return {
@@ -2500,6 +2554,10 @@ async function trySingleUpstream(options: {
             upstreamHeaders.get('accept') ??
             (transport.id === 'bedrock' && isStreaming ? 'application/vnd.amazon.eventstream' : 'application/json'),
           'content-type': upstreamHeaders.get('content-type') ?? 'application/json',
+          // CS3 fix 1: the client's session/conversation ids ride the auth
+          // request so the codex transport can namespace them per account
+          // (other transports never see them).
+          ...(transport.id === CODEX_ACCOUNT_TRANSPORT_ID ? codexSessionHeaderInputs(req) : {}),
         },
       });
     } catch (error) {
@@ -2627,6 +2685,22 @@ async function trySingleUpstream(options: {
     const result = failure(err);
     cleanupSignal();
     return result;
+  }
+
+  // CS3 fix 2: passive x-codex-* quota headers feed the pool on EVERY codex
+  // account response — success, 4xx and 429 alike (the rate-limit headers
+  // ride 429s too, and a 429-only window is exactly what the snapshot gate
+  // exists for). Best-effort: an unparsable header set simply records
+  // nothing, and the pool owns the pause/staleness rules.
+  if (codexAccountBlock && codexAttempt?.accountId !== undefined && codexAccountPool !== undefined) {
+    const quotaHeaders: Record<string, string> = {};
+    upstreamRes.headers.forEach((value, key) => {
+      quotaHeaders[key] = value;
+    });
+    const quotaSnapshot = parseCodexRateLimitHeaders(quotaHeaders);
+    if (quotaSnapshot !== null) {
+      codexAccountPool.markQuotaSnapshot(codexAttempt.accountId, quotaSnapshot, Date.now());
+    }
   }
 
   let firstByteMs: number | undefined;
@@ -2896,6 +2970,53 @@ async function trySingleUpstream(options: {
         usage: undefined,
         firstByteMs,
         responseCommitted: res.headersSent,
+      };
+    }
+    // CS3 fix 3: non-streaming clients on the codex account wire. The shared
+    // codex transform forces stream:true upstream, so a non-streaming client
+    // meets a text/event-stream reply — aggregate it: the TERMINAL event's
+    // payload becomes the JSON body (response.completed/incomplete deliver
+    // their .response object, usage included; response.failed/error deliver
+    // the error object) with the upstream status. A stream that ends or
+    // overflows without a terminal event fails closed with a 502 — a
+    // response is never fabricated.
+    if (transport?.id === CODEX_ACCOUNT_TRANSPORT_ID && upstreamContentType.includes('text/event-stream')) {
+      let aggregation: CodexSseAggregation;
+      try {
+        aggregation = await aggregateCodexSseResponse(upstreamRes.body ?? null, { onChunk: markFirstByte });
+      } catch (error) {
+        const result = failure(error, localCtl.signal.aborted);
+        cleanupSignal();
+        return { ...result, firstByteMs };
+      }
+      if (!aggregation.ok) {
+        cleanupSignal();
+        return {
+          ok: false,
+          shouldRetry: false,
+          statusCode: 502,
+          errorMessage:
+            aggregation.reason === 'size_exceeded'
+              ? 'codex SSE aggregation exceeded the size cap'
+              : 'codex SSE stream ended without a terminal event',
+          failureReason:
+            aggregation.reason === 'size_exceeded' ? 'sse_aggregation_size_exceeded' : 'sse_no_terminal_event',
+          firstByteMs,
+        };
+      }
+      const responseBody = aggregation.body;
+      const usage = normalizeUsage(upstream.protocol, responseBody);
+      res.writeHead(upstreamRes.status, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(responseBody));
+      cleanupSignal();
+      return {
+        ok: true,
+        statusCode: upstreamRes.status,
+        usage,
+        rawUsage: responseBody.usage ?? null,
+        firstByteMs,
+        responseId:
+          upstream.protocol === 'responses' && typeof responseBody.id === 'string' ? responseBody.id : undefined,
       };
     }
     let upstreamJson: any;

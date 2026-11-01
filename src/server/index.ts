@@ -28,6 +28,7 @@ import { DEFAULT_CONFIG_PATH } from '../utils/paths.js';
 import { CircuitBreaker } from './circuitBreaker.js';
 import { CodexAccountPool } from './codex-account-pool.js';
 import { createCodexAccountTransport } from './codex-account-transport.js';
+import { type ClassicCodexVersionSyncHandle, startCodexVersionSyncWorker } from './codex-version-sync.js';
 import { reconcileObservedExternal } from './external-config-lifecycle.js';
 import { KeyPool } from './keyPool.js';
 import { type ManagedSaasStartOptions, startManagedSaasServer } from './managed-saas.js';
@@ -209,6 +210,7 @@ async function startLocalServer(
   let startupPurgeTimer: NodeJS.Timeout | undefined;
   let startupConfigWatch = false;
   let startupOauthRefreshEngine: OAuthRefreshEngine | undefined;
+  let startupCodexVersionSync: ClassicCodexVersionSyncHandle | undefined;
   try {
     const quotaRedisUrl = process.env.MODEL_ROUTER_QUOTA_REDIS_URL;
     const quotaNamespace = process.env.MODEL_ROUTER_QUOTA_NAMESPACE ?? 'model-router';
@@ -341,9 +343,16 @@ async function startLocalServer(
       // CS2's binding stores the chatgpt_account_id AS the account id (both
       // the auth and import paths), so the structural chatgptAccountId the
       // transport wants for the chatgpt-account-id header bridges from id
-      // here — one explicit place, not baked into the generic pool.
+      // here — one explicit place, not baked into the generic pool. The
+      // user-id coordinate for the identity namespace bridges structurally
+      // when the store grows one (CS2 extracts it; persisting it is the
+      // documented follow-up) and otherwise falls back to the account id.
       listing: () =>
-        oauthAccounts.list('codex_oauth').map((account) => ({ ...account, chatgptAccountId: account.id })),
+        oauthAccounts.list('codex_oauth').map((account) => ({
+          ...account,
+          chatgptAccountId: account.id,
+          chatgptUserId: (account as { chatgptUserId?: string }).chatgptUserId,
+        })),
       engine: oauthRefreshEngine,
     });
     const codexAccountTransport = createCodexAccountTransport({
@@ -355,6 +364,14 @@ async function startLocalServer(
         ? { versionOverride: process.env.MODEL_ROUTER_CODEX_CLIENT_VERSION }
         : {}),
     });
+    // Anti-decay fix (classic plane): poll the openai/codex GitHub release
+    // feed and keep the process-level synced identity slot fresh so the
+    // advertised version never decays into upstream deprioritization.
+    // Default on (one immediate round, then every 6h, unref'd timer);
+    // MODEL_ROUTER_CODEX_VERSION_SYNC=off opts out, and the manual
+    // MODEL_ROUTER_CODEX_CLIENT_VERSION pin still wins at resolution time.
+    const codexVersionSync = startCodexVersionSyncWorker();
+    startupCodexVersionSync = codexVersionSync;
 
     const control = new ControlService(
       configPath,
@@ -667,6 +684,7 @@ async function startLocalServer(
       }
       let shutdownError: unknown;
       await oauthRefreshEngine.close();
+      await codexVersionSync.close();
       try {
         await telemetryWriteClient?.close(5_000);
       } catch {
@@ -709,6 +727,7 @@ async function startLocalServer(
     if (startupPurgeTimer) clearTimeout(startupPurgeTimer);
     if (startupConfigWatch) fs.unwatchFile(configPath);
     await startupOauthRefreshEngine?.close();
+    await startupCodexVersionSync?.close();
     startupHealthMonitor?.stop();
     startupProxyServer?.closeAllConnections();
     startupAdmin?.server.closeAllConnections();
