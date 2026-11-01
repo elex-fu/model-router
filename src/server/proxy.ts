@@ -1,7 +1,7 @@
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { Readable } from 'node:stream';
-import { Agent } from 'undici';
+import { Agent, EnvHttpProxyAgent } from 'undici';
 import type { ConfigStore } from '../config/store.js';
 import type { Config, OAuthConfig, ProxyKey } from '../config/types.js';
 import type { IpAuthBlocker } from '../limit/ipBlocker.js';
@@ -210,12 +210,28 @@ function activeCapabilities(
   return result;
 }
 
-/** Shared undici Agent with longer keep-alive for upstream connections. */
-const upstreamAgent = new Agent({
-  connect: { timeout: 30_000 },
-  keepAliveTimeout: 30_000,
-  keepAliveMaxTimeout: 60_000,
-});
+/**
+ * Shared undici Agent with longer keep-alive for upstream connections.
+ * When HTTP(S)_PROXY/https_proxy env vars are present the egress rides an
+ * EnvHttpProxyAgent (honoring NO_PROXY too), so classic deployments behind
+ * a corporate/local egress proxy reach their upstreams without code changes.
+ */
+const upstreamEgressEnvVarPresent =
+  process.env.HTTPS_PROXY !== undefined ||
+  process.env.https_proxy !== undefined ||
+  process.env.HTTP_PROXY !== undefined ||
+  process.env.http_proxy !== undefined;
+const upstreamAgent: Agent | EnvHttpProxyAgent = upstreamEgressEnvVarPresent
+  ? new EnvHttpProxyAgent({
+      connect: { timeout: 30_000 },
+      keepAliveTimeout: 30_000,
+      keepAliveMaxTimeout: 60_000,
+    })
+  : new Agent({
+      connect: { timeout: 30_000 },
+      keepAliveTimeout: 30_000,
+      keepAliveMaxTimeout: 60_000,
+    });
 
 class BodyTooLargeError extends Error {
   readonly code = 'BODY_TOO_LARGE';
@@ -2980,7 +2996,15 @@ async function trySingleUpstream(options: {
     // the error object) with the upstream status. A stream that ends or
     // overflows without a terminal event fails closed with a 502 — a
     // response is never fabricated.
-    if (transport?.id === CODEX_ACCOUNT_TRANSPORT_ID && upstreamContentType.includes('text/event-stream')) {
+    // The gate must not depend on the upstream content-type header alone:
+    // egress through some corporate proxies strips it (observed ct="" via a
+    // local CONNECT proxy). This transport forces stream:true on the wire,
+    // so the reply is SSE by construction — an absent content-type also
+    // aggregates.
+    if (
+      transport?.id === CODEX_ACCOUNT_TRANSPORT_ID &&
+      (upstreamContentType === '' || upstreamContentType.includes('text/event-stream'))
+    ) {
       let aggregation: CodexSseAggregation;
       try {
         aggregation = await aggregateCodexSseResponse(upstreamRes.body ?? null, { onChunk: markFirstByte });
