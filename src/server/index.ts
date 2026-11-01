@@ -346,7 +346,15 @@ async function startLocalServer(
         oauthAccounts.list('codex_oauth').map((account) => ({ ...account, chatgptAccountId: account.id })),
       engine: oauthRefreshEngine,
     });
-    const codexAccountTransport = createCodexAccountTransport({ engine: oauthRefreshEngine });
+    const codexAccountTransport = createCodexAccountTransport({
+      engine: oauthRefreshEngine,
+      // Anti-decay seam (P0-1 parity for classic): a deployment can pin the
+      // advertised Codex CLI version via env; the shared identity module's
+      // semver guard keeps anything below 0.144 out.
+      ...(process.env.MODEL_ROUTER_CODEX_CLIENT_VERSION
+        ? { versionOverride: process.env.MODEL_ROUTER_CODEX_CLIENT_VERSION }
+        : {}),
+    });
 
     const control = new ControlService(
       configPath,

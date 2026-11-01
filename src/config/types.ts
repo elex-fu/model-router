@@ -79,6 +79,12 @@ export interface UpstreamConfig {
    * transport (OAuth2 bearer via minted SA token, anthropic rawPredict).
    */
   vertex?: { serviceAccountJson: string; location?: string };
+  /**
+   * CS3/CS4: Codex subscription-account activation — the upstream's
+   * credential is an OAuthAccountStore 'codex_oauth' account (bound via the
+   * `codex-account` CLI) instead of static apiKeys.
+   */
+  codexAccount?: { accountId?: string };
   /** Routing priority: lower value = tried first. Default 0. */
   priority?: number;
   /** Stable sort index within same priority. */

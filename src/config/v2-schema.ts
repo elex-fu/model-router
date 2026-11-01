@@ -168,6 +168,16 @@ export const upstreamSchema = z
       })
       .strict()
       .optional(),
+    // CS3/CS4: codex subscription-account activation — the upstream's
+    // credential is an OAuthAccountStore account (bound via
+    // `codex-account auth|import`), not static apiKeys.
+    codexAccount: z
+      .object({
+        /** Account filter; absent = any 'codex_oauth' account from the pool. */
+        accountId: z.string().min(1).max(128).optional(),
+      })
+      .strict()
+      .optional(),
     models: z.array(
       z
         .object({

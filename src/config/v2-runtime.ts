@@ -61,6 +61,9 @@ export async function compileRuntimeConfig(raw: ConfigV2, resolver?: SecretResol
           ...(upstream.vertex.location ? { location: upstream.vertex.location } : {}),
         }
       : undefined;
+    // CS3/CS4: pass through the codex subscription-account activation (the
+    // proxy reads it structurally; the account lives in OAuthAccountStore).
+    const codexAccount = upstream.codexAccount ?? undefined;
     upstreams.push({
       id: upstream.id,
       name: upstream.id,
@@ -90,6 +93,7 @@ export async function compileRuntimeConfig(raw: ConfigV2, resolver?: SecretResol
       oauth,
       ...(bedrock ? { bedrock } : {}),
       ...(vertex ? { vertex } : {}),
+      ...(codexAccount ? { codexAccount } : {}),
       priority: upstream.priority,
       sortIndex: upstream.sortIndex,
     });
