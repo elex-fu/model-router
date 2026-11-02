@@ -9,6 +9,7 @@ import {
   isWindowMetric,
   ObservabilityAlertService,
   parseAlertMetric,
+  runAlertEvaluatorCycle,
 } from '../../../src/saas/observability/alerts.js';
 
 const MINUTE = 60_000;
@@ -25,6 +26,9 @@ class FakeExecutor {
     this.queries.push({ sql, values: values ?? [] });
     const rows = (this.resultQueue.shift() ?? []) as Row[];
     return { rows, rowCount: rows.length };
+  }
+  async transaction<T>(work: (tx: FakeExecutor) => Promise<T>): Promise<T> {
+    return work(this);
   }
 }
 
@@ -57,10 +61,15 @@ test('parseAlertMetric accepts plain and provider-scoped metrics', () => {
     name: 'channel_error_rate',
     provider: 'kimi',
   });
+  assert.deepEqual(parseAlertMetric('platform_supply_available_accounts:provider=kimi'), {
+    name: 'platform_supply_available_accounts',
+    provider: 'kimi',
+  });
   assert.equal(parseAlertMetric('wallet_active_holds:provider='), null);
   assert.equal(parseAlertMetric('not_a_metric'), null);
   assert.equal(isWindowMetric('channel_error_rate'), true);
   assert.equal(isWindowMetric('wallet_active_holds'), false);
+  assert.equal(isWindowMetric('platform_supply_available_accounts'), false);
 });
 
 test('evaluateAlertRule requires sustained consecutive violations inside the window', () => {
@@ -291,6 +300,48 @@ test('deliverAlertWebhook signs with the customer webhook HMAC contract when a k
   await deliverAlertWebhook('https://hooks.example/alerts', payload, { fetch: fakeFetch });
   const unsignedHeaders = calls[0].init.headers as Record<string, string>;
   assert.equal(unsignedHeaders['x-model-router-signature'], undefined);
+});
+
+test('supply-capacity alerts estimate replacements and notify through the existing channels', async () => {
+  const executor = new FakeExecutor();
+  const rule = ruleRow({
+    name: 'platform supply capacity',
+    metric: 'platform_supply_available_accounts:provider=kimi',
+    operator: 'lt',
+    threshold: 5,
+    notify_email: 'ops@example.com',
+  });
+  executor.enqueueNext([rule]);
+  executor.enqueueNext([]);
+  executor.enqueueNext([rule]);
+  executor.enqueueNext([{ count: '2' }]);
+  executor.enqueueNext([]);
+  executor.enqueueNext([]);
+  const emailBodies: string[] = [];
+  const triggered = await runAlertEvaluatorCycle(executor as never, {
+    now: () => new Date('2026-11-01T00:00:00.000Z'),
+    emailSender: {
+      async send(input) {
+        emailBodies.push(input.body);
+      },
+    },
+  });
+  assert.equal(triggered, 1);
+  const capacityQuery = executor.queries.find(({ sql }) =>
+    sql.includes('FROM saas_platform_provider_accounts account'),
+  );
+  assert.ok(capacityQuery);
+  assert.match(capacityQuery.sql, /account\.status = 'active'/);
+  assert.match(capacityQuery.sql, /account\.validation_state = 'verified'/);
+  assert.match(capacityQuery.sql, /member\.status = 'active'/);
+  assert.match(capacityQuery.sql, /pool\.status = 'active'/);
+  assert.deepEqual(capacityQuery.values, ['kimi']);
+  const eventInsert = executor.queries.find(({ sql }) => sql.includes('INSERT INTO saas_obs_alert_events'));
+  const payload = JSON.parse(String(eventInsert?.values[3])) as Record<string, unknown>;
+  assert.equal(payload.availableAccounts, 2);
+  assert.equal(payload.replacementAccounts, 3);
+  assert.equal(emailBodies.length, 1);
+  assert.match(emailBodies[0] ?? '', /"replacementAccounts": 3/);
 });
 
 test('deliverAlertWebhook surfaces non-2xx deliveries as failures', async () => {

@@ -20,6 +20,7 @@ export const ALERT_METRIC_NAMES = Object.freeze([
   'channel_error_rate',
   'channel_request_count',
   'wallet_active_holds',
+  'platform_supply_available_accounts',
 ] as const);
 
 export type AlertMetricName = (typeof ALERT_METRIC_NAMES)[number];
@@ -443,6 +444,9 @@ export interface AlertNotificationPayload {
   readonly sustainedMinutes: number;
   readonly value: number;
   readonly triggeredAt: string;
+  /** §4.4 capacity alerts carry the operator-visible replenishment estimate. */
+  readonly availableAccounts?: number;
+  readonly replacementAccounts?: number;
 }
 
 /**
@@ -553,6 +557,38 @@ async function loadWalletHoldCount(database: SaasDatabase): Promise<number> {
   return Number(result.rows[0]?.count ?? 0);
 }
 
+/** §4.4 point-in-time supply capacity; evaluated only by the asynchronous alert worker. */
+async function loadPlatformSupplyAvailableAccounts(
+  database: SaasDatabase,
+  provider: string | undefined,
+): Promise<number> {
+  const result = await database.query<{ readonly count: string }>(
+    `SELECT COUNT(*)::text AS count
+       FROM saas_platform_provider_accounts account
+      WHERE account.status = 'active'
+        AND account.validation_state = 'verified'
+        AND (account.probe_temp_unschedulable_until IS NULL
+             OR account.probe_temp_unschedulable_until <= clock_timestamp())
+        AND ($1::text IS NULL OR account.provider_id = $1)
+        AND EXISTS (
+          SELECT 1 FROM saas_platform_provider_credentials credential
+           WHERE credential.account_id = account.id
+             AND credential.status = 'active'
+             AND credential.current_version IS NOT NULL
+        )
+        AND EXISTS (
+          SELECT 1
+            FROM saas_platform_provider_pool_members member
+            JOIN saas_platform_provider_pools pool ON pool.id = member.pool_id
+           WHERE member.account_id = account.id
+             AND member.status = 'active'
+             AND pool.status = 'active'
+        )`,
+    [provider ?? null],
+  );
+  return Number(result.rows[0]?.count ?? 0);
+}
+
 /** Runs one evaluator pass over every enabled rule; exposed for tests. */
 export async function runAlertEvaluatorCycle(
   database: SaasDatabase,
@@ -585,8 +621,16 @@ export async function runAlertEvaluatorCycle(
       );
       if (locked.rows.length === 0) return null;
       const samples: AlertMinuteSample[] =
-        parsed.name === 'wallet_active_holds'
-          ? [{ minuteStartMs: now().getTime(), value: await loadWalletHoldCount(database) }]
+        parsed.name === 'wallet_active_holds' || parsed.name === 'platform_supply_available_accounts'
+          ? [
+              {
+                minuteStartMs: now().getTime(),
+                value:
+                  parsed.name === 'wallet_active_holds'
+                    ? await loadWalletHoldCount(database)
+                    : await loadPlatformSupplyAvailableAccounts(database, parsed.provider),
+              },
+            ]
           : await loadChannelSamples(database, parsed, rule.windowMinutes);
       const evaluation = evaluateAlertRule({
         rule: {
@@ -598,7 +642,7 @@ export async function runAlertEvaluatorCycle(
         },
         samples,
         nowMs: now().getTime(),
-        pointInTime: parsed.name === 'wallet_active_holds',
+        pointInTime: parsed.name === 'wallet_active_holds' || parsed.name === 'platform_supply_available_accounts',
       });
       // Batch 5 §5.6 auto-resolve: a cycle that does not violate the window
       // closes the rule's open (firing) events. Resolution rides the same
@@ -627,6 +671,12 @@ export async function runAlertEvaluatorCycle(
         sustainedMinutes: rule.sustainedMinutes,
         value: evaluation.windowValue,
         triggeredAt,
+        ...(parsed.name === 'platform_supply_available_accounts'
+          ? {
+              availableAccounts: evaluation.windowValue,
+              replacementAccounts: Math.max(0, Math.ceil(rule.threshold - evaluation.windowValue)),
+            }
+          : {}),
       };
       await tx.query(
         `INSERT INTO saas_obs_alert_events (id, rule_id, triggered_at, payload)

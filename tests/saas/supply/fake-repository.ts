@@ -236,6 +236,9 @@ export class FakeProviderSupplyRepository implements ProviderSupplyRepository {
       status: input.status,
       disabledAt: input.disabledAt,
       revokedAt: input.revokedAt,
+      bannedAt: input.bannedAt ?? null,
+      banReason: input.banReason ?? null,
+      banLastError: input.banLastError ?? null,
       updatedAt: input.updatedAt,
       authzVersion: account.authzVersion + 1,
     };

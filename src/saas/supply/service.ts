@@ -197,6 +197,15 @@ export interface PlatformProviderAccountLifecycleInput {
   readonly audit: ProviderSupplyAuditContext;
 }
 
+export interface ProviderAccountBanInput {
+  readonly account: ProviderAccountReference;
+  readonly expectedAuthzVersion?: number;
+  readonly reason: string;
+  /** A bounded classification/reason code, never an upstream response body or credential. */
+  readonly lastError: string;
+  readonly audit: ProviderSupplyAuditContext;
+}
+
 export interface PlatformProviderAccountSchedulingInput {
   readonly accountId: string;
   readonly priority: number;
@@ -1412,11 +1421,19 @@ export class ProviderSupplyService {
 
   private async transitionAccountReference(
     reference: ProviderAccountReference,
-    next: 'active' | 'disabled' | 'revoked',
+    next: 'active' | 'disabled' | 'revoked' | 'banned',
     expectedAuthzVersion?: number,
     audit?: ProviderSupplyAuditContext,
+    ban?: { readonly reason: string; readonly lastError: string },
   ): Promise<ProviderAccountRecord> {
     const normalizedReference = normalizeAccountReference(reference);
+    const normalizedBan =
+      next === 'banned'
+        ? {
+            reason: text(ban?.reason, 'INVALID_INPUT', 128).trim(),
+            lastError: text(ban?.lastError, 'INVALID_INPUT', 128).trim(),
+          }
+        : null;
     const now = currentDate(this.now).toISOString();
     return this.repositoryRun(
       () =>
@@ -1429,6 +1446,7 @@ export class ProviderSupplyService {
           const expected = expectedAuthzVersion ?? current.authzVersion;
           if (expected !== current.authzVersion) fail('ACCOUNT_STATE_CONFLICT');
           if (current.status === 'revoked') fail('ACCOUNT_REVOKED');
+          if (current.status === 'banned') fail('INVALID_ACCOUNT_LIFECYCLE');
           if (next === 'active' && current.validationState !== 'verified') fail('VALIDATION_REQUIRED');
           if (next === current.status) fail('INVALID_ACCOUNT_LIFECYCLE');
           const updated = await repository.updateAccountLifecycle({
@@ -1437,10 +1455,13 @@ export class ProviderSupplyService {
             expectedAuthzVersion: expected,
             updatedAt: now,
             ...statusTimestamp(next, now),
+            ...(normalizedBan === null
+              ? {}
+              : { bannedAt: now, banReason: normalizedBan.reason, banLastError: normalizedBan.lastError }),
           });
           if (!updated) fail('ACCOUNT_STATE_CONFLICT');
 
-          if (next === 'disabled' || next === 'revoked') {
+          if (next === 'disabled' || next === 'revoked' || next === 'banned') {
             const credentials = await repository.listCredentials({ account: normalizedReference });
             if (executor) {
               await lockAdvisoryLayers(
@@ -1454,14 +1475,18 @@ export class ProviderSupplyService {
               );
             }
             for (const credential of credentials) {
-              if (credential.status === 'revoked' || (next === 'disabled' && credential.status === 'disabled'))
+              const credentialStatus = next === 'banned' ? 'disabled' : next;
+              if (
+                credential.status === 'revoked' ||
+                (credentialStatus === 'disabled' && credential.status === 'disabled')
+              )
                 continue;
               const credentialUpdated = await repository.updateCredentialLifecycle({
                 credential: credentialReference(credential),
-                status: next,
+                status: credentialStatus,
                 expectedAuthzVersion: credential.authzVersion,
                 updatedAt: now,
-                ...statusTimestamp(next, now),
+                ...statusTimestamp(credentialStatus, now),
               });
               if (!credentialUpdated) fail('CREDENTIAL_STATE_CONFLICT');
             }
@@ -1480,6 +1505,18 @@ export class ProviderSupplyService {
           return updated;
         }),
       'SUPPLY_STORAGE_ERROR',
+    );
+  }
+
+  /** Audited operational terminal state used by gateway/probe disposition workers. */
+  async banProviderAccount(input: ProviderAccountBanInput): Promise<ProviderAccountRecord> {
+    if (!input) fail('INVALID_INPUT');
+    return this.transitionAccountReference(
+      normalizeAccountReference(input.account),
+      'banned',
+      input.expectedAuthzVersion === undefined ? undefined : positiveInteger(input.expectedAuthzVersion),
+      normalizeAuditContext(input.audit),
+      { reason: input.reason, lastError: input.lastError },
     );
   }
 

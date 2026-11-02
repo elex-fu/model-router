@@ -379,6 +379,70 @@ test('platform management writes carry actor evidence and roll back when the sam
   assert.equal(repository.accounts.find((candidate) => candidate.id === account.id)?.status, 'disabled');
 });
 
+test('banning a provider account writes durable ban facts, disables credentials, and audits the transition', async () => {
+  const repository = new FakeProviderSupplyRepository();
+  const service = new ProviderSupplyService({} as SaasDatabase, serviceOptions(repository));
+  const input = platformAccount();
+  const account = await service.createPlatformProviderAccount({
+    id: input.id,
+    displayName: input.displayName,
+    providerId: input.providerId,
+    productId: input.productId,
+    credentialType: input.credentialType,
+    region: input.region,
+    purpose: input.purpose,
+    rightsId: input.rightsId,
+    rightsVersion: input.rightsVersion,
+    capabilities: [input.capability as NonNullable<typeof input.capability>],
+    audit: SUPPLY_AUDIT,
+  });
+  const validated = await service.setProviderAccountValidation({
+    accountId: account.id,
+    validationState: 'verified',
+    expectedAuthzVersion: account.authzVersion,
+  });
+  const created = await service.createPlatformProviderCredential({
+    accountId: account.id,
+    id: 'platform-credential-ban',
+    secret: Buffer.from('generic-test-input'),
+    audit: SUPPLY_AUDIT,
+  });
+  const banned = await service.banProviderAccount({
+    account: { ownerKind: 'platform', tenantId: null, accountId: account.id },
+    expectedAuthzVersion: validated.authzVersion,
+    reason: 'persistent_forbidden',
+    lastError: 'gateway_forbidden_failure',
+    audit: SUPPLY_AUDIT,
+  });
+  assert.equal(banned.status, 'banned');
+  assert.equal(banned.bannedAt, NOW.toISOString());
+  assert.equal(banned.banReason, 'persistent_forbidden');
+  assert.equal(banned.banLastError, 'gateway_forbidden_failure');
+  assert.equal(repository.credentials.find((candidate) => candidate.id === created.credential.id)?.status, 'disabled');
+  assert.equal(repository.auditEvents.at(-1)?.action, 'provider_supply.account.banned');
+  assert.doesNotMatch(JSON.stringify(repository.auditEvents), /generic-test-input/);
+  await assert.rejects(
+    service.createPlatformProviderCredential({
+      accountId: account.id,
+      id: 'credential-after-ban',
+      secret: Buffer.from('generic-test-input'),
+      audit: SUPPLY_AUDIT,
+    }),
+    (error: unknown) => error instanceof ProviderSupplyError && error.code === 'CREDENTIAL_UNAVAILABLE',
+  );
+
+  await assert.rejects(
+    service.enablePlatformProviderAccount({
+      accountId: account.id,
+      expectedAuthzVersion: banned.authzVersion,
+      audit: SUPPLY_AUDIT,
+    }),
+    (error: unknown) => error instanceof ProviderSupplyError && error.code === 'INVALID_ACCOUNT_LIFECYCLE',
+  );
+  assert.equal(repository.accounts.find((candidate) => candidate.id === account.id)?.status, 'banned');
+  assert.equal(repository.accounts.find((candidate) => candidate.id === account.id)?.bannedAt, NOW.toISOString());
+});
+
 test('platform credential management works with sealing-only KMS and unseal fails closed without access KMS', async () => {
   const repository = new FakeProviderSupplyRepository();
   const sealingKms = new SealingOnlyKms();

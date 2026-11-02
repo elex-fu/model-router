@@ -25,6 +25,9 @@ export type RetryableFailureKind =
   | 'provider_5xx'
   | 'protocol'
   | 'account_access'
+  | 'forbidden'
+  | 'verification_wall'
+  | 'overloaded'
   | 'rate_limited'
   | 'stream_abort';
 
@@ -325,13 +328,16 @@ const WRITE_HEALTH_SQL = `
   )
   INSERT INTO ${HEALTH_TABLE} AS current_health
     (owner_scope_key, owner_kind, owner_tenant_id, account_id, state, failure_count,
+     forbidden_failure_count, verification_wall_failure_count,
      observed_at, cooldown_until, last_outcome, source_fencing_token, revision, health_score)
   SELECT $8::text, $2, $3, $4, $9::text,
          CASE WHEN $9::text = 'cooldown' THEN 1 ELSE 0 END,
+         CASE WHEN $10::text = 'gateway_forbidden_failure' THEN 1 ELSE 0 END,
+         CASE WHEN $10::text = 'gateway_verification_wall_failure' THEN 1 ELSE 0 END,
          observation.observed_at,
          CASE WHEN $9::text <> 'cooldown' THEN NULL
            WHEN $10::text = 'gateway_rate_limited_failure' THEN observation.observed_at
-           WHEN $10::text = 'gateway_account_access_failure' THEN observation.observed_at + interval '5 seconds'
+           WHEN $10::text IN ('gateway_account_access_failure', 'gateway_forbidden_failure', 'gateway_verification_wall_failure') THEN observation.observed_at + interval '5 seconds'
            WHEN $10::text = 'gateway_stream_abort_failure' THEN observation.observed_at + interval '5 seconds'
            ELSE observation.observed_at + interval '1 second' END,
          $10::text, $7::bigint, 1,
@@ -343,6 +349,12 @@ const WRITE_HEALTH_SQL = `
     SET state = EXCLUDED.state,
         failure_count = CASE WHEN EXCLUDED.state = 'healthy' THEN 0
           ELSE LEAST(current_health.failure_count + 1, 8) END,
+        forbidden_failure_count = CASE
+          WHEN EXCLUDED.last_outcome <> 'gateway_forbidden_failure' THEN 0
+          ELSE LEAST(current_health.forbidden_failure_count + 1, 8) END,
+        verification_wall_failure_count = CASE
+          WHEN EXCLUDED.last_outcome <> 'gateway_verification_wall_failure' THEN 0
+          ELSE LEAST(current_health.verification_wall_failure_count + 1, 8) END,
         /* Sample once after the conflict row lock. The used prior count
            keeps this volatile subquery correlated with the locked row. */
         (observed_at, cooldown_until) = (
@@ -354,6 +366,10 @@ const WRITE_HEALTH_SQL = `
                    ELSE sampled.clock_at +
                      CASE EXCLUDED.last_outcome
                        WHEN 'gateway_account_access_failure' THEN
+                         LEAST(15000::bigint, 5000::bigint * (1::bigint << LEAST(sampled.prior_failure_count, 2)))
+                       WHEN 'gateway_forbidden_failure' THEN
+                         LEAST(15000::bigint, 5000::bigint * (1::bigint << LEAST(sampled.prior_failure_count, 2)))
+                       WHEN 'gateway_verification_wall_failure' THEN
                          LEAST(15000::bigint, 5000::bigint * (1::bigint << LEAST(sampled.prior_failure_count, 2)))
                        WHEN 'gateway_rate_limited_failure' THEN
                          LEAST(15000::bigint, 2000::bigint * (1::bigint << LEAST(sampled.prior_failure_count, 3)))
@@ -546,6 +562,9 @@ const RETRYABLE_FAILURE_KINDS: ReadonlySet<RetryableFailureKind> = new Set([
   'provider_5xx',
   'protocol',
   'account_access',
+  'forbidden',
+  'verification_wall',
+  'overloaded',
   'rate_limited',
   'stream_abort',
 ]);

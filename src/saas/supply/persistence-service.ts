@@ -801,6 +801,7 @@ export class ProviderSupplyPersistenceService {
   ): Promise<ProviderAccountRecord> {
     const current = await this.account(reference);
     if (current.status === 'revoked') fail('ACCOUNT_REVOKED');
+    if (current.status === 'banned') fail('INVALID_ACCOUNT_LIFECYCLE');
     if (status === 'active' && current.validationState !== 'verified') fail('VALIDATION_REQUIRED');
     if (status === current.status) fail('INVALID_ACCOUNT_LIFECYCLE');
     const now = currentDate(this.now).toISOString();
@@ -834,7 +835,7 @@ export class ProviderSupplyPersistenceService {
           const account = await repository.getAccount(accountReference);
           if (!account) fail('ACCOUNT_NOT_FOUND');
           if (account.status === 'revoked') fail('ACCOUNT_REVOKED');
-          if (account.status === 'disabled') fail('CREDENTIAL_UNAVAILABLE');
+          if (account.status === 'disabled' || account.status === 'banned') fail('CREDENTIAL_UNAVAILABLE');
           if (input.credentialType !== undefined && identifier(input.credentialType) !== account.credentialType)
             fail('INVALID_INPUT');
           const parent: PersistedProviderCredentialInput = {
@@ -1193,7 +1194,7 @@ export class ProviderSupplyPersistenceService {
           });
           if (!account) fail('ACCOUNT_NOT_FOUND');
           if (account.status === 'revoked') fail('ACCOUNT_REVOKED');
-          if (account.status === 'disabled') fail('CREDENTIAL_UNAVAILABLE');
+          if (account.status === 'disabled' || account.status === 'banned') fail('CREDENTIAL_UNAVAILABLE');
           let validationAllowedModels: string[] | null = null;
           if (context !== undefined) {
             if (

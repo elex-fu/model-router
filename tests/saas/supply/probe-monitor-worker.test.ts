@@ -214,6 +214,64 @@ test('crossing the failure threshold arms the unschedulable signal; recovery is 
   assert.equal(audit?.values[2], 'saas_probe_monitor.account_unscheduled');
 });
 
+test('an optional audited writer bans only after the consecutive probe failure threshold', async () => {
+  const database = new FakeDatabase();
+  database.claimRow = monitorRow({ consecutive_failures: 2 });
+  const bans: unknown[] = [];
+  const { PostgresProbeMonitorStore } = await import('../../../src/saas/supply/probe-monitor-worker.js');
+  const store = new PostgresProbeMonitorStore(database.executor, DUMMY_KMS, {
+    deployment: 'd',
+    environment: 'e',
+    probe: fakeProbe({ category: 'auth_revoked', httpStatus: 401, usage: null, reason: 'credential_rejected' }),
+    banWriter: {
+      async banProviderAccount(input) {
+        bans.push(input);
+        return null as never;
+      },
+    },
+  });
+  await store.claimAndProbeNext();
+  assert.deepEqual(bans, [
+    {
+      account: { ownerKind: 'platform', tenantId: null, accountId: 'account-1' },
+      reason: 'probe_failure_threshold',
+      lastError: 'credential_rejected',
+      audit: { actorUserId: 'probe-monitor-worker', entryPoint: 'probe-monitor-worker' },
+    },
+  ]);
+  assert.doesNotMatch(JSON.stringify(bans), /response|body|secret|challenge_answer/i);
+});
+
+test('below-threshold, successful, and rate-limited probes never invoke the permanent ban writer', async () => {
+  const cases = [
+    { claimRow: monitorRow({ consecutive_failures: 1 }), outcome: { category: 'error' as const } },
+    { claimRow: monitorRow({ consecutive_failures: 2 }), outcome: {} },
+    {
+      claimRow: monitorRow({ consecutive_failures: 2 }),
+      outcome: { category: 'rate_limited' as const, httpStatus: 429 },
+    },
+  ];
+  for (const { claimRow, outcome } of cases) {
+    const database = new FakeDatabase();
+    database.claimRow = claimRow;
+    let bans = 0;
+    const { PostgresProbeMonitorStore } = await import('../../../src/saas/supply/probe-monitor-worker.js');
+    const store = new PostgresProbeMonitorStore(database.executor, DUMMY_KMS, {
+      deployment: 'd',
+      environment: 'e',
+      probe: fakeProbe(outcome),
+      banWriter: {
+        async banProviderAccount() {
+          bans += 1;
+          return null as never;
+        },
+      },
+    });
+    await store.claimAndProbeNext();
+    assert.equal(bans, 0);
+  }
+});
+
 test('nothing due claims nothing and a bounded round stops at the cap', async () => {
   const database = new FakeDatabase();
   database.claimRow = null;

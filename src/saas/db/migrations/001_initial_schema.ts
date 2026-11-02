@@ -129,6 +129,7 @@ import { BOUNDED_FAST_GATEWAY_BUDGET_LIMIT_SEARCH_PATH_SAAS_MIGRATION } from './
 import { FAST_GATEWAY_RETENTION_SAAS_MIGRATION } from './149_fast_gateway_retention.js';
 import { BULK_ACCOUNT_IMPORT_SAAS_MIGRATION } from './150_bulk_account_import.js';
 import { PROVIDER_ACCOUNT_COST_SAAS_MIGRATION } from './151_provider_account_cost.js';
+import { ACCOUNT_BAN_LEDGER_SAAS_MIGRATION } from './152_account_ban_ledger.js';
 
 export interface SaasMigration {
   version: number;
@@ -824,4 +825,5 @@ export const SAAS_MIGRATIONS: readonly SaasMigration[] = [
   FAST_GATEWAY_RETENTION_SAAS_MIGRATION,
   BULK_ACCOUNT_IMPORT_SAAS_MIGRATION,
   PROVIDER_ACCOUNT_COST_SAAS_MIGRATION,
+  ACCOUNT_BAN_LEDGER_SAAS_MIGRATION,
 ];

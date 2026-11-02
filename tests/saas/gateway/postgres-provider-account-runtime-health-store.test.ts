@@ -595,10 +595,18 @@ test('conflict updates share one correlated post-lock clock without changing coo
     /1000::bigint \* \(1::bigint << LEAST\(sampled\.prior_failure_count, 8\)\)/,
   ])
     assert.match(sample, curve);
-  assert.equal([...sample.matchAll(/\b5000::bigint/g)].length, 2, 'access and stream abort retain the same curve');
+  assert.equal(
+    [...sample.matchAll(/\b5000::bigint/g)].length,
+    4,
+    'access, persistent ban kinds, and stream abort retain the same curve',
+  );
   assert.doesNotMatch(sample, /EXCLUDED\.observed_at|GREATEST/);
   assert.match(conflict, /WHERE current_health\.source_fencing_token < EXCLUDED\.source_fencing_token/);
   assert.match(conflict, /revision = current_health\.revision \+ 1/);
+  assert.match(conflict, /current_health\.forbidden_failure_count \+ 1, 8/);
+  assert.match(conflict, /current_health\.verification_wall_failure_count \+ 1, 8/);
+  assert.match(conflict, /WHEN EXCLUDED\.last_outcome <> 'gateway_forbidden_failure' THEN 0/);
+  assert.match(conflict, /WHEN EXCLUDED\.last_outcome <> 'gateway_verification_wall_failure' THEN 0/);
   assert.match(sql, /WHERE EXISTS \(SELECT 1 FROM authorized_lease\)/);
 });
 

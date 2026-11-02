@@ -263,6 +263,17 @@ function runtimeHealthEvidence(
     return { source: 'gateway', result: 'retryable_failure', failureKind: 'stream_abort' };
   }
   const status = response?.resultHttpStatus;
+  // In-stream overload can arrive after a 200 response started. It must remain
+  // a failure observation rather than being overwritten by the 2xx success map.
+  if (response?.upstreamErrorKind === 'overloaded') {
+    return { source: 'gateway', result: 'retryable_failure', failureKind: 'overloaded' };
+  }
+  if (response?.upstreamErrorKind === 'forbidden') {
+    return { source: 'gateway', result: 'retryable_failure', failureKind: 'forbidden' };
+  }
+  if (response?.upstreamErrorKind === 'org-disabled') {
+    return { source: 'gateway', result: 'retryable_failure', failureKind: 'verification_wall' };
+  }
   // K2: 401/403/429 are account-attributable — the gateway injected this
   // account's credential, so the provider rejecting it is a scheduling fact
   // about the account (durable cooldown; the in-process registry remains the

@@ -4,7 +4,7 @@ import type { TenantContext } from '../identity/types.js';
 export type ProviderSupplyOwnerKind = 'tenant' | 'platform';
 export type ProviderSupplyMode = 'byok' | 'platform';
 
-export type ProviderAccountStatus = 'pending' | 'active' | 'disabled' | 'revoked';
+export type ProviderAccountStatus = 'pending' | 'active' | 'disabled' | 'revoked' | 'banned';
 export type ProviderCredentialStatus = 'pending' | 'active' | 'disabled' | 'revoked';
 /**
  * R5 (migration 097): 'quarantined' is the observation state between failed
@@ -292,7 +292,7 @@ interface ProviderAccountInputCommon {
   readonly capabilities?: readonly ProviderCapabilityReference[];
   /** Convenience form for an account with one capability anchor. */
   readonly capability?: ProviderCapabilityReference;
-  readonly status?: ProviderAccountStatus;
+  readonly status?: Exclude<ProviderAccountStatus, 'banned'>;
   readonly validationState?: ProviderValidationState;
   /** Contract C-7 scheduling scalars; default to the neutral tie (0 / 1). */
   readonly priority?: number;
@@ -337,6 +337,10 @@ export type ProviderAccountRecord = ProviderSupplyOwner & {
   readonly updatedAt: string;
   readonly disabledAt: string | null;
   readonly revokedAt: string | null;
+  /** Present on rows read from migration 152; older test/control-plane snapshots may omit it. */
+  readonly bannedAt?: string | null;
+  readonly banReason?: string | null;
+  readonly banLastError?: string | null;
 };
 
 export interface PlatformPoolMemberRecord {
@@ -640,7 +644,7 @@ export interface ProviderCredentialDispatchPoolSnapshot {
   readonly id: string;
   readonly providerId: string;
   readonly productId: string;
-  readonly status: ProviderAccountStatus;
+  readonly status: Exclude<ProviderAccountStatus, 'banned'>;
   readonly validationState: ProviderValidationState;
   readonly authzVersion: number;
 }

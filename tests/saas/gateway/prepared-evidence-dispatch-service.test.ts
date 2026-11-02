@@ -855,6 +855,40 @@ test('dispatch classifies account-attributable 403/429 and skips request-attribu
   assert.equal(writes.length, 2);
 });
 
+test('dispatch distinguishes persistent access bans and keeps in-stream overload as failure evidence', async () => {
+  const writes: unknown[] = [];
+  const health: ProviderAccountRuntimeHealthWriter = {
+    async recordRuntimeOutcome(input) {
+      writes.push(input);
+      return 'applied';
+    },
+  };
+  for (const [status, upstreamErrorKind, failureKind] of [
+    [403, 'forbidden', 'forbidden'],
+    [403, 'org-disabled', 'verification_wall'],
+    [200, 'overloaded', 'overloaded'],
+  ] as const) {
+    const transport: PreparedEvidenceTransport = {
+      async send() {
+        return { responseStarted: status === 200, resultHttpStatus: status, upstreamErrorKind };
+      },
+    };
+    const result = await service(
+      new FakeEvidence(),
+      new FakeMetering(),
+      new FakeLeaseProvider(),
+      transport,
+      health,
+    ).dispatch({ evidenceId: 'evidence-1', payloadBytes: payload, audit });
+    assert.equal(result.kind, 'sent');
+    assert.deepEqual((writes.at(-1) as { evidence: unknown }).evidence, {
+      source: 'gateway',
+      result: 'retryable_failure',
+      failureKind,
+    });
+  }
+});
+
 test('health write failure does not alter dispatch state or repeat transport', async () => {
   const metering = new FakeMetering();
   const lease = new FakeLeaseProvider();

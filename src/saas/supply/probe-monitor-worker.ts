@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { ProviderCredentialUnsealingKms } from '../credentials/provider-crypto.js';
 import type { SaasDatabase } from '../db/types.js';
 import type { ProviderHttpEgressAllowlist } from '../gateway/provider-http-address.js';
+import type { ProviderAccountBanWriter } from './account-ban-service.js';
 import {
   type AccountProbeCategory,
   type AccountProbeOutcome,
@@ -34,7 +35,12 @@ import {
  *   failure_threshold sets probe_temp_unschedulable_until on the account row
  *   (re-armed on every further failing probe; the horizon bounds a monitor
  *   that an operator disabled, the streak itself is unbounded while enabled);
- * - recovery is probe-success ONLY — a successful probe clears the signal;
+ * - with an optional banWriter, threshold-crossing non-rate-limit failures
+ *   additionally enter the audited permanent `banned` lifecycle after the
+ *   probe transaction commits; without it, the legacy temporary-only behavior
+ *   is unchanged. Rate limiting remains temporary load/quota evidence;
+ * - recovery is probe-success ONLY — a successful probe clears the temporary
+ *   signal but never unbans an account;
  *   user-request success never does (burning user requests as probes is the
  *   sub2api/new-api lesson; new-api's 3→1 auto-recovery equivalent).
  * - both transitions emit a best-effort saas_audit_events alert row (the R3
@@ -207,12 +213,15 @@ export interface PostgresProbeMonitorStoreOptions {
    */
   readonly egressAllowlist?: ProviderHttpEgressAllowlist;
   readonly unscheduleHorizonMs?: number;
+  /** Optional audited lifecycle writer; without it the legacy temporary signal remains the only action. */
+  readonly banWriter?: ProviderAccountBanWriter;
   readonly signal?: AbortSignal;
 }
 
 export class PostgresProbeMonitorStore {
   private readonly probe: AccountProbeService;
   private readonly unscheduleHorizonMs: number;
+  private readonly banWriter: ProviderAccountBanWriter | undefined;
 
   constructor(
     private readonly database: SaasDatabase,
@@ -238,6 +247,7 @@ export class PostgresProbeMonitorStore {
       30 * 24 * 60 * 60_000,
       DEFAULT_UNSCHEDULE_HORIZON_MS,
     );
+    this.banWriter = options.banWriter;
   }
 
   /**
@@ -249,7 +259,7 @@ export class PostgresProbeMonitorStore {
     const duePredicate = `
        AND enabled
        AND (next_due_at IS NULL OR next_due_at <= clock_timestamp())`;
-    return this.database.transaction(async (tx) => {
+    const claimed = await this.database.transaction(async (tx) => {
       const candidates = await tx.query<{ readonly id: unknown }>(
         `SELECT id FROM saas_probe_monitors WHERE TRUE${duePredicate}
           ORDER BY next_due_at ASC NULLS FIRST, id LIMIT 1`,
@@ -313,6 +323,37 @@ export class PostgresProbeMonitorStore {
       await this.applyAccountSignal(tx, monitor, outcome, consecutive);
       return { monitor, triggeredBy, outcome };
     });
+    if (
+      claimed !== null &&
+      this.banWriter !== undefined &&
+      claimed.outcome.category !== 'ok' &&
+      claimed.outcome.category !== 'rate_limited' &&
+      claimed.monitor.consecutiveFailures + 1 >= claimed.monitor.failureThreshold
+    ) {
+      const reason = claimed.outcome.reason ?? `probe_${claimed.outcome.category}`;
+      try {
+        await this.banWriter.banProviderAccount({
+          account: {
+            ownerKind: claimed.monitor.ownerKind,
+            tenantId: claimed.monitor.ownerTenantId,
+            accountId: claimed.monitor.accountId,
+          },
+          reason: 'probe_failure_threshold',
+          lastError: reason.slice(0, 128),
+          audit: {
+            actorUserId: 'probe-monitor-worker',
+            entryPoint: AUDIT_ENTRY_POINT,
+          },
+        });
+      } catch (error) {
+        // Another replica or operator may have won the lifecycle CAS after the
+        // probe committed. Those races are already terminal/durable and must
+        // not turn every subsequent monitor cycle into a storage failure.
+        const code = error !== null && typeof error === 'object' ? (error as { code?: unknown }).code : undefined;
+        if (code !== 'INVALID_ACCOUNT_LIFECYCLE' && code !== 'ACCOUNT_STATE_CONFLICT') throw error;
+      }
+    }
+    return claimed;
   }
 
   /**

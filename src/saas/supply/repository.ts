@@ -136,7 +136,7 @@ export interface PersistedProviderAccountInput {
   readonly rightsId: string;
   readonly rightsVersion: number;
   readonly capabilities: readonly ProviderCapabilityReference[];
-  readonly status: ProviderAccountStatus;
+  readonly status: Exclude<ProviderAccountStatus, 'banned'>;
   readonly validationState: ProviderValidationState;
   readonly priority: number;
   readonly weight: number;
@@ -242,6 +242,10 @@ export interface UpdateProviderAccountLifecycleInput {
   readonly updatedAt: string;
   readonly disabledAt: string | null;
   readonly revokedAt: string | null;
+  /** Ban metadata is written only by the audited ban transition; other transitions clear it. */
+  readonly bannedAt?: string | null;
+  readonly banReason?: string | null;
+  readonly banLastError?: string | null;
 }
 
 export interface UpdateProviderAccountValidationInput {
@@ -372,6 +376,9 @@ interface AccountRowFields {
   updated_at: string | Date;
   disabled_at: string | Date | null;
   revoked_at: string | Date | null;
+  banned_at: string | Date | null;
+  ban_reason: string | null;
+  ban_last_error: string | null;
 }
 
 type AccountRow = AccountRowFields &
@@ -703,7 +710,7 @@ function mapDispatchPool(row: DispatchRow): ProviderCredentialDispatchPoolSnapsh
     id: dispatchText(row, 'pool_id'),
     providerId: dispatchText(row, 'pool_provider_id'),
     productId: dispatchText(row, 'pool_product_id'),
-    status: accountStatus(row.pool_status),
+    status: poolStatus(row.pool_status),
     validationState: validationState(row.pool_validation_state),
     authzVersion: dispatchInteger(row, 'pool_authz_version'),
   };
@@ -800,7 +807,7 @@ const ACCOUNT_COLUMNS = `
   credential_type, region, purpose, rights_id, rights_version, status,
   validation_state, validation_error_code, last_validated_at, authz_version,
   priority, weight, revalidation_interval_seconds,
-  created_at, updated_at, disabled_at, revoked_at`;
+  created_at, updated_at, disabled_at, revoked_at, banned_at, ban_reason, ban_last_error`;
 
 const CREDENTIAL_COLUMNS = `
   owner_kind, tenant_id, supply_mode, id, account_id, provider_id, product_id,
@@ -1490,8 +1497,16 @@ function nullableTimestamp(value: unknown): string | null {
 }
 
 function accountStatus(value: unknown): ProviderAccountStatus {
-  if (value === 'pending' || value === 'active' || value === 'disabled' || value === 'revoked') return value;
+  if (value === 'pending' || value === 'active' || value === 'disabled' || value === 'revoked' || value === 'banned') {
+    return value;
+  }
   throw repositoryError('INVALID_STORED_ACCOUNT_STATUS');
+}
+
+function poolStatus(value: unknown): ProviderCredentialDispatchPoolSnapshot['status'] {
+  const status = accountStatus(value);
+  if (status === 'banned') throw repositoryError('INVALID_STORED_ACCOUNT_STATUS');
+  return status;
 }
 
 function credentialStatus(value: unknown): ProviderCredentialRecord['status'] {
@@ -1630,6 +1645,9 @@ function mapAccount(row: AccountRow, capabilities: readonly CapabilityRow[]): Pr
     updatedAt: asTimestamp(row.updated_at),
     disabledAt: nullableTimestamp(row.disabled_at),
     revokedAt: nullableTimestamp(row.revoked_at),
+    bannedAt: nullableTimestamp(row.banned_at),
+    banReason: row.ban_reason,
+    banLastError: row.ban_last_error,
   };
 }
 
@@ -2171,7 +2189,7 @@ export class PostgresProviderSupplyRepository implements ProviderSupplyRepositor
       tenantId: input.tenantId,
       accountId: input.accountId,
     });
-    if (!account || account.status === 'disabled' || account.status === 'revoked') {
+    if (!account || account.status === 'disabled' || account.status === 'revoked' || account.status === 'banned') {
       throw repositoryError('ACCOUNT_NOT_FOUND');
     }
 
@@ -2291,20 +2309,26 @@ export class PostgresProviderSupplyRepository implements ProviderSupplyRepositor
       lockPredicate.values,
     );
     if (!lockedRows[0]) return null;
-    const predicate = accountPredicate(input.account, 6);
+    const predicate = accountPredicate(input.account, 9);
     const rows = await this.query<AccountRow>(
       `UPDATE ${table}
        SET status = $1,
            disabled_at = $2,
            revoked_at = $3,
-           updated_at = $4,
+           banned_at = $4,
+           ban_reason = $5,
+           ban_last_error = $6,
+           updated_at = $7,
            authz_version = authz_version + 1
-       WHERE ${predicate.sql} AND authz_version = $5
+       WHERE ${predicate.sql} AND authz_version = $8
        RETURNING ${accountColumns(input.account.ownerKind)}`,
       [
         input.status,
         input.disabledAt,
         input.revokedAt,
+        input.bannedAt ?? null,
+        input.banReason ?? null,
+        input.banLastError ?? null,
         input.updatedAt,
         input.expectedAuthzVersion,
         ...predicate.values,
