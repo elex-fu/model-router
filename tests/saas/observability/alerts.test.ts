@@ -6,6 +6,7 @@ import {
   ConsoleLogAlertEmailSender,
   deliverAlertWebhook,
   evaluateAlertRule,
+  isPointInTimeMetric,
   isWindowMetric,
   ObservabilityAlertService,
   parseAlertMetric,
@@ -70,6 +71,13 @@ test('parseAlertMetric accepts plain and provider-scoped metrics', () => {
   assert.equal(isWindowMetric('channel_error_rate'), true);
   assert.equal(isWindowMetric('wallet_active_holds'), false);
   assert.equal(isWindowMetric('platform_supply_available_accounts'), false);
+  assert.deepEqual(parseAlertMetric('user_anomaly_detections'), { name: 'user_anomaly_detections' });
+  assert.deepEqual(parseAlertMetric('user_risk_markers'), { name: 'user_risk_markers' });
+  assert.equal(isWindowMetric('user_anomaly_detections'), false);
+  assert.equal(isWindowMetric('user_risk_markers'), false);
+  assert.equal(isPointInTimeMetric('user_anomaly_detections'), true);
+  assert.equal(isPointInTimeMetric('user_risk_markers'), true);
+  assert.equal(isPointInTimeMetric('channel_error_rate'), false);
 });
 
 test('evaluateAlertRule requires sustained consecutive violations inside the window', () => {
@@ -365,4 +373,54 @@ test('deliverAlertWebhook surfaces non-2xx deliveries as failures', async () => 
     ),
     /status 500/,
   );
+});
+
+test('user risk metrics count lookback rows and evaluate point-in-time', async () => {
+  const executor = new FakeExecutor();
+  const rule = ruleRow({
+    name: 'anomaly detector noise',
+    metric: 'user_anomaly_detections',
+    operator: 'gt',
+    threshold: 5,
+    window_minutes: 30,
+  });
+  executor.enqueueNext([rule]);
+  executor.enqueueNext([]);
+  executor.enqueueNext([rule]);
+  executor.enqueueNext([{ count: '7' }]);
+  executor.enqueueNext([]);
+  executor.enqueueNext([]);
+  const triggered = await runAlertEvaluatorCycle(executor as never, {
+    now: () => new Date('2026-11-01T00:00:00.000Z'),
+  });
+  assert.equal(triggered, 1);
+  const detectionQuery = executor.queries.find(({ sql }) => sql.includes('FROM saas_user_anomaly_detections'));
+  assert.ok(detectionQuery);
+  assert.match(detectionQuery.sql, /observed_at > now\(\) - \(\$1::int \* interval '1 minute'\)/);
+  assert.deepEqual(detectionQuery.values, [30], 'the window is the lookback, not a per-minute sample window');
+  const eventInsert = executor.queries.find(({ sql }) => sql.includes('INSERT INTO saas_obs_alert_events'));
+  const payload = JSON.parse(String(eventInsert?.values[3])) as Record<string, unknown>;
+  assert.equal(payload.value, 7);
+
+  const markerRule = ruleRow({
+    name: 'risk marker churn',
+    metric: 'user_risk_markers',
+    operator: 'gt',
+    threshold: 2,
+    window_minutes: 15,
+  });
+  const markerExecutor = new FakeExecutor();
+  markerExecutor.enqueueNext([markerRule]);
+  markerExecutor.enqueueNext([]);
+  markerExecutor.enqueueNext([markerRule]);
+  markerExecutor.enqueueNext([{ count: '1' }]);
+  markerExecutor.enqueueNext([]);
+  const quiet = await runAlertEvaluatorCycle(markerExecutor as never, {
+    now: () => new Date('2026-11-01T00:00:00.000Z'),
+  });
+  assert.equal(quiet, 0, 'a count below the threshold never triggers');
+  const markerQuery = markerExecutor.queries.find(({ sql }) => sql.includes('FROM saas_user_risk_markers'));
+  assert.ok(markerQuery);
+  assert.match(markerQuery.sql, /updated_at > now\(\) - \(\$1::int \* interval '1 minute'\)/);
+  assert.deepEqual(markerQuery.values, [15]);
 });

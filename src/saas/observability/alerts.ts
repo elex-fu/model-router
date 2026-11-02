@@ -21,12 +21,28 @@ export const ALERT_METRIC_NAMES = Object.freeze([
   'channel_request_count',
   'wallet_active_holds',
   'platform_supply_available_accounts',
+  'user_anomaly_detections',
+  'user_risk_markers',
 ] as const);
 
 export type AlertMetricName = (typeof ALERT_METRIC_NAMES)[number];
 export type AlertOperator = 'gt' | 'lt';
 
 const WINDOW_METRICS: ReadonlySet<AlertMetricName> = new Set(['channel_error_rate', 'channel_request_count']);
+
+/**
+ * Point-in-time metrics evaluate a single sample and ignore sustained
+ * minutes. user_anomaly_detections and user_risk_markers are counts of rows
+ * observed within the rule's windowMinutes lookback — the sentinel for
+ * detector noise (a flapping detector burns users through the lifetime-count
+ * escalation ladder) and for staged enforcement activity.
+ */
+const POINT_IN_TIME_METRICS: ReadonlySet<AlertMetricName> = new Set([
+  'wallet_active_holds',
+  'platform_supply_available_accounts',
+  'user_anomaly_detections',
+  'user_risk_markers',
+]);
 
 export interface ParsedAlertMetric {
   readonly name: AlertMetricName;
@@ -46,6 +62,11 @@ export function parseAlertMetric(metric: string): ParsedAlertMetric | null {
 
 export function isWindowMetric(name: AlertMetricName): boolean {
   return WINDOW_METRICS.has(name);
+}
+
+/** Point-in-time metrics take one sample and ignore sustained_minutes. */
+export function isPointInTimeMetric(name: AlertMetricName): boolean {
+  return POINT_IN_TIME_METRICS.has(name);
 }
 
 export interface AlertRuleRecord {
@@ -557,6 +578,26 @@ async function loadWalletHoldCount(database: SaasDatabase): Promise<number> {
   return Number(result.rows[0]?.count ?? 0);
 }
 
+/** M3 §7.2: anomaly detections observed inside the lookback window. */
+async function loadUserAnomalyDetectionCount(database: SaasDatabase, windowMinutes: number): Promise<number> {
+  const result = await database.query<{ readonly count: string }>(
+    `SELECT COUNT(*)::text AS count FROM saas_user_anomaly_detections
+     WHERE observed_at > now() - ($1::int * interval '1 minute')`,
+    [windowMinutes],
+  );
+  return Number(result.rows[0]?.count ?? 0);
+}
+
+/** M3 §7.2: risk marker rows updated inside the lookback window. */
+async function loadUserRiskMarkerCount(database: SaasDatabase, windowMinutes: number): Promise<number> {
+  const result = await database.query<{ readonly count: string }>(
+    `SELECT COUNT(*)::text AS count FROM saas_user_risk_markers
+     WHERE updated_at > now() - ($1::int * interval '1 minute')`,
+    [windowMinutes],
+  );
+  return Number(result.rows[0]?.count ?? 0);
+}
+
 /** §4.4 point-in-time supply capacity; evaluated only by the asynchronous alert worker. */
 async function loadPlatformSupplyAvailableAccounts(
   database: SaasDatabase,
@@ -620,18 +661,21 @@ export async function runAlertEvaluatorCycle(
         [rule.id],
       );
       if (locked.rows.length === 0) return null;
-      const samples: AlertMinuteSample[] =
-        parsed.name === 'wallet_active_holds' || parsed.name === 'platform_supply_available_accounts'
-          ? [
-              {
-                minuteStartMs: now().getTime(),
-                value:
-                  parsed.name === 'wallet_active_holds'
-                    ? await loadWalletHoldCount(database)
-                    : await loadPlatformSupplyAvailableAccounts(database, parsed.provider),
-              },
-            ]
-          : await loadChannelSamples(database, parsed, rule.windowMinutes);
+      const samples: AlertMinuteSample[] = isPointInTimeMetric(parsed.name)
+        ? [
+            {
+              minuteStartMs: now().getTime(),
+              value:
+                parsed.name === 'wallet_active_holds'
+                  ? await loadWalletHoldCount(database)
+                  : parsed.name === 'platform_supply_available_accounts'
+                    ? await loadPlatformSupplyAvailableAccounts(database, parsed.provider)
+                    : parsed.name === 'user_anomaly_detections'
+                      ? await loadUserAnomalyDetectionCount(database, rule.windowMinutes)
+                      : await loadUserRiskMarkerCount(database, rule.windowMinutes),
+            },
+          ]
+        : await loadChannelSamples(database, parsed, rule.windowMinutes);
       const evaluation = evaluateAlertRule({
         rule: {
           operator: rule.operator,
@@ -642,7 +686,7 @@ export async function runAlertEvaluatorCycle(
         },
         samples,
         nowMs: now().getTime(),
-        pointInTime: parsed.name === 'wallet_active_holds' || parsed.name === 'platform_supply_available_accounts',
+        pointInTime: isPointInTimeMetric(parsed.name),
       });
       // Batch 5 §5.6 auto-resolve: a cycle that does not violate the window
       // closes the rule's open (firing) events. Resolution rides the same
