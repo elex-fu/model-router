@@ -49,6 +49,7 @@ export interface RiskControlCleanupResult {
   readonly deletedHit: number;
   readonly deletedNonHit: number;
   readonly deletedHashes: number;
+  readonly deletedObservations: number;
 }
 
 const LOG_COLUMNS = `id, request_id, tenant_id, user_id, api_key_id, api_key_name, model, protocol, mode,
@@ -378,9 +379,16 @@ export class PostgresRiskControlAdminStore {
   /**
    * Retention cleanup: flagged rows older than hitBefore and unflagged rows
    * older than nonHitBefore are deleted, plus blocklist hashes older than
-   * hitBefore (the blocklist only ever holds flagged inputs).
+   * hitBefore (the blocklist only ever holds flagged inputs), plus user-risk
+   * observations older than observationBefore (migration 153 evidence; the
+   * detector reads at most 2× its window, so the default 7-day retention has
+   * ~1000× headroom while bounding the per-admission INSERT growth).
    */
-  async cleanupExpired(hitBeforeIso: string, nonHitBeforeIso: string): Promise<RiskControlCleanupResult> {
+  async cleanupExpired(
+    hitBeforeIso: string,
+    nonHitBeforeIso: string,
+    observationBeforeIso: string,
+  ): Promise<RiskControlCleanupResult> {
     const hit = await this.executor.query(
       'DELETE FROM saas_content_moderation_logs WHERE flagged AND created_at < $1',
       [hitBeforeIso],
@@ -393,10 +401,14 @@ export class PostgresRiskControlAdminStore {
       'DELETE FROM saas_content_moderation_flagged_hashes WHERE created_at < $1',
       [hitBeforeIso],
     );
+    const observations = await this.executor.query('DELETE FROM saas_user_risk_observations WHERE occurred_at < $1', [
+      observationBeforeIso,
+    ]);
     return {
       deletedHit: hit.rowCount ?? 0,
       deletedNonHit: nonHit.rowCount ?? 0,
       deletedHashes: hashes.rowCount ?? 0,
+      deletedObservations: observations.rowCount ?? 0,
     };
   }
 

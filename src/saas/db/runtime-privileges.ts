@@ -4263,6 +4263,9 @@ export const SAAS_CONTROL_PLANE_RUNTIME_TABLE_GRANTS: readonly SaasControlPlaneT
   // M3-G user abuse controls: un-banning a user retires the staged risk
   // escalation markers; revoked keys deliberately stay revoked.
   ['saas_user_risk_markers', 'DELETE'],
+  // M3-G observation retention: the risk-control retention sweep ages out
+  // user-risk observations past the configured window.
+  ['saas_user_risk_observations', 'DELETE'],
 ];
 
 /** Control-plane IDs are application-generated; the provider lease sequence is gateway-only. */

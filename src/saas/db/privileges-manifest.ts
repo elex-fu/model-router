@@ -9331,6 +9331,13 @@ export const MANIFEST_CONTROL_PLANE_TABLE_GRANTS: readonly SaasControlPlaneTable
     ],
     table: 'saas_user_risk_markers',
   },
+  {
+    tsComment: [
+      'M3-G observation retention: the risk-control retention sweep ages out',
+      'user-risk observations past the configured window.',
+    ],
+    table: 'saas_user_risk_observations',
+  },
 ];
 
 export const MANIFEST_CONTROL_PLANE_TABLE_SQL_ROWS: readonly SaasControlPlaneTableSqlRow[] = [
@@ -9423,6 +9430,13 @@ export const MANIFEST_CONTROL_PLANE_TABLE_SQL_ROWS: readonly SaasControlPlaneTab
       'escalation markers; revoked keys deliberately stay revoked.',
     ],
     table: 'saas_user_risk_markers',
+  },
+  {
+    sqlComment: [
+      'M3-G observation retention: the risk-control retention sweep ages out',
+      'user-risk observations past the configured window.',
+    ],
+    table: 'saas_user_risk_observations',
   },
 ];
 

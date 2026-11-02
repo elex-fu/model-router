@@ -8,6 +8,7 @@ import {
   serializeRiskControlConfig,
 } from '../risk/moderation.js';
 import type { ContentModerationLogPage, PostgresRiskControlAdminStore } from '../risk/postgres-store.js';
+import { DEFAULT_USER_RISK_OBSERVATION_RETENTION_DAYS } from '../risk/retention-worker.js';
 import type { UserLimitAdminService, UserLimitAdminView } from '../risk/user-limit-admin-service.js';
 import { hasPlatformRole } from './access/authorization.js';
 import type { PlatformAdminAccessService, PlatformAdminActor } from './access/types.js';
@@ -72,6 +73,8 @@ export interface RiskControlHttpOptions {
     | 'userHoldsPlatformRole'
   >;
   readonly audit?: RiskControlAuditWriter;
+  /** Observation retention window for the manual run-cleanup sweep; default 7. */
+  readonly observationRetentionDays?: number;
   readonly userLimits?: Pick<
     UserLimitAdminService,
     'getDefaults' | 'getUserLimits' | 'updateDefaults' | 'updateUserLimits'
@@ -309,6 +312,10 @@ export function createRiskControlHttpHandler(options: RiskControlHttpOptions): R
   if (!options.access || !options.authService || !options.store) {
     throw new Error('risk-control http handler requires access, authService and store');
   }
+  const observationRetentionDays =
+    options.observationRetentionDays === undefined
+      ? DEFAULT_USER_RISK_OBSERVATION_RETENTION_DAYS
+      : Math.max(1, Math.round(options.observationRetentionDays));
   return async (req, res) => {
     const requestId = randomUUID();
     let pathname: string;
@@ -439,7 +446,8 @@ export function createRiskControlHttpHandler(options: RiskControlHttpOptions): R
           const now = Date.now();
           const hitBefore = new Date(now - config.hitRetentionDays * 86_400_000).toISOString();
           const nonHitBefore = new Date(now - config.nonHitRetentionDays * 86_400_000).toISOString();
-          const result = await options.store.cleanupExpired(hitBefore, nonHitBefore);
+          const observationBefore = new Date(now - observationRetentionDays * 86_400_000).toISOString();
+          const result = await options.store.cleanupExpired(hitBefore, nonHitBefore, observationBefore);
           writeAudit('risk_control.retention.cleanup', 'content_moderation_logs');
           sendJson(res, 200, requestId, {
             ...result,

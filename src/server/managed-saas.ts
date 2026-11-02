@@ -316,10 +316,11 @@ import { PostgresRiskControlAdminStore } from '../saas/risk/postgres-store.js';
 import { UserLimitAdminService } from '../saas/risk/user-limit-admin-service.js';
 import {
   type RiskControlRetentionWorkerHandle,
+  resolveUserRiskObservationRetentionDays,
   startRiskControlRetentionWorker,
 } from '../saas/risk/retention-worker.js';
-import { PostgresUserRiskObservationRecorder } from '../saas/risk/user-risk.js';
 import { type UserAnomalyWorkerHandle, startUserAnomalyDetectionWorker } from '../saas/risk/user-anomaly-worker.js';
+import { PostgresUserRiskObservationRecorder } from '../saas/risk/user-risk.js';
 import { loadCommercialAttestationTrust } from '../saas/runtime/commercial-attestation-trust.js';
 import { loadCredentialValidationTargetsModule } from '../saas/runtime/credential-validation-targets-module.js';
 import {
@@ -2161,6 +2162,13 @@ export async function startManagedSaasServer(
     }
     maxHttpInFlight = Number(httpInFlightRaw);
   }
+  // M3 §7.2: user-risk observation retention window (days). Malformed values
+  // fail every control-plane workload startup closed, like the egress
+  // allowlist; unset keeps the 7-day default.
+  let observationRetentionDays: number | undefined;
+  if (environment.MODEL_ROUTER_SAAS_USER_RISK_OBSERVATION_RETENTION_DAYS !== undefined) {
+    observationRetentionDays = resolveUserRiskObservationRetentionDays(environment);
+  }
 
   // R9 §4 P1: operator egress allowlist for container-network providers.
   // Strict env parsing — malformed CIDR entries fail EVERY workload startup
@@ -3389,6 +3397,7 @@ export async function startManagedSaasServer(
         store: new PostgresRiskControlAdminStore(database),
         audit: createPostgresRiskControlAuditWriter(database),
         userLimits: new UserLimitAdminService(database),
+        ...(observationRetentionDays === undefined ? {} : { observationRetentionDays }),
         publicOrigin: deploymentListener(deployment, 'platform').origin,
       });
       // Batch-5 §5.1 plugin admin surface (install/enable/disable/config/
@@ -3790,6 +3799,7 @@ export async function startManagedSaasServer(
       // Batch-5 §5.4 (task #19): moderation log retention (hit/non-hit
       // windows) plus flagged-hash expiry, on the control-plane DELETE grant.
       riskControlRetentionWorker = startRiskControlRetentionWorker(database, {
+        ...(observationRetentionDays === undefined ? {} : { observationRetentionDays }),
         onError: (error) => console.error('model-router managed risk-control retention cycle failed', error),
       });
       // M3 §7.2: the anomaly detection batch (migration 153 ladder). Harmless

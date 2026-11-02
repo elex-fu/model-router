@@ -1200,7 +1200,10 @@ BEGIN
       ('saas_plugin_bindings', 'DELETE'),
       -- M3-G user abuse controls: un-banning a user retires the staged risk
       -- escalation markers; revoked keys deliberately stay revoked.
-      ('saas_user_risk_markers', 'DELETE')
+      ('saas_user_risk_markers', 'DELETE'),
+      -- M3-G observation retention: the risk-control retention sweep ages out
+      -- user-risk observations past the configured window.
+      ('saas_user_risk_observations', 'DELETE')
     ) AS manifest(table_name, privilege_type)
   LOOP
     IF EXISTS (
