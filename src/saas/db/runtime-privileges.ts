@@ -1419,6 +1419,7 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'created_by_user_id',
     'rotated_by_user_id',
     'revoked_by_user_id',
+    'suspended_by_user_id',
     'entitlement_id',
     'supply_profile_id',
     'supply_mode',
@@ -1430,6 +1431,7 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'created_at',
     'expires_at',
     'revoked_at',
+    'suspended_at',
     'last_used_at',
     'authz_version',
     'model_scope_version',
@@ -4204,6 +4206,16 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'window_start',
     'observed_at',
     'facts',
+  ]),
+  // Staged risk-escalation marker upsert (detector batch). Un-ban DELETE
+  // rides the control-plane table grants above. SELECT feeds the conflict-update
+  // WHERE (existing stage/revision) and the user_risk_markers alert metric.
+  ...columnGrants('saas_user_risk_markers', 'SELECT', [
+    'user_id',
+    'stage',
+    'requests_per_minute',
+    'revision',
+    'updated_at',
   ]),
   // Staged risk-escalation marker upsert (detector batch). Un-ban DELETE
   // rides the control-plane table grants above.

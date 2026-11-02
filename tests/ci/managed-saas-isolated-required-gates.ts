@@ -81,6 +81,10 @@ const gates = {
     root: 'tests/saas/supply/account-quarantine.postgres.integration.test.ts',
     httpFixture: false,
   },
+  'user-risk-drill-153': {
+    root: 'tests/saas/risk/user-risk.postgres.integration.test.ts',
+    httpFixture: false,
+  },
   'rate-limit-scheduling-098': {
     root: 'tests/saas/gateway/rate-limit-scheduling.postgres.integration.test.ts',
     httpFixture: false,

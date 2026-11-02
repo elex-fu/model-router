@@ -915,7 +915,7 @@ BEGIN
       ('saas_invitations', 'UPDATE', 'accepted_by_user_id accepted_at revoked_at'),
       ('saas_project_inference_policy_versions', 'SELECT', 'tenant_id project_id version status changed_by_user_id created_at requests_per_minute tokens_per_minute max_concurrent_requests'),
       ('saas_project_inference_policy_versions', 'INSERT', 'tenant_id project_id version status changed_by_user_id created_at requests_per_minute tokens_per_minute max_concurrent_requests'),
-      ('saas_api_keys', 'SELECT', 'id tenant_id project_id principal_user_id execution_principal_type execution_principal_id created_by_user_id rotated_by_user_id revoked_by_user_id entitlement_id supply_profile_id supply_mode name prefix key_hash model_scopes status created_at expires_at revoked_at last_used_at authz_version model_scope_version entitlement_authz_version supply_profile_authz_version requests_per_minute tokens_per_minute max_concurrent_requests billing_group_id'),
+      ('saas_api_keys', 'SELECT', 'id tenant_id project_id principal_user_id execution_principal_type execution_principal_id created_by_user_id rotated_by_user_id revoked_by_user_id suspended_by_user_id entitlement_id supply_profile_id supply_mode name prefix key_hash model_scopes status created_at expires_at revoked_at suspended_at last_used_at authz_version model_scope_version entitlement_authz_version supply_profile_authz_version requests_per_minute tokens_per_minute max_concurrent_requests billing_group_id'),
       ('saas_api_keys', 'INSERT', 'id tenant_id project_id principal_user_id execution_principal_type execution_principal_id created_by_user_id entitlement_id supply_profile_id supply_mode name prefix key_hash model_scopes status created_at expires_at revoked_at last_used_at authz_version model_scope_version entitlement_authz_version supply_profile_authz_version billing_group_id'),
       ('saas_api_keys', 'UPDATE', 'status revoked_at revoked_by_user_id suspended_at suspended_by_user_id rotated_by_user_id last_used_at authz_version model_scope_version entitlement_authz_version supply_profile_authz_version requests_per_minute tokens_per_minute max_concurrent_requests billing_group_id'),
       ('saas_api_key_ip_policies', 'SELECT', 'tenant_id project_id key_id version mode rules created_at updated_at'),
@@ -1137,6 +1137,7 @@ BEGIN
       ('saas_user_risk_observations', 'SELECT', 'id user_id tenant_id api_key_id client_address_digest public_model protocol occurred_at'),
       ('saas_user_anomaly_detections', 'SELECT', 'id user_id tenant_id api_key_id kind window_start observed_at'),
       ('saas_user_anomaly_detections', 'INSERT', 'user_id tenant_id api_key_id kind window_start observed_at facts'),
+      ('saas_user_risk_markers', 'SELECT', 'user_id stage requests_per_minute revision updated_at'),
       ('saas_user_risk_markers', 'INSERT', 'user_id stage requests_per_minute revision updated_at'),
       ('saas_user_risk_markers', 'UPDATE', 'stage requests_per_minute revision updated_at')
     ) AS manifest(table_name, privilege_type, column_names)

@@ -1356,6 +1356,7 @@ export const MANIFEST_CONTROL_PLANE_COLUMN_GROUPS: readonly SaasControlPlaneColu
       'created_by_user_id',
       'rotated_by_user_id',
       'revoked_by_user_id',
+      'suspended_by_user_id',
       'entitlement_id',
       'supply_profile_id',
       'supply_mode',
@@ -1367,6 +1368,7 @@ export const MANIFEST_CONTROL_PLANE_COLUMN_GROUPS: readonly SaasControlPlaneColu
       'created_at',
       'expires_at',
       'revoked_at',
+      'suspended_at',
       'last_used_at',
       'authz_version',
       'model_scope_version',
@@ -4827,6 +4829,16 @@ export const MANIFEST_CONTROL_PLANE_COLUMN_GROUPS: readonly SaasControlPlaneColu
   {
     tsComment: [
       'Staged risk-escalation marker upsert (detector batch). Un-ban DELETE',
+      'rides the control-plane table grants above. SELECT feeds the conflict-update',
+      "WHERE (existing stage/revision) and the user_risk_markers alert metric.",
+    ],
+    table: 'saas_user_risk_markers',
+    privilege: 'SELECT',
+    columns: ['user_id', 'stage', 'requests_per_minute', 'revision', 'updated_at'],
+  },
+  {
+    tsComment: [
+      'Staged risk-escalation marker upsert (detector batch). Un-ban DELETE',
       'rides the control-plane table grants above.',
     ],
     table: 'saas_user_risk_markers',
@@ -6049,6 +6061,7 @@ export const MANIFEST_CONTROL_PLANE_COLUMN_SQL_ROWS: readonly SaasControlPlaneCo
       'created_by_user_id',
       'rotated_by_user_id',
       'revoked_by_user_id',
+      'suspended_by_user_id',
       'entitlement_id',
       'supply_profile_id',
       'supply_mode',
@@ -6060,6 +6073,7 @@ export const MANIFEST_CONTROL_PLANE_COLUMN_SQL_ROWS: readonly SaasControlPlaneCo
       'created_at',
       'expires_at',
       'revoked_at',
+      'suspended_at',
       'last_used_at',
       'authz_version',
       'model_scope_version',
@@ -9230,6 +9244,7 @@ export const MANIFEST_CONTROL_PLANE_COLUMN_SQL_ROWS: readonly SaasControlPlaneCo
   { table: 'saas_user_risk_observations', privilege: 'SELECT', columns: ['id', 'user_id', 'tenant_id', 'api_key_id', 'client_address_digest', 'public_model', 'protocol', 'occurred_at'] },
   { table: 'saas_user_anomaly_detections', privilege: 'SELECT', columns: ['id', 'user_id', 'tenant_id', 'api_key_id', 'kind', 'window_start', 'observed_at'] },
   { table: 'saas_user_anomaly_detections', privilege: 'INSERT', columns: ['user_id', 'tenant_id', 'api_key_id', 'kind', 'window_start', 'observed_at', 'facts'] },
+  { table: 'saas_user_risk_markers', privilege: 'SELECT', columns: ['user_id', 'stage', 'requests_per_minute', 'revision', 'updated_at'] },
   { table: 'saas_user_risk_markers', privilege: 'INSERT', columns: ['user_id', 'stage', 'requests_per_minute', 'revision', 'updated_at'] },
   { table: 'saas_user_risk_markers', privilege: 'UPDATE', columns: ['stage', 'requests_per_minute', 'revision', 'updated_at'] },
 ];

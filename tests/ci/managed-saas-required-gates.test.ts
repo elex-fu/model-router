@@ -56,6 +56,7 @@ const isolatedGates = [
   ['oauth-token-refresh-094', 'tests/saas/supply/oauth-token-refresh.postgres.integration.test.ts', false],
   ['announcement-fanout-095', 'tests/saas/webhooks/announcement-fanout.postgres.integration.test.ts', false],
   ['account-quarantine-097', 'tests/saas/supply/account-quarantine.postgres.integration.test.ts', false],
+  ['user-risk-drill-153', 'tests/saas/risk/user-risk.postgres.integration.test.ts', false],
   ['rate-limit-scheduling-098', 'tests/saas/gateway/rate-limit-scheduling.postgres.integration.test.ts', false],
   ['health-score-098', 'tests/saas/gateway/health-score.postgres.integration.test.ts', false],
   ['oauth-refresh-onboarding', 'tests/saas/supply/oauth-refresh-onboarding.postgres.integration.test.ts', false],
