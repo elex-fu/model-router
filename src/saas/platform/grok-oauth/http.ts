@@ -38,7 +38,7 @@ export interface GrokCredentialSink {
   accept(input: {
     readonly envelope: GrokCredentialEnvelope;
     readonly actorUserId: string;
-    readonly source: 'oauth-binding';
+    readonly source: 'oauth-binding' | 'credentials-json-import';
     readonly sourceIp: string | null;
     readonly userAgent: string | null;
   }): Promise<GrokBindingOutcome>;
