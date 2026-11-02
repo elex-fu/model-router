@@ -39,6 +39,7 @@ import type {
   ProviderCredentialWriteResult,
 } from '../../supply/types.js';
 import type { CustomerWebhookTenantPolicyService } from '../../webhooks/tenant-policy-service.js';
+import { createPlatformAdminBulkImportHttpHandler, type PlatformAdminBulkImportServices } from './bulk-import.js';
 import {
   hasPlatformRole,
   PLATFORM_ADMIN_ROLES,
@@ -231,6 +232,8 @@ export interface PlatformAdminReadHandlerOptions {
   readonly pricing?: PlatformAdminPricingService;
   /** Omitted until startup wires the transactional platform-supply service. */
   readonly supply?: PlatformAdminSupplyService;
+  /** Omitted until startup wires bulk account import and its metadata reader. */
+  readonly bulkImport?: PlatformAdminBulkImportServices;
   readonly platformInferenceAccess?: Pick<PlatformInferenceAccessProvisioningService, 'provision' | 'getOperation' | 'disable'>;
   /** Omitted until startup wires the audited bounded-capacity policy service. */
   readonly capacityPolicies?: PlatformAdminCapacityPolicyService;
@@ -2237,10 +2240,17 @@ function isPlatformPricingRoute(route: Route): boolean {
  */
 export function createPlatformAdminReadHandler(options: PlatformAdminReadHandlerOptions): PlatformAdminReadHttpHandler {
   validateOptions(options);
+  const bulkImportHandler = createPlatformAdminBulkImportHttpHandler({
+    access: options.access,
+    service: options.bulkImport?.service,
+    store: options.bulkImport?.store,
+    writeSecurity: options.writeSecurity,
+  });
   const writeOriginPolicy =
     options.writeSecurity === undefined ? undefined : parseWriteOrigin(options.writeSecurity.publicOrigin);
 
   return async (req, res): Promise<boolean> => {
+    if (await bulkImportHandler(req, res)) return true;
     const url = requestUrl(req);
     const route = url === undefined ? undefined : routeForPath(url.pathname);
     if (route === undefined || url === undefined) return false;
