@@ -869,10 +869,15 @@ test('missing, empty, or unauthorized entitlements fail closed and scopes cannot
     () => restricted.create(baseContext, { ...baseInput, name: 'Unrestricted', modelScopes: [] }),
     'KEY_INVALID_INPUT',
   );
-  await expectKeyError(
-    () => restricted.create(baseContext, { ...baseInput, name: 'Unrestricted', modelScopes: undefined as never }),
-    'KEY_INVALID_INPUT',
-  );
+  // M1-L: omitted scopes default to the resolver's full allowed set — the
+  // personal create flow needs no model ceremony and no prior key to copy
+  // scopes from. The default mirrors the entitlement, never widening it.
+  const defaulted = await restricted.create(baseContext, {
+    ...baseInput,
+    name: 'Default scopes',
+    modelScopes: undefined,
+  });
+  assert.deepEqual(defaulted.modelScopes, ['model-a', 'model-b']);
 });
 
 test('the requested mode selects the resolver-owned profile and entitlement', async () => {

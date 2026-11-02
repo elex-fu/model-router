@@ -598,6 +598,27 @@ test('create is strict, returns a secret once, and list/revoke expose only safe 
       expiresAt: '2030-01-01T00:00:00.000Z',
     });
 
+    // M1-L: modelScopes is optional at the HTTP boundary — omitted means
+    // "default to the entitlement's full model set" server-side. null is not
+    // omission and still fails validation.
+    const defaulted = await fetch(`${app.base}/tenants/tenant-1/projects/project-1/keys`, {
+      method: 'POST',
+      headers: { ...authHeaders(), origin: app.origin, 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Defaulted key', supplyMode: 'platform' }),
+    });
+    assert.equal(defaulted.status, 201);
+    assert.equal(app.calls.create[1]?.input.name, 'Defaulted key');
+    assert.equal(app.calls.create[1]?.input.modelScopes, undefined);
+    assert.equal(app.calls.create[1]?.input.supplyMode, 'platform');
+
+    const nullScopes = await fetch(`${app.base}/tenants/tenant-1/projects/project-1/keys`, {
+      method: 'POST',
+      headers: { ...authHeaders(), origin: app.origin, 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Null scopes', supplyMode: 'platform', modelScopes: null }),
+    });
+    assert.equal(nullScopes.status, 400);
+    assert.equal(app.calls.create.length, 2);
+
     const listed = await fetch(`${app.base}/tenants/tenant-1/projects/project-1/keys`, {
       headers: { cookie: SESSION_COOKIE },
     });

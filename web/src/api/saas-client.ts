@@ -254,7 +254,8 @@ export type CreatedApiKey = ApiKeyMetadata & { secret: string };
 
 export interface CreateApiKeyInput {
   name: string;
-  modelScopes: string[];
+  /** Omitted lets the server default to the entitlement's full model set. */
+  modelScopes?: string[];
   supplyMode: ApiKeySupplyMode;
   /** Omitted preserves the backend's member default; IDs are never caller-selected. */
   principalKind?: ApiKeyPrincipalKind;

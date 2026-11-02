@@ -424,6 +424,25 @@ test('API key create preserves omitted member default and sends only the explici
   }
 });
 
+test('API key create without modelScopes forwards the omission so the server applies its default', async () => {
+  const calls: unknown[] = [];
+  globalThis.fetch = async (_input, init) => {
+    calls.push(init ?? {});
+    return keyResponse({ ...keyPrincipalFixture('member'), secret: 'unit-one-time-secret' });
+  };
+  const created = await saasClientModule.saasClient.createApiKey('tenant-one', 'project-one', {
+    name: 'unit key',
+    supplyMode: 'platform',
+  });
+  assert.equal(created.executionPrincipalType, 'member');
+  // The wire body must not carry a modelScopes field at all — the server
+  // reads omission as "default to the entitlement's full model set" (M1-L).
+  assert.deepEqual(JSON.parse(String((calls[0] as { body?: unknown }).body)), {
+    name: 'unit key',
+    supplyMode: 'platform',
+  });
+});
+
 test('API key create rejects an invalid principal selector locally and a contradictory successful response', async () => {
   let calls = 0;
   const input = {

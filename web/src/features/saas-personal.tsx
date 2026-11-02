@@ -225,8 +225,10 @@ function PersonalKeys({ data, compact = false }: { data: PersonalData; compact?:
   const [secretDraft, setSecretDraft] = useState('');
   const [configuration, setConfiguration] = useState<ConfigurationState>();
   const generation = useRef(0);
-  const defaultScopes = keys.data?.find((key) => key.status === 'active' && key.supplyMode === 'platform')?.modelScopes ?? [];
-  const canCreate = Boolean(tenant && project && canManage && defaultScopes.length > 0 && !createBusy);
+  // Omitted modelScopes let the server default to the entitlement's full
+  // model set (M1-L) — no scope ceremony, and no dependency on an existing
+  // platform key to copy scopes from.
+  const canCreate = Boolean(tenant && project && canManage && !createBusy);
 
   async function beginConfiguration(key: ApiKeyMetadata, secret: string) {
     const current = ++generation.current;
@@ -249,7 +251,6 @@ function PersonalKeys({ data, compact = false }: { data: PersonalData; compact?:
     try {
       const created: CreatedApiKey = await saasClient.createApiKey(tenant.id, project.id, {
         name: name.trim() || `我的 Key ${(keys.data?.length ?? 0) + 1}`,
-        modelScopes: defaultScopes,
         supplyMode: 'platform',
       });
       setName('');
@@ -279,10 +280,6 @@ function PersonalKeys({ data, compact = false }: { data: PersonalData; compact?:
       <div className="actions"><button className="primary" type="submit" disabled={!canCreate}>{createBusy ? '创建中…' : '创建 Key'}</button></div>
     </form> : <p className="muted">当前角色不能创建 Key。</p>}
     <State loading={canManage && (data.tenants.isPending || data.projects.isPending || keys.isPending)} error={data.tenants.error || data.projects.error || keys.error}>
-      {keys.isSuccess && defaultScopes.length === 0 && <div className="notice" role="status">
-        <strong>默认模型组尚未向此页面开放</strong>
-        <span>现有创建接口需要明确的模型列表；首个 Key 创建前又无法调用 /v1/models。请暂时使用“高级”创建，或联系平台完成默认模型接入。</span>
-      </div>}
       {configuration && <ClientConfiguration configuration={configuration} baseUrl={connection.data?.apiBaseUrl ?? ''}
         onRetry={() => { void beginConfiguration(configuration.key, configuration.secret); }} onClose={closeConfiguration} />}
       {keys.data?.length === 0 ? <div className="empty">还没有 Key。创建后即可复制客户端配置。</div> : <div className="personal-key-list">

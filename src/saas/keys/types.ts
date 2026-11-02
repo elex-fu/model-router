@@ -41,8 +41,13 @@ export interface SupplyProfileResolver {
 
 export interface CreateApiKeyInput {
   readonly name: string;
-  /** An explicit non-empty subset of the resolver's allowed model set. */
-  readonly modelScopes: readonly string[];
+  /**
+   * An explicit non-empty subset of the resolver's allowed model set.
+   * Omitted (undefined) defaults to the resolver's full allowed set, so a
+   * personal key creation needs no model ceremony; an empty array still
+   * rejects, and an explicit list still cannot widen the entitlement.
+   */
+  readonly modelScopes?: readonly string[];
   /** The client may select the supply mode, but not its backing IDs. */
   readonly supplyMode: SupplyMode;
   /** Selects the execution principal; its ID is always resolved from the authorized context. */

@@ -88,7 +88,10 @@ function nonEmptyString(value: unknown, name: string): string {
   return value;
 }
 
-function modelScopes(value: unknown): string[] {
+function modelScopes(value: unknown): string[] | undefined {
+  // Omitted scopes default to the resolver's full allowed set (M1-L);
+  // null is not omission and still fails validation.
+  if (value === undefined) return undefined;
   if (!Array.isArray(value) || value.length === 0 || value.some((item) => typeof item !== 'string' || !item.trim())) {
     throw new HttpError(400, 'INVALID_BODY', 'modelScopes must be a non-empty array of strings');
   }
@@ -477,7 +480,7 @@ export function createSaasKeyHandler(options: SaasKeyHttpOptions): SaasKeyHttpHa
         const body = parseStrictObject(
           await readJson(req),
           ['name', 'modelScopes', 'supplyMode', 'principalKind', 'expiresAt'],
-          ['name', 'modelScopes', 'supplyMode'],
+          ['name', 'supplyMode'],
         );
         const expiresAt = Object.hasOwn(body, 'expiresAt') ? body.expiresAt : undefined;
         if (expiresAt !== undefined && expiresAt !== null && typeof expiresAt !== 'string') {

@@ -27,6 +27,10 @@ test('invited customer registers, logs in, creates a scoped token, rotates and r
       await page.getByLabel('邮箱', { exact: true }).fill('owner@customer-e2e.test');
       await page.getByLabel('密码', { exact: true }).fill('customer-e2e-owner-password');
       await page.getByRole('button', { name: '登录', exact: true }).click();
+      // The personal-first home now owns /console; the workspace console and
+      // its invitation panel live at /console/workspace.
+      await expect(page.getByRole('heading', { name: '我的控制台', exact: true })).toBeVisible();
+      await page.getByRole('link', { name: '工作空间', exact: true }).click();
       await expect(page.getByRole('heading', { name: '客户控制台', exact: true })).toBeVisible();
       await page.getByRole('button', { name: '邀请成员', exact: true }).click();
       await page.getByLabel('成员邮箱').fill(email);
@@ -66,7 +70,7 @@ test('invited customer registers, logs in, creates a scoped token, rotates and r
       await guest.getByLabel('邮箱', { exact: true }).fill(email);
       await guest.getByLabel('密码', { exact: true }).fill(password);
       await guest.getByRole('button', { name: '登录', exact: true }).click();
-      await expect(guest.getByRole('heading', { name: '客户控制台', exact: true })).toBeVisible();
+      await expect(guest.getByRole('heading', { name: '我的控制台', exact: true })).toBeVisible();
       const tenantResponse = await guest.request.get(`${app.origin}/console/api/v1/tenants`);
       expect((await tenantResponse.json()).data).toEqual([
         expect.objectContaining({ id: app.tenant.id, role: 'developer' }),
@@ -75,7 +79,9 @@ test('invited customer registers, logs in, creates a scoped token, rotates and r
       expect((await projectResponse.json()).data).toEqual([
         expect.objectContaining({ id: app.tenant.defaultProjectId, role: 'developer' }),
       ]);
-      await guest.getByRole('link', { name: 'API Keys', exact: true }).click();
+      // The advanced key page (explicit scopes + supply mode) now sits behind
+      // the 高级 link on the personal home, not the old "API Keys" nav entry.
+      await guest.getByRole('link', { name: '高级', exact: true }).click();
       await expect(guest.getByRole('heading', { name: '新建 API Key', exact: true })).toBeVisible();
     });
 

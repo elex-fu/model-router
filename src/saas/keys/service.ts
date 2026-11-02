@@ -502,7 +502,10 @@ function normalizeName(value: unknown): string {
   return name;
 }
 
-function normalizeScopes(value: unknown): string[] {
+function normalizeScopes(value: unknown): string[] | undefined {
+  // Omitted scopes mean "default to the resolver's full allowed set" (M1-L);
+  // the defaulting itself happens inside the transaction after resolve().
+  if (value === undefined) return undefined;
   if (!Array.isArray(value) || value.length === 0 || value.length > MAX_SCOPE_COUNT) {
     fail(400, 'KEY_INVALID_INPUT', 'modelScopes must be a non-empty array');
   }
@@ -1119,7 +1122,7 @@ export class KeyService {
     assertContext(context);
     const inputNow = currentDate(this.now);
     const name = normalizeName(input?.name);
-    const scopes = normalizeScopes(input?.modelScopes);
+    const requestedScopes = normalizeScopes(input?.modelScopes);
     const mode = supplyMode(input?.supplyMode);
     const executionPrincipalType = principalKind(input?.principalKind);
     const expiresAt = normalizeExpiry(input?.expiresAt, inputNow);
@@ -1141,6 +1144,14 @@ export class KeyService {
       if (resolution.mode !== mode) {
         fail(503, 'KEY_PROFILE_INVALID', 'The supply profile entitlement does not match the requested mode');
       }
+      // Omitted scopes default to the resolver's full allowed set (M1-L): a
+      // personal key creation needs no model ceremony. The default mirrors
+      // the entitlement exactly, so assertScopesAllowed stays trivially
+      // satisfied; the MAX_SCOPE_COUNT input cap deliberately does not apply
+      // here — the entitlement is operator-granted, and refusing to create a
+      // key just because the operator granted more than 256 models would
+      // punish the personal flow the default exists for.
+      const scopes = requestedScopes ?? [...resolution.allowedModels];
       assertScopesAllowed(scopes, resolution.allowedModels);
       const providerRights = await this.lockCurrentProviderRights(tx, context, resolution, scopes);
       const binding = await this.lockEntitlementAndProfile(tx, context, resolution, false);
