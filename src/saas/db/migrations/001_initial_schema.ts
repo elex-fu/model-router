@@ -127,6 +127,8 @@ import { FAST_RECEIPT_LIABILITY_RELEASES_SAAS_MIGRATION } from './146_fast_recei
 import { BOUNDED_FAST_GATEWAY_BUDGET_SAAS_MIGRATION } from './147_bounded_fast_gateway_budget.js';
 import { BOUNDED_FAST_GATEWAY_BUDGET_LIMIT_SEARCH_PATH_SAAS_MIGRATION } from './148_bounded_fast_gateway_budget_limit_search_path.js';
 import { FAST_GATEWAY_RETENTION_SAAS_MIGRATION } from './149_fast_gateway_retention.js';
+import { BULK_ACCOUNT_IMPORT_SAAS_MIGRATION } from './150_bulk_account_import.js';
+import { PROVIDER_ACCOUNT_COST_SAAS_MIGRATION } from './151_provider_account_cost.js';
 
 export interface SaasMigration {
   version: number;
@@ -820,4 +822,6 @@ export const SAAS_MIGRATIONS: readonly SaasMigration[] = [
   // retention task's transaction-local flag, and add the tenant/time indexes
   // retention and reconciliation scans need once intents accumulate.
   FAST_GATEWAY_RETENTION_SAAS_MIGRATION,
+  BULK_ACCOUNT_IMPORT_SAAS_MIGRATION,
+  PROVIDER_ACCOUNT_COST_SAAS_MIGRATION,
 ];
