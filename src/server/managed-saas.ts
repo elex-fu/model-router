@@ -72,6 +72,11 @@ import {
   registrationDefaultAccessConfigFromEnv,
 } from '../saas/identity/registration-default-access-service.js';
 import {
+  type RegistrationContractTestPort,
+  RegistrationDispatchCompletionService,
+  registrationDispatchCompletionConfigFromEnv,
+} from '../saas/identity/registration-dispatch-completion-service.js';
+import {
   parseRegistrationAdmissionSettings,
   type RegistrationAdmissionSettings,
   resolveRegistrationAdmissionSettings,
@@ -606,6 +611,11 @@ export interface ManagedSaasStartOptions {
   webDistPath?: string;
   customerSessionTtlSeconds?: number;
   platformSessionTtlSeconds?: number;
+  /**
+   * Trusted runner that actually executes registration route contract tests.
+   * Without it, enabled dispatch completion fails closed with ATTESTATION_REQUIRED.
+   */
+  registrationContractTests?: RegistrationContractTestPort;
   /** Injectable PG seam; the default is the production PostgreSQL pool. */
   createDatabase?: (options: { connectionString: string }) => ManagedSaasDatabase;
   pingDatabase?: (database: ManagedSaasDatabase) => Promise<void>;
@@ -2972,6 +2982,14 @@ export async function startManagedSaasServer(
         defaultAccess: new RegistrationDefaultAccessService({
           database,
           config: registrationDefaultAccessConfigFromEnv(process.env),
+        }),
+        dispatchCompletion: new RegistrationDispatchCompletionService({
+          database,
+          config: registrationDispatchCompletionConfigFromEnv(environment),
+          ...(commercialTrust ?? {}),
+          ...(options.registrationContractTests === undefined
+            ? {}
+            : { contractTests: options.registrationContractTests }),
         }),
         affiliate: new MarketingRegistrationRewards({
           database,

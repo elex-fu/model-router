@@ -8,6 +8,7 @@ import type { EmailVerificationService } from './email-verification-service.js';
 import { EmailVerificationError, normalizeEmailCanonical } from './email-verification-service.js';
 import { hashPassword } from './password.js';
 import type { RegistrationDefaultAccessPort } from './registration-default-access-service.js';
+import type { RegistrationDispatchCompletionPort } from './registration-dispatch-completion-service.js';
 import type { RegistrationAdmissionSettings } from './registration-settings.js';
 import { isEmailDomainAdmitted, parseRegistrationAdmissionSettings } from './registration-settings.js';
 import type { CaptchaProof } from './turnstile-service.js';
@@ -127,6 +128,8 @@ export interface RegistrationServiceOptions {
   readonly affiliate?: RegistrationAffiliatePort;
   /** Optional server-configured platform supply bootstrap after tenant creation. */
   readonly defaultAccess?: RegistrationDefaultAccessPort;
+  /** Optional route, commercial authority, and capacity completion after default access. */
+  readonly dispatchCompletion?: RegistrationDispatchCompletionPort;
   readonly now?: () => Date;
   /** Post-commit provisioning failures (never fatal); defaults to console.error. */
   readonly onProvisioningError?: (error: unknown, stage: string) => void;
@@ -407,6 +410,13 @@ export class RegistrationService {
         await this.options.defaultAccess.provision({ tenantId });
       } catch (error) {
         this.onProvisioningError(error, 'default_access');
+      }
+    }
+    if (this.options.dispatchCompletion !== undefined) {
+      try {
+        await this.options.dispatchCompletion.complete({ tenantId });
+      } catch (error) {
+        this.onProvisioningError(error, 'dispatch_completion');
       }
     }
     if (this.options.affiliate === undefined || (inviteCode === undefined && inviterTenantId === null)) return;

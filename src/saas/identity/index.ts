@@ -61,6 +61,27 @@ export type {
 } from './register-service.js';
 export { RegistrationError, RegistrationService } from './register-service.js';
 export type {
+  RegistrationDefaultAccessConfig,
+  RegistrationDefaultAccessPort,
+} from './registration-default-access-service.js';
+export {
+  REGISTRATION_DEFAULT_ACCESS_ENV,
+  RegistrationDefaultAccessError,
+  RegistrationDefaultAccessService,
+  registrationDefaultAccessConfigFromEnv,
+} from './registration-default-access-service.js';
+export type {
+  RegistrationContractTestPort,
+  RegistrationDispatchCompletionConfig,
+  RegistrationDispatchCompletionPort,
+} from './registration-dispatch-completion-service.js';
+export {
+  REGISTRATION_DISPATCH_COMPLETION_ENV,
+  RegistrationDispatchCompletionError,
+  RegistrationDispatchCompletionService,
+  registrationDispatchCompletionConfigFromEnv,
+} from './registration-dispatch-completion-service.js';
+export type {
   RegistrationAdmissionSettings,
   RegistrationMode,
   RegistrationRewardSettings,

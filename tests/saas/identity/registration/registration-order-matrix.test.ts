@@ -12,6 +12,7 @@ import type {
 } from '../../../../src/saas/identity/register-service.js';
 import { RegistrationError, RegistrationService } from '../../../../src/saas/identity/register-service.js';
 import type { RegistrationDefaultAccessPort } from '../../../../src/saas/identity/registration-default-access-service.js';
+import type { RegistrationDispatchCompletionPort } from '../../../../src/saas/identity/registration-dispatch-completion-service.js';
 import type { RegistrationAdmissionSettings } from '../../../../src/saas/identity/registration-settings.js';
 import { SaasIdentityService } from '../../../../src/saas/identity/service.js';
 import type { CaptchaProof } from '../../../../src/saas/identity/turnstile-service.js';
@@ -86,6 +87,7 @@ function fixture(
     captcha?: CaptchaProof;
     affiliate?: RegistrationAffiliatePort;
     defaultAccess?: RegistrationDefaultAccessPort;
+    dispatchCompletion?: RegistrationDispatchCompletionPort;
     onProvisioningError?: (error: unknown, stage: string) => void;
     identity?: Partial<RegistrationIdentityDirectory>;
   } = {},
@@ -123,6 +125,7 @@ function fixture(
     sessionTtlSeconds: 900,
     ...(overrides.affiliate === undefined ? {} : { affiliate: overrides.affiliate }),
     ...(overrides.defaultAccess === undefined ? {} : { defaultAccess: overrides.defaultAccess }),
+    ...(overrides.dispatchCompletion === undefined ? {} : { dispatchCompletion: overrides.dispatchCompletion }),
     ...(overrides.onProvisioningError === undefined ? {} : { onProvisioningError: overrides.onProvisioningError }),
     now,
   } as RegistrationServiceOptions);
@@ -434,6 +437,42 @@ test('default access failure uses its provisioning stage and does not block affi
   assert.ok(session.token);
   assert.deepEqual(events, ['default_access', 'affiliate']);
   assert.deepEqual(errors, ['default_access']);
+});
+
+test('dispatch completion follows default access and its failure does not block registration or affiliate', async () => {
+  const events: string[] = [];
+  const errors: string[] = [];
+  const fxt = fixture({
+    settings: { emailVerificationRequired: false },
+    defaultAccess: {
+      provision: async () => {
+        events.push('default_access');
+      },
+    },
+    dispatchCompletion: {
+      complete: async () => {
+        events.push('dispatch_completion');
+        throw new Error('unit attestation unavailable');
+      },
+    },
+    affiliate: {
+      resolveInviteCode: async () => INVITER_TENANT,
+      completeRegistrationAttribution: async () => {
+        events.push('affiliate');
+      },
+    },
+    onProvisioningError: (_error, stage) => {
+      errors.push(stage);
+    },
+  });
+  const session = await fxt.service.register({
+    email: EMAIL,
+    password: PASSWORD,
+    inviteCode: 'ABC234WXYZ89',
+  });
+  assert.ok(session.token);
+  assert.deepEqual(events, ['default_access', 'dispatch_completion', 'affiliate']);
+  assert.deepEqual(errors, ['dispatch_completion']);
 });
 
 test('admission descriptor exposes the switch surface for the register view', () => {
