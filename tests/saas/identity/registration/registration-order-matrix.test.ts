@@ -11,6 +11,7 @@ import type {
   RegistrationServiceOptions,
 } from '../../../../src/saas/identity/register-service.js';
 import { RegistrationError, RegistrationService } from '../../../../src/saas/identity/register-service.js';
+import type { RegistrationDefaultAccessPort } from '../../../../src/saas/identity/registration-default-access-service.js';
 import type { RegistrationAdmissionSettings } from '../../../../src/saas/identity/registration-settings.js';
 import { SaasIdentityService } from '../../../../src/saas/identity/service.js';
 import type { CaptchaProof } from '../../../../src/saas/identity/turnstile-service.js';
@@ -84,6 +85,8 @@ function fixture(
     settings?: Partial<RegistrationAdmissionSettings>;
     captcha?: CaptchaProof;
     affiliate?: RegistrationAffiliatePort;
+    defaultAccess?: RegistrationDefaultAccessPort;
+    onProvisioningError?: (error: unknown, stage: string) => void;
     identity?: Partial<RegistrationIdentityDirectory>;
   } = {},
 ): {
@@ -119,6 +122,8 @@ function fixture(
     settings: settings(overrides.settings),
     sessionTtlSeconds: 900,
     ...(overrides.affiliate === undefined ? {} : { affiliate: overrides.affiliate }),
+    ...(overrides.defaultAccess === undefined ? {} : { defaultAccess: overrides.defaultAccess }),
+    ...(overrides.onProvisioningError === undefined ? {} : { onProvisioningError: overrides.onProvisioningError }),
     now,
   } as RegistrationServiceOptions);
   return {
@@ -377,6 +382,58 @@ test('provisioning failures never fail the registration', async () => {
     errors.map(({ stage }) => stage),
     ['tenant'],
   );
+});
+
+test('default access runs without affiliate and ignores client-supplied supply choices', async () => {
+  const calls: Array<{ tenantId: string }> = [];
+  const fxt = fixture({
+    settings: { emailVerificationRequired: false },
+    defaultAccess: {
+      provision: async (input) => {
+        calls.push(input);
+      },
+    },
+  });
+  const input = {
+    email: EMAIL,
+    password: PASSWORD,
+    poolId: 'client-selected-pool',
+    modelScopes: ['client-selected-model'],
+  };
+  const session = await fxt.service.register(input);
+  assert.ok(session.token);
+  assert.deepEqual(calls, [{ tenantId: String(fxt.database.state.tenants[0]?.id) }]);
+});
+
+test('default access failure uses its provisioning stage and does not block affiliate or session', async () => {
+  const events: string[] = [];
+  const errors: string[] = [];
+  const fxt = fixture({
+    settings: { emailVerificationRequired: false },
+    defaultAccess: {
+      provision: async () => {
+        events.push('default_access');
+        throw new Error('unit default access failure');
+      },
+    },
+    affiliate: {
+      resolveInviteCode: async () => INVITER_TENANT,
+      completeRegistrationAttribution: async () => {
+        events.push('affiliate');
+      },
+    },
+    onProvisioningError: (_error, stage) => {
+      errors.push(stage);
+    },
+  });
+  const session = await fxt.service.register({
+    email: EMAIL,
+    password: PASSWORD,
+    inviteCode: 'ABC234WXYZ89',
+  });
+  assert.ok(session.token);
+  assert.deepEqual(events, ['default_access', 'affiliate']);
+  assert.deepEqual(errors, ['default_access']);
 });
 
 test('admission descriptor exposes the switch surface for the register view', () => {

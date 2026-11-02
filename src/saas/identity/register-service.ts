@@ -7,6 +7,7 @@ import type { SaasDatabase } from '../db/types.js';
 import type { EmailVerificationService } from './email-verification-service.js';
 import { EmailVerificationError, normalizeEmailCanonical } from './email-verification-service.js';
 import { hashPassword } from './password.js';
+import type { RegistrationDefaultAccessPort } from './registration-default-access-service.js';
 import type { RegistrationAdmissionSettings } from './registration-settings.js';
 import { isEmailDomainAdmitted, parseRegistrationAdmissionSettings } from './registration-settings.js';
 import type { CaptchaProof } from './turnstile-service.js';
@@ -124,6 +125,8 @@ export interface RegistrationServiceOptions {
   readonly settingsResolver?: () => Promise<RegistrationAdmissionSettings>;
   readonly sessionTtlSeconds: number;
   readonly affiliate?: RegistrationAffiliatePort;
+  /** Optional server-configured platform supply bootstrap after tenant creation. */
+  readonly defaultAccess?: RegistrationDefaultAccessPort;
   readonly now?: () => Date;
   /** Post-commit provisioning failures (never fatal); defaults to console.error. */
   readonly onProvisioningError?: (error: unknown, stage: string) => void;
@@ -377,9 +380,9 @@ export class RegistrationService {
 
   /**
    * Post-commit provisioning: the personal tenant (the wallet/reward anchor
-   * model-router's affiliate surface is tenant-scoped) and the affiliate
-   * attribution + rewards. Every failure is reported and swallowed — the
-   * account exists and can log in regardless.
+   * model-router's affiliate surface is tenant-scoped), optional default platform
+   * supply, and affiliate attribution + rewards. Every failure is reported and
+   * swallowed — the account exists and can log in regardless.
    */
   private async provision(
     userId: string,
@@ -398,6 +401,13 @@ export class RegistrationService {
     } catch (error) {
       this.onProvisioningError(error, 'tenant');
       return;
+    }
+    if (this.options.defaultAccess !== undefined) {
+      try {
+        await this.options.defaultAccess.provision({ tenantId });
+      } catch (error) {
+        this.onProvisioningError(error, 'default_access');
+      }
     }
     if (this.options.affiliate === undefined || (inviteCode === undefined && inviterTenantId === null)) return;
     try {
