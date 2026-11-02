@@ -60,6 +60,14 @@ export const MODEL_ROUTER_SAAS_PROVIDER_CREDENTIAL_KMS_KEY_ID =
   'MODEL_ROUTER_SAAS_PROVIDER_CREDENTIAL_KMS_KEY_ID' as const;
 export const MODEL_ROUTER_SAAS_DEPLOYMENT_ID = 'MODEL_ROUTER_SAAS_DEPLOYMENT_ID' as const;
 export const MODEL_ROUTER_SAAS_ENVIRONMENT_ID = 'MODEL_ROUTER_SAAS_ENVIRONMENT_ID' as const;
+/**
+ * HMAC key for user-risk client-address digests (migration 153 observation
+ * pipeline). Env-only on purpose — the control plane holds no unsealing KMS,
+ * so the settings store never sees this value (registration SMTP posture).
+ * Gateway/combined workloads only; absence simply disables observation
+ * capture. Hex (≥64 chars) or base64/base64url (≥32 decoded bytes).
+ */
+export const MODEL_ROUTER_SAAS_USER_RISK_ADDRESS_HMAC_KEY = 'MODEL_ROUTER_SAAS_USER_RISK_ADDRESS_HMAC_KEY' as const;
 
 export const MODEL_ROUTER_SAAS_CUSTOMER_BIND_ADDRESS = 'MODEL_ROUTER_SAAS_CUSTOMER_BIND_ADDRESS' as const;
 export const MODEL_ROUTER_SAAS_CUSTOMER_PORT = 'MODEL_ROUTER_SAAS_CUSTOMER_PORT' as const;
@@ -78,6 +86,9 @@ export const MODEL_ROUTER_SAAS_REDIS_PROVIDER_MODULE = MODEL_ROUTER_SAAS_REDIS_P
 
 function deepFreeze<T>(value: T): T {
   if (value === null || typeof value !== 'object' || Object.isFrozen(value)) return value;
+  // ArrayBuffer views (e.g. the user-risk HMAC key) cannot be frozen while
+  // they hold elements; the surrounding config freeze already pins the field.
+  if (ArrayBuffer.isView(value)) return value;
 
   Object.freeze(value);
   for (const child of Object.values(value as Record<string, unknown>)) deepFreeze(child);
@@ -120,6 +131,7 @@ export const DEPLOYMENT_ENV_VARS = deepFreeze({
     providerCredentialKmsKeyId: MODEL_ROUTER_SAAS_PROVIDER_CREDENTIAL_KMS_KEY_ID,
     deploymentId: MODEL_ROUTER_SAAS_DEPLOYMENT_ID,
     environmentId: MODEL_ROUTER_SAAS_ENVIRONMENT_ID,
+    userRiskAddressHmacKey: MODEL_ROUTER_SAAS_USER_RISK_ADDRESS_HMAC_KEY,
   },
   listeners: {
     customer: {
@@ -197,6 +209,7 @@ export const SAAS_DEPLOYMENT_ENV_NAMES = deepFreeze([
   MODEL_ROUTER_SAAS_PROVIDER_CREDENTIAL_KMS_KEY_ID,
   MODEL_ROUTER_SAAS_DEPLOYMENT_ID,
   MODEL_ROUTER_SAAS_ENVIRONMENT_ID,
+  MODEL_ROUTER_SAAS_USER_RISK_ADDRESS_HMAC_KEY,
   MODEL_ROUTER_SAAS_CUSTOMER_BIND_ADDRESS,
   MODEL_ROUTER_SAAS_CUSTOMER_PORT,
   MODEL_ROUTER_SAAS_CUSTOMER_ORIGIN,
@@ -275,6 +288,12 @@ export interface ManagedSaasDeploymentConfig {
   readonly deploymentId: string;
   /** Stable non-secret AAD environment identity used when sealing or unsealing provider credentials. */
   readonly environmentId: string;
+  /**
+   * HMAC key digesting client addresses for user-risk observations. Present
+   * only when the deployment explicitly configures it; absence leaves
+   * observation capture (and therefore anomaly detection input) disabled.
+   */
+  readonly userRiskAddressHmacKey?: Uint8Array;
   /** Opaque KMS key reference; omitted when platform credential sealing is disabled. */
   readonly providerCredentialKmsKeyId?: string;
   /** Dedicated ReEncrypt-only KMS module; supported only by the control-plane workload. */
@@ -297,6 +316,7 @@ export type DeploymentConfigErrorCode =
   | 'UNEXPECTED_WORKLOAD_SETTING'
   | 'INVALID_CREDENTIAL_CONTEXT'
   | 'INVALID_PLUGIN_SETTING'
+  | 'INVALID_USER_RISK_KEY'
   | 'INVALID_BIND_ADDRESS'
   | 'INVALID_PORT'
   | 'INVALID_ORIGIN'
@@ -467,6 +487,40 @@ function optionalKmsKeyId(environment: DeploymentEnvironment): string | undefine
     );
   }
   return value;
+}
+
+const USER_RISK_KEY_MIN_BYTES = 32;
+const USER_RISK_KEY_MAX_BYTES = 256;
+
+/**
+ * Optional user-risk client-address HMAC key: hex or base64/base64url that
+ * decodes to 32-256 bytes. Failure messages identify the variable, never the
+ * key material. Rotation is a re-deploy event — stored digests are unversioned,
+ * so rotating the key invalidates accumulated address history.
+ */
+function optionalUserRiskAddressHmacKey(environment: DeploymentEnvironment): Uint8Array | undefined {
+  const name = MODEL_ROUTER_SAAS_USER_RISK_ADDRESS_HMAC_KEY;
+  const value = environment[name];
+  if (value === undefined) return undefined;
+  const grammar = 'hex or base64 HMAC key decoding to 32-256 bytes';
+  if (typeof value !== 'string') {
+    invalid('INVALID_USER_RISK_KEY', `${name} must be a ${grammar}.`, name);
+  }
+  let bytes: Uint8Array;
+  if (/^[0-9a-fA-F]+$/.test(value)) {
+    if (value.length % 2 !== 0 || value.length < USER_RISK_KEY_MIN_BYTES * 2) {
+      invalid('INVALID_USER_RISK_KEY', `${name} hex ${grammar}.`, name);
+    }
+    bytes = Buffer.from(value, 'hex');
+  } else if (/^[A-Za-z0-9+/_-]+={0,2}$/.test(value)) {
+    bytes = Buffer.from(value.replaceAll('-', '+').replaceAll('_', '/'), 'base64');
+  } else {
+    return invalid('INVALID_USER_RISK_KEY', `${name} must be a ${grammar}.`, name);
+  }
+  if (bytes.length < USER_RISK_KEY_MIN_BYTES || bytes.length > USER_RISK_KEY_MAX_BYTES) {
+    return invalid('INVALID_USER_RISK_KEY', `${name} must be a ${grammar}.`, name);
+  }
+  return new Uint8Array(bytes);
 }
 
 const WORKLOAD_ROLE_DATABASE_ENV_NAMES = {
@@ -801,6 +855,14 @@ function parseManagedSaasDeployment(environment: DeploymentEnvironment): Managed
       'UNEXPECTED_WORKLOAD_SETTING',
       `${MODEL_ROUTER_SAAS_CUSTOMER_PASSKEY_CAPABILITY_MODULE} is control-plane-only.`,
       MODEL_ROUTER_SAAS_CUSTOMER_PASSKEY_CAPABILITY_MODULE,
+    );
+  }
+  const userRiskAddressHmacKey = optionalUserRiskAddressHmacKey(environment);
+  if (userRiskAddressHmacKey !== undefined && workloadRole !== 'combined' && workloadRole !== 'gateway') {
+    invalid(
+      'UNEXPECTED_WORKLOAD_SETTING',
+      `${MODEL_ROUTER_SAAS_USER_RISK_ADDRESS_HMAC_KEY} is gateway-only.`,
+      MODEL_ROUTER_SAAS_USER_RISK_ADDRESS_HMAC_KEY,
     );
   }
   if (!validationWorker && isPresent(environment, MODEL_ROUTER_SAAS_CREDENTIAL_VALIDATION_TARGETS_MODULE)) {
@@ -1167,6 +1229,7 @@ function parseManagedSaasDeployment(environment: DeploymentEnvironment): Managed
       ) ??
       'development',
     ...(providerCredentialKmsKeyId === undefined ? {} : { providerCredentialKmsKeyId }),
+    ...(userRiskAddressHmacKey === undefined ? {} : { userRiskAddressHmacKey }),
     listeners: {
       ...Object.fromEntries(Object.entries(parsedListeners).map(([name, parsed]) => [name, parsed?.config])),
     },

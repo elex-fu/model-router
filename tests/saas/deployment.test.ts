@@ -17,6 +17,7 @@ import {
   MODEL_ROUTER_SAAS_PROVIDER_CREDENTIAL_KMS_KEY_ID,
   MODEL_ROUTER_SAAS_REDIS_PROVIDER,
   MODEL_ROUTER_SAAS_REDIS_URL,
+  MODEL_ROUTER_SAAS_USER_RISK_ADDRESS_HMAC_KEY,
   MODEL_ROUTER_SAAS_VALIDATION_WORKER_DATABASE_URL,
   MODEL_ROUTER_SAAS_WORKLOAD_ROLE,
   managedSaasListenerNames,
@@ -1025,5 +1026,136 @@ test('sanitizes database and provider values from validation errors', () => {
     assert.ok(error instanceof DeploymentConfigError);
     assert.equal(error.message.includes(databaseSecret), false);
     assert.equal(error.message.includes(providerSecret), false);
+  }
+});
+
+test('user risk address HMAC key is an optional gateway-scoped declaration', () => {
+  assert.equal(DEPLOYMENT_ENV_VARS.saas.userRiskAddressHmacKey, MODEL_ROUTER_SAAS_USER_RISK_ADDRESS_HMAC_KEY);
+  assert.ok(SAAS_DEPLOYMENT_ENV_NAMES.includes(MODEL_ROUTER_SAAS_USER_RISK_ADDRESS_HMAC_KEY));
+
+  // Absent: no key on the frozen contract, feature stays disabled.
+  for (const environment of [managedEnvironment(), gatewayEnvironment({ NODE_ENV: 'production' })]) {
+    const config = parseDeploymentConfig(environment);
+    assert.equal(config.mode, 'managed-saas');
+    if (config.mode !== 'managed-saas') throw new Error('expected managed-saas');
+    assert.equal(Object.hasOwn(config, 'userRiskAddressHmacKey'), false);
+    assert.equal(config.userRiskAddressHmacKey, undefined);
+  }
+
+  // Hex (64 chars = 32 bytes) and base64/base64url forms decode to the same bytes.
+  const hexKey = 'a'.repeat(64);
+  const raw = Buffer.alloc(32);
+  for (let index = 0; index < raw.length; index += 1) raw[index] = index;
+  const base64Key = raw.toString('base64');
+  const base64UrlKey = raw.toString('base64url');
+  for (const value of [hexKey, `0f`.repeat(32), base64Key, base64UrlKey]) {
+    for (const environment of [managedEnvironment(), gatewayEnvironment()]) {
+      const config = parseDeploymentConfig({ ...environment, [MODEL_ROUTER_SAAS_USER_RISK_ADDRESS_HMAC_KEY]: value });
+      assert.equal(config.mode, 'managed-saas');
+      if (config.mode !== 'managed-saas') throw new Error('expected managed-saas');
+      const key = config.userRiskAddressHmacKey;
+      assert.ok(key instanceof Uint8Array);
+      assert.ok(key.length >= 32);
+    }
+  }
+  const hexConfig = parseDeploymentConfig(
+    managedEnvironment({ [MODEL_ROUTER_SAAS_USER_RISK_ADDRESS_HMAC_KEY]: hexKey }),
+  );
+  if (hexConfig.mode !== 'managed-saas') throw new Error('expected managed-saas');
+  assert.deepEqual(Buffer.from(hexConfig.userRiskAddressHmacKey ?? new Uint8Array()), Buffer.alloc(32, 0xaa));
+  const base64Config = parseDeploymentConfig(
+    managedEnvironment({ [MODEL_ROUTER_SAAS_USER_RISK_ADDRESS_HMAC_KEY]: base64Key }),
+  );
+  if (base64Config.mode !== 'managed-saas') throw new Error('expected managed-saas');
+  assert.deepEqual(Buffer.from(base64Config.userRiskAddressHmacKey ?? new Uint8Array()), raw);
+});
+
+test('user risk address HMAC key rejects malformed values without echoing them', () => {
+  const secretValue = 'user-risk-key-material-that-must-not-leak';
+  const cases = [
+    '',
+    ' ',
+    'a'.repeat(63),
+    'abc',
+    `0${'a'.repeat(62)}`,
+    secretValue,
+    `${secretValue}!!`,
+    `${secretValue}=`,
+    Buffer.alloc(31, 1).toString('base64'),
+    Buffer.alloc(257, 1).toString('base64'),
+  ];
+  for (const value of cases) {
+    assert.throws(
+      () => parseDeploymentConfig(managedEnvironment({ [MODEL_ROUTER_SAAS_USER_RISK_ADDRESS_HMAC_KEY]: value })),
+      (error: unknown) => {
+        assert.ok(error instanceof DeploymentConfigError);
+        assert.equal(error.code, 'INVALID_USER_RISK_KEY');
+        assert.equal(error.variableName, MODEL_ROUTER_SAAS_USER_RISK_ADDRESS_HMAC_KEY);
+        if (value.trim().length > 1) assert.equal(error.message.includes(value), false);
+        return true;
+      },
+      JSON.stringify(value),
+    );
+  }
+});
+
+test('user risk address HMAC key fails closed in local mode and non-gateway workloads', () => {
+  const key = 'a'.repeat(64);
+  assertDeploymentError(
+    () => parseDeploymentConfig({ [MODEL_ROUTER_SAAS_USER_RISK_ADDRESS_HMAC_KEY]: key }),
+    'SAAS_SETTINGS_REQUIRE_MANAGED_MODE',
+  );
+  assertDeploymentError(
+    () =>
+      parseDeploymentConfig({
+        [MODEL_ROUTER_DEPLOYMENT_MODE]: 'local',
+        [MODEL_ROUTER_SAAS_USER_RISK_ADDRESS_HMAC_KEY]: key,
+      }),
+    'LOCAL_MODE_HAS_SAAS_SETTINGS',
+  );
+  const nonGateways = [
+    { label: 'control-plane', environment: managedEnvironment({ [MODEL_ROUTER_SAAS_WORKLOAD_ROLE]: 'control-plane' }) },
+    { label: 'validation-worker', environment: validationWorkerEnvironment() },
+    {
+      label: 'plugin-host',
+      environment: managedEnvironment({
+        [MODEL_ROUTER_SAAS_WORKLOAD_ROLE]: 'plugin-host',
+        [MODEL_ROUTER_SAAS_DATABASE_URL]: undefined,
+        [MODEL_ROUTER_SAAS_CONTROL_PLANE_DATABASE_URL]: undefined,
+        [MODEL_ROUTER_SAAS_GATEWAY_DATABASE_URL]: undefined,
+        [MODEL_ROUTER_SAAS_VALIDATION_WORKER_DATABASE_URL]: undefined,
+        [MODEL_ROUTER_SAAS_REDIS_URL]: undefined,
+        [MODEL_ROUTER_SAAS_REDIS_PROVIDER]: undefined,
+        [MODEL_ROUTER_SAAS_KMS_PROVIDER]: undefined,
+        [SAAS_PROVIDER_CREDENTIAL_SEAL_KMS_MODULE]: undefined,
+        [MODEL_ROUTER_SAAS_PROVIDER_CREDENTIAL_KMS_KEY_ID]: undefined,
+        [DEPLOYMENT_ENV_VARS.listeners.customer.bindAddress]: undefined,
+        [DEPLOYMENT_ENV_VARS.listeners.customer.port]: undefined,
+        [DEPLOYMENT_ENV_VARS.listeners.customer.origin]: undefined,
+        [DEPLOYMENT_ENV_VARS.listeners.platform.bindAddress]: undefined,
+        [DEPLOYMENT_ENV_VARS.listeners.platform.port]: undefined,
+        [DEPLOYMENT_ENV_VARS.listeners.platform.origin]: undefined,
+        [DEPLOYMENT_ENV_VARS.listeners.gateway.bindAddress]: undefined,
+        [DEPLOYMENT_ENV_VARS.listeners.gateway.port]: undefined,
+        [DEPLOYMENT_ENV_VARS.listeners.gateway.origin]: undefined,
+        [DEPLOYMENT_ENV_VARS.saas.pluginHostProviderCredentialDecryptKmsModule]: '@example/plugin-host-kms',
+        [DEPLOYMENT_ENV_VARS.saas.pluginHostInternalToken]: 'x'.repeat(32),
+        [DEPLOYMENT_ENV_VARS.saas.pluginHostBindAddress]: '127.0.0.1',
+        [DEPLOYMENT_ENV_VARS.saas.pluginHostPort]: '3900',
+        [DEPLOYMENT_ENV_VARS.saas.validationWorkerProviderCredentialDecryptKmsModule]: undefined,
+      }),
+    },
+  ];
+  for (const scenario of nonGateways) {
+    assert.throws(
+      () => parseDeploymentConfig({ ...scenario.environment, [MODEL_ROUTER_SAAS_USER_RISK_ADDRESS_HMAC_KEY]: key }),
+      (error: unknown) => {
+        assert.ok(error instanceof DeploymentConfigError);
+        assert.equal(error.code, 'UNEXPECTED_WORKLOAD_SETTING');
+        assert.equal(error.variableName, MODEL_ROUTER_SAAS_USER_RISK_ADDRESS_HMAC_KEY);
+        return true;
+      },
+      scenario.label,
+    );
   }
 });
