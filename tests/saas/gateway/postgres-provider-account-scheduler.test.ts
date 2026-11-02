@@ -748,11 +748,14 @@ test('only scheduler eligibility uses fixed prepared SQL with current values and
       assert.ok(prepared.every(({ statement }) => statement === prepared[0].statement && Object.isFrozen(statement)));
       assert.equal(new Set(prepared.map(({ statement }) => statement.name)).size, 1);
       const statement = prepared[0].statement;
+      // Pinned so any eligibility-SQL drift is a loud test failure rather than
+      // a silent authorization change. 6759bf4 (quota-aware selection) last
+      // changed the statements; re-pin here when eligibility SQL changes again.
       assert.equal(
         createHash('sha256').update(statement.text).digest('hex'),
         mode === 'byok'
-          ? '9b34c495847c2b54256174c5c2d1c6063ed6877e023708dfff4589fe09771993'
-          : 'bc83809c6d04f9c52ac8572fe4b1ed655468ad8861baf00cbb1740d2a7cf0b60',
+          ? 'b34f5e463a326e7b047bfee6de08dfee8be57b5d45d2a4fa3460231884beb298'
+          : 'b6cca0e84d6d08958072a92adf59c340a2fe4ea5fd00e9eb7f2da450af598771',
       );
       assert.equal(
         statement.name,

@@ -49,7 +49,7 @@ if (!selected.length) {
 const env = { ...process.env };
 if (provider) env[`RUN_${provider.toUpperCase().replaceAll('-', '_')}_SMOKE`] = '1';
 console.log(`Running ${selected.length} ${mode} test files${provider ? ` (${provider})` : ''}${concurrency ? ` with concurrency ${concurrency}` : ''}.`);
-const result = spawnSync(process.execPath, ['--test', ...(concurrency ? [`--test-concurrency=${concurrency}`] : []), '--import', 'tsx', '--test-reporter=spec', ...selected], {
+const result = spawnSync(process.execPath, ['--test', ...(concurrency ? [`--test-concurrency=${concurrency}`] : []), '--import', 'tsx', '--import', './scripts/test-css-stub.mjs', '--test-reporter=spec', ...selected], {
   cwd: root,
   env,
   stdio: 'inherit',

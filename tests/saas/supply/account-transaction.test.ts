@@ -130,6 +130,12 @@ class TransactionalAccountDatabase implements SaasDatabase {
         updated_at: updatedAt,
         disabled_at: null,
         revoked_at: null,
+        // b8dadd3 read path: mapAccount reads the ban columns through
+        // nullableTimestamp, which rejects undefined — a missing null here
+        // surfaces as SUPPLY_STORAGE_ERROR.
+        banned_at: null,
+        ban_reason: null,
+        ban_last_error: null,
       });
       return { rows: [], rowCount: 1 };
     }
