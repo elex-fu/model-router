@@ -26,7 +26,9 @@ import {
   getAccountWindowStatsBatch,
   groupAccountIdsByWindowStart,
 } from './postgres-provider-account-window-stats.js';
+import { resolveProviderAccountQuotaWindow } from './provider-account-quota-window.js';
 import {
+  isQuotaAwareStrategyEnabled,
   MAX_HEALTH_OBSERVED_AT_SKEW_MS,
   ProviderAccountScheduler,
   type ProviderAccountSchedulerAffinityBindDecision,
@@ -46,6 +48,7 @@ import {
   type ProviderAccountSchedulerRights,
   type ProviderAccountSchedulerSelectionTrace,
   type ProviderAccountSchedulerWindowCostPort,
+  quotaAwareSnapshotMaxAgeMs,
   resolveMaxHealthAgeMs,
   sameCandidateIdentity,
 } from './provider-account-scheduler.js';
@@ -120,14 +123,28 @@ interface EligibilityRow extends Row {
   account_health_score: unknown;
   account_egress_proxy_quality: unknown;
   /* R7 (migrations 099/100/108): quota-window scheduling signals. */
+  account_codex_5h_used_percent?: unknown;
+  account_codex_7d_used_percent?: unknown;
   account_codex_5h_reset_at?: unknown;
   account_codex_7d_reset_at?: unknown;
   account_codex_usage_updated_at?: unknown;
+  account_claude_5h_utilization?: unknown;
+  account_claude_7d_utilization?: unknown;
+  account_claude_7d_sonnet_utilization?: unknown;
+  account_claude_7d_oi_utilization?: unknown;
   account_claude_5h_reset_at?: unknown;
   account_claude_7d_reset_at?: unknown;
   account_claude_7d_sonnet_reset_at?: unknown;
   account_claude_7d_oi_reset_at?: unknown;
   account_claude_usage_updated_at?: unknown;
+  account_gemini_shared_daily_used?: unknown;
+  account_gemini_shared_daily_limit?: unknown;
+  account_gemini_pro_daily_used?: unknown;
+  account_gemini_pro_daily_limit?: unknown;
+  account_gemini_flash_daily_used?: unknown;
+  account_gemini_flash_daily_limit?: unknown;
+  account_gemini_daily_reset_at?: unknown;
+  account_gemini_usage_updated_at?: unknown;
   account_opencode_go_rolling_5h_reset_at?: unknown;
   account_opencode_go_weekly_reset_at?: unknown;
   account_opencode_go_monthly_reset_at?: unknown;
@@ -365,14 +382,28 @@ SELECT authority_clock.authority_now, product.status AS product_status,
        account.rpm_limit AS account_rpm_limit, account.tpm_limit AS account_tpm_limit,
        health.health_score AS account_health_score,
        egress_proxy.last_probe_quality AS account_egress_proxy_quality,
+       account.codex_5h_used_percent AS account_codex_5h_used_percent,
+       account.codex_7d_used_percent AS account_codex_7d_used_percent,
        account.codex_5h_reset_at AS account_codex_5h_reset_at,
        account.codex_7d_reset_at AS account_codex_7d_reset_at,
        account.codex_usage_updated_at AS account_codex_usage_updated_at,
+       account.claude_5h_utilization AS account_claude_5h_utilization,
+       account.claude_7d_utilization AS account_claude_7d_utilization,
+       account.claude_7d_sonnet_utilization AS account_claude_7d_sonnet_utilization,
+       account.claude_7d_oi_utilization AS account_claude_7d_oi_utilization,
        account.claude_5h_reset_at AS account_claude_5h_reset_at,
        account.claude_7d_reset_at AS account_claude_7d_reset_at,
        account.claude_7d_sonnet_reset_at AS account_claude_7d_sonnet_reset_at,
        account.claude_7d_oi_reset_at AS account_claude_7d_oi_reset_at,
        account.claude_usage_updated_at AS account_claude_usage_updated_at,
+       account.gemini_shared_daily_used AS account_gemini_shared_daily_used,
+       account.gemini_shared_daily_limit AS account_gemini_shared_daily_limit,
+       account.gemini_pro_daily_used AS account_gemini_pro_daily_used,
+       account.gemini_pro_daily_limit AS account_gemini_pro_daily_limit,
+       account.gemini_flash_daily_used AS account_gemini_flash_daily_used,
+       account.gemini_flash_daily_limit AS account_gemini_flash_daily_limit,
+       account.gemini_daily_reset_at AS account_gemini_daily_reset_at,
+       account.gemini_usage_updated_at AS account_gemini_usage_updated_at,
        account.opencode_go_rolling_5h_reset_at AS account_opencode_go_rolling_5h_reset_at,
        account.opencode_go_weekly_reset_at AS account_opencode_go_weekly_reset_at,
        account.opencode_go_monthly_reset_at AS account_opencode_go_monthly_reset_at,
@@ -523,14 +554,28 @@ SELECT authority_clock.authority_now, product.status AS product_status,
        account.rpm_limit AS account_rpm_limit, account.tpm_limit AS account_tpm_limit,
        health.health_score AS account_health_score,
        egress_proxy.last_probe_quality AS account_egress_proxy_quality,
+       account.codex_5h_used_percent AS account_codex_5h_used_percent,
+       account.codex_7d_used_percent AS account_codex_7d_used_percent,
        account.codex_5h_reset_at AS account_codex_5h_reset_at,
        account.codex_7d_reset_at AS account_codex_7d_reset_at,
        account.codex_usage_updated_at AS account_codex_usage_updated_at,
+       account.claude_5h_utilization AS account_claude_5h_utilization,
+       account.claude_7d_utilization AS account_claude_7d_utilization,
+       account.claude_7d_sonnet_utilization AS account_claude_7d_sonnet_utilization,
+       account.claude_7d_oi_utilization AS account_claude_7d_oi_utilization,
        account.claude_5h_reset_at AS account_claude_5h_reset_at,
        account.claude_7d_reset_at AS account_claude_7d_reset_at,
        account.claude_7d_sonnet_reset_at AS account_claude_7d_sonnet_reset_at,
        account.claude_7d_oi_reset_at AS account_claude_7d_oi_reset_at,
        account.claude_usage_updated_at AS account_claude_usage_updated_at,
+       account.gemini_shared_daily_used AS account_gemini_shared_daily_used,
+       account.gemini_shared_daily_limit AS account_gemini_shared_daily_limit,
+       account.gemini_pro_daily_used AS account_gemini_pro_daily_used,
+       account.gemini_pro_daily_limit AS account_gemini_pro_daily_limit,
+       account.gemini_flash_daily_used AS account_gemini_flash_daily_used,
+       account.gemini_flash_daily_limit AS account_gemini_flash_daily_limit,
+       account.gemini_daily_reset_at AS account_gemini_daily_reset_at,
+       account.gemini_usage_updated_at AS account_gemini_usage_updated_at,
        account.opencode_go_rolling_5h_reset_at AS account_opencode_go_rolling_5h_reset_at,
        account.opencode_go_weekly_reset_at AS account_opencode_go_weekly_reset_at,
        account.opencode_go_monthly_reset_at AS account_opencode_go_monthly_reset_at,
@@ -1444,7 +1489,10 @@ function inputScopeIsInvalid(input: ProviderAccountSchedulerInput): boolean {
 class PostgresEligibilityAuthority {
   constructor(
     private readonly database: SaasDatabase,
-    private readonly options: { readonly supplierCostRates: boolean } = { supplierCostRates: false },
+    private readonly options: { readonly supplierCostRates: boolean; readonly quotaSnapshotMaxAgeMs: number | null } = {
+      supplierCostRates: false,
+      quotaSnapshotMaxAgeMs: null,
+    },
   ) {}
 
   async revalidate(input: {
@@ -1676,6 +1724,12 @@ class PostgresEligibilityAuthority {
       // read from saas_supplier_cost_versions. Neither ever enters the
       // billing path (093 quota-snapshot precedent).
       const quotaReset = soonestQuotaReset(row, input.now);
+      // §4.5: normalization is CPU-only over the existing eligibility row and
+      // runs solely when the strategy is enabled; no additional query exists.
+      const quotaWindow =
+        this.options.quotaSnapshotMaxAgeMs === null
+          ? undefined
+          : resolveProviderAccountQuotaWindow(row, input.now.getTime(), this.options.quotaSnapshotMaxAgeMs);
       let supplierCostRate: {
         numeratorMinorUnits: bigint | number | string;
         denominatorUnits: bigint | number | string;
@@ -1743,6 +1797,7 @@ class PostgresEligibilityAuthority {
           soonestResetAt: quotaReset === null ? null : quotaReset.resetAt,
           soonestResetObservedAt: quotaReset === null ? null : quotaReset.observedAt,
           supplierCostRate,
+          ...(quotaWindow === undefined ? {} : { quotaWindow }),
           groupPoolPriority,
         },
       };
@@ -2271,6 +2326,11 @@ export class PostgresProviderAccountScheduler implements ProviderAccountSchedule
         // Only the cost-priority strategy needs an extra authority read; the
         // default (strategy-free) path never issues the supplier-cost query.
         supplierCostRates: options.strategies?.costPriority?.enabled === true,
+        // Quota columns ride the existing eligibility SELECT; disabled mode
+        // performs no normalization and adds no query or extra authority read.
+        quotaSnapshotMaxAgeMs: isQuotaAwareStrategyEnabled(options.strategies)
+          ? quotaAwareSnapshotMaxAgeMs(options.strategies)
+          : null,
       }),
       options.staticEligibilityCache,
     );

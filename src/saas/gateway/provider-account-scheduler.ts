@@ -109,6 +109,16 @@ export interface ProviderAccountSchedulerEligibilityAllowed {
       readonly denominatorUnits: bigint | number | string;
     } | null;
     /**
+     * §4.5 quota-aware signal: minimum remaining ratio across the account's
+     * normalized fresh provider windows. Null means stale/unknown, never full.
+     * The shared classifier's paused decision excludes the account before
+     * affinity; probe-allowed remains schedulable as an unknown-ratio probe.
+     */
+    readonly quotaWindow?: {
+      readonly remainingRatio: number | null;
+      readonly decision: 'paused' | 'active' | 'probe-allowed';
+    } | null;
+    /**
      * F2 (task #35) billing-group pool priority: the candidate's priority in
      * the resolved billing group's account pool (saas_billing_group_account_
      * pools, 0–1000, higher preferred). Null means "not in a narrowed pool"
@@ -594,6 +604,16 @@ export interface ProviderAccountSchedulerStrategiesOptions {
    */
   readonly costPriority?: { readonly enabled?: boolean };
   /**
+   * §4.5 quota-aware selection: after the existing filters, prefer the highest
+   * normalized remaining-window ratio. Explicit opt-in; stale/unknown ratios
+   * sort last and paused (zero remaining) accounts are excluded before affinity.
+   */
+  readonly quotaAware?: {
+    readonly enabled?: boolean;
+    /** Freshness bound for every provider quota family; default two hours. */
+    readonly snapshotMaxAgeMs?: number;
+  };
+  /**
    * LRU tie-break + in-group shuffle: orders by least-recently-used first
    * (runtime-health observedAt as the last-used signal; never-used first)
    * and replaces the deterministic-draw tail with a seeded shuffle inside
@@ -667,6 +687,8 @@ interface EligibleCandidate {
   readonly soonestResetAt: Date | null;
   readonly soonestResetObservedAt: Date | null;
   readonly supplierCost: { readonly numeratorMinorUnits: bigint; readonly denominatorUnits: bigint } | null;
+  /** §4.5 normalized remaining-window ratio; null is stale/unknown and sorts last. */
+  readonly quotaRemainingRatio: number | null;
   /** LRU signal: the health authority's last observation time (never-used = null). */
   readonly lastUsedAt: Date | null;
   /** R7 latency signal in milliseconds; null keeps the weight modulation neutral. */
@@ -710,6 +732,8 @@ const POSITIVE_INTEGER_MAX = 1_000_000_000;
 const SOONEST_RESET_DEFAULT_WINDOW_MS = 30 * 60_000;
 /** Stale-snapshot guard: resets only count while their family snapshot is this fresh. */
 const SOONEST_RESET_DEFAULT_SNAPSHOT_MAX_AGE_MS = 30 * 60_000;
+/** §4.5: shared two-hour freshness bound for normalized provider quota windows. */
+export const QUOTA_AWARE_DEFAULT_SNAPSHOT_MAX_AGE_MS = 2 * 60 * 60_000;
 /** Latency at which the R7 latency penalty saturates (p99-scale upstream latency). */
 const LATENCY_REFERENCE_MS = 30_000;
 /** Multiplier floor (0.05) mirroring HEALTH_SCORE_WEIGHT_FLOOR in health-score.ts. */
@@ -1045,6 +1069,21 @@ function validSchedulingSignals(value: unknown): boolean {
     const denominator = exactNonNegativeInteger(rate.denominatorUnits);
     if (numerator === null || denominator === null || denominator === 0n) return false;
   }
+  const quotaWindow = value.quotaWindow;
+  if (quotaWindow !== undefined && quotaWindow !== null) {
+    if (!isRecord(quotaWindow)) return false;
+    if (
+      quotaWindow.decision !== 'paused' &&
+      quotaWindow.decision !== 'active' &&
+      quotaWindow.decision !== 'probe-allowed'
+    ) {
+      return false;
+    }
+    const ratio = quotaWindow.remainingRatio;
+    if (ratio !== null && (typeof ratio !== 'number' || !Number.isFinite(ratio) || ratio < 0 || ratio > 1)) {
+      return false;
+    }
+  }
   // F2: the billing-group pool priority must be a safe integer in the
   // migration-105 CHECK range when present; null/absent means unrestricted.
   const groupPoolPriority = value.groupPoolPriority;
@@ -1110,6 +1149,17 @@ function compareLoad(left: EligibleCandidate, right: EligibleCandidate): number 
   return left.accountId.localeCompare(right.accountId);
 }
 
+/** §4.5: most remaining quota first; stale/unknown follows every fresh ratio. */
+function compareQuotaRemaining(left: EligibleCandidate, right: EligibleCandidate): number {
+  if (left.quotaRemainingRatio === null) return right.quotaRemainingRatio === null ? 0 : 1;
+  if (right.quotaRemainingRatio === null) return -1;
+  return left.quotaRemainingRatio < right.quotaRemainingRatio
+    ? 1
+    : left.quotaRemainingRatio > right.quotaRemainingRatio
+      ? -1
+      : 0;
+}
+
 /**
  * R7 cost-priority comparator: exact rational cross-multiplication of the
  * blended input+output supplier rate (minor units per token). Unknown cost —
@@ -1139,7 +1189,7 @@ function compareLastUsed(left: EligibleCandidate, right: EligibleCandidate): num
 
 /** One entry in the ordered R7 strategy registry applied before the account-id tie-break. */
 interface OrderingStrategy {
-  readonly name: 'cost-priority' | 'load' | 'lru';
+  readonly name: 'quota-aware' | 'cost-priority' | 'load' | 'lru';
   readonly compare: (left: EligibleCandidate, right: EligibleCandidate) => number;
 }
 
@@ -1280,6 +1330,7 @@ interface ResolvedStrategies {
   readonly soonestResetWindowMs: number;
   readonly soonestResetSnapshotMaxAgeMs: number;
   readonly costPriorityEnabled: boolean;
+  readonly quotaAwareEnabled: boolean;
   readonly lruEnabled: boolean;
   readonly latencyWeightCoefficient: number;
 }
@@ -1291,6 +1342,16 @@ function positiveMsOption(value: unknown, fallback: number): number {
     throw new TypeError('scheduler strategy windows must be positive safe integers');
   }
   return value;
+}
+
+/** The single opt-in switch shared by the core and PostgreSQL signal producer. */
+export function isQuotaAwareStrategyEnabled(options: ProviderAccountSchedulerStrategiesOptions | undefined): boolean {
+  return options?.quotaAware?.enabled === true;
+}
+
+/** Resolves the quota freshness option with the same validation as other strategy windows. */
+export function quotaAwareSnapshotMaxAgeMs(options: ProviderAccountSchedulerStrategiesOptions | undefined): number {
+  return positiveMsOption(options?.quotaAware?.snapshotMaxAgeMs, QUOTA_AWARE_DEFAULT_SNAPSHOT_MAX_AGE_MS);
 }
 
 /**
@@ -1321,13 +1382,18 @@ function resolveStrategies(options: ProviderAccountSchedulerStrategiesOptions | 
   }
   const soonestResetEnabled = soonestReset?.enabled === true;
   const costPriorityEnabled = options?.costPriority?.enabled === true;
+  const quotaAwareEnabled = isQuotaAwareStrategyEnabled(options);
   const lruEnabled = options?.lru?.enabled === true;
+  // Validate the configured freshness even while disabled, matching the other
+  // strategy-window options; the producer still does no quota work while off.
+  quotaAwareSnapshotMaxAgeMs(options);
   return {
-    anyEnabled: soonestResetEnabled || costPriorityEnabled || lruEnabled || coefficient > 0,
+    anyEnabled: soonestResetEnabled || costPriorityEnabled || quotaAwareEnabled || lruEnabled || coefficient > 0,
     soonestResetEnabled,
     soonestResetWindowMs: windowMs,
     soonestResetSnapshotMaxAgeMs: snapshotMaxAgeMs,
     costPriorityEnabled,
+    quotaAwareEnabled,
     lruEnabled,
     latencyWeightCoefficient: coefficient,
   };
@@ -1371,6 +1437,9 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
     this.strategies = resolveStrategies(options.strategies);
     this.stickyWait = resolveStickyWait(options.stickyWait);
     const chain: OrderingStrategy[] = [];
+    if (this.strategies.quotaAwareEnabled) {
+      chain.push({ name: 'quota-aware', compare: compareQuotaRemaining });
+    }
     if (this.strategies.costPriorityEnabled) {
       chain.push({ name: 'cost-priority', compare: compareSupplierCost });
     }
@@ -2125,6 +2194,7 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
                   eligibility.scheduling.supplierCostRate.denominatorUnits,
                 ) as bigint,
               },
+        quotaRemainingRatio: eligibility.scheduling?.quotaWindow?.remainingRatio ?? null,
         lastUsedAt: healthResult.observedAt,
         latencyMs: healthResult.latencyMs,
         // F2: the billing-group pool tier; null keeps the ranking exactly
@@ -2153,6 +2223,12 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
       }
       if (healthResult === 'deny') {
         healthDenied += 1;
+        return null;
+      }
+      // §4.5: exhausted windows are not affinity candidates. Reached resets
+      // and stale probe-allowed snapshots have already been normalized by the
+      // eligibility authority and deliberately remain in the candidate set.
+      if (this.strategies.quotaAwareEnabled && eligibility.scheduling?.quotaWindow?.decision === 'paused') {
         return null;
       }
 
@@ -2342,11 +2418,17 @@ export class ProviderAccountScheduler implements ProviderAccountSchedulerPort {
       if (discriminates) reasons.push(strategy.name);
     }
     // Sorting alone does not alter weighted selection probabilities. Preserve
-    // the ranking/soonest-reset gates above, then only draw within the best
-    // cost tier; unknown costs tie only when no known rate is available.
-    const selectionPool = this.strategies.costPriorityEnabled
-      ? ordered.filter((candidate) => compareSupplierCost(candidate, ordered[0]!) === 0)
-      : ordered;
+    // the ranking/soonest-reset gates above, then draw only within the best
+    // quota tier and, when enabled, the best cost tier inside that quota tier.
+    let selectionPool = ordered;
+    if (this.strategies.quotaAwareEnabled) {
+      const best = ordered[0] as EligibleCandidate;
+      selectionPool = selectionPool.filter((candidate) => compareQuotaRemaining(candidate, best) === 0);
+    }
+    if (this.strategies.costPriorityEnabled) {
+      const best = selectionPool[0] as EligibleCandidate;
+      selectionPool = selectionPool.filter((candidate) => compareSupplierCost(candidate, best) === 0);
+    }
     if (
       this.strategies.latencyWeightCoefficient > 0 &&
       ordered.some((candidate) => candidate.latencyMs !== null && candidate.latencyMs > 0)

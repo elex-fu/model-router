@@ -225,14 +225,28 @@ function eligibilityRow(accountId: string, scheduling: Row = {}): Row {
     pool_rights_effective_at: '2026-01-01T00:00:00.000Z',
     pool_rights_expires_at: null,
     // R7 quota-window scheduling columns (NULL = never observed = no signal).
+    account_codex_5h_used_percent: null,
+    account_codex_7d_used_percent: null,
     account_codex_5h_reset_at: null,
     account_codex_7d_reset_at: null,
     account_codex_usage_updated_at: null,
+    account_claude_5h_utilization: null,
+    account_claude_7d_utilization: null,
+    account_claude_7d_sonnet_utilization: null,
+    account_claude_7d_oi_utilization: null,
     account_claude_5h_reset_at: null,
     account_claude_7d_reset_at: null,
     account_claude_7d_sonnet_reset_at: null,
     account_claude_7d_oi_reset_at: null,
     account_claude_usage_updated_at: null,
+    account_gemini_shared_daily_used: null,
+    account_gemini_shared_daily_limit: null,
+    account_gemini_pro_daily_used: null,
+    account_gemini_pro_daily_limit: null,
+    account_gemini_flash_daily_used: null,
+    account_gemini_flash_daily_limit: null,
+    account_gemini_daily_reset_at: null,
+    account_gemini_usage_updated_at: null,
     account_opencode_go_rolling_5h_reset_at: null,
     account_opencode_go_weekly_reset_at: null,
     account_opencode_go_monthly_reset_at: null,
@@ -318,7 +332,7 @@ function setup(
   return { scheduler, state, input };
 }
 
-test('the eligibility query surfaces the 099/100/108 scheduling columns', async () => {
+test('the eligibility query surfaces the quota scheduling columns', async () => {
   const { scheduler, state, input } = setup();
   const result = await scheduler.select(input([candidate('account-a')]));
   assert.equal(result.decision, 'allow');
@@ -327,14 +341,28 @@ test('the eligibility query surfaces the 099/100/108 scheduling columns', async 
   )?.sql;
   assert.ok(eligibilitySql);
   for (const column of [
+    'account.codex_5h_used_percent AS account_codex_5h_used_percent',
+    'account.codex_7d_used_percent AS account_codex_7d_used_percent',
     'account.codex_5h_reset_at AS account_codex_5h_reset_at',
     'account.codex_7d_reset_at AS account_codex_7d_reset_at',
     'account.codex_usage_updated_at AS account_codex_usage_updated_at',
+    'account.claude_5h_utilization AS account_claude_5h_utilization',
+    'account.claude_7d_utilization AS account_claude_7d_utilization',
+    'account.claude_7d_sonnet_utilization AS account_claude_7d_sonnet_utilization',
+    'account.claude_7d_oi_utilization AS account_claude_7d_oi_utilization',
     'account.claude_5h_reset_at AS account_claude_5h_reset_at',
     'account.claude_7d_reset_at AS account_claude_7d_reset_at',
     'account.claude_7d_sonnet_reset_at AS account_claude_7d_sonnet_reset_at',
     'account.claude_7d_oi_reset_at AS account_claude_7d_oi_reset_at',
     'account.claude_usage_updated_at AS account_claude_usage_updated_at',
+    'account.gemini_shared_daily_used AS account_gemini_shared_daily_used',
+    'account.gemini_shared_daily_limit AS account_gemini_shared_daily_limit',
+    'account.gemini_pro_daily_used AS account_gemini_pro_daily_used',
+    'account.gemini_pro_daily_limit AS account_gemini_pro_daily_limit',
+    'account.gemini_flash_daily_used AS account_gemini_flash_daily_used',
+    'account.gemini_flash_daily_limit AS account_gemini_flash_daily_limit',
+    'account.gemini_daily_reset_at AS account_gemini_daily_reset_at',
+    'account.gemini_usage_updated_at AS account_gemini_usage_updated_at',
     'account.opencode_go_rolling_5h_reset_at AS account_opencode_go_rolling_5h_reset_at',
     'account.opencode_go_weekly_reset_at AS account_opencode_go_weekly_reset_at',
     'account.opencode_go_monthly_reset_at AS account_opencode_go_monthly_reset_at',
@@ -593,4 +621,290 @@ test('a strategy-enabled selection without an attempt id audits against the requ
   assert.ok(audit);
   assert.equal(audit.values[3], 'saas_requests');
   assert.equal(audit.values[4], 'request-a');
+});
+
+test('quota-aware excludes an exhausted codex window and always selects the ample account', async () => {
+  const resetAt = new Date(NOW.getTime() + 60 * MINUTE).toISOString();
+  const { scheduler, input } = setup(
+    {
+      eligibilityRows: new Map([
+        [
+          'account-a',
+          [
+            eligibilityRow('account-a', {
+              account_codex_5h_used_percent: 100,
+              account_codex_5h_reset_at: resetAt,
+              account_codex_usage_updated_at: NOW.toISOString(),
+            }),
+          ],
+        ],
+        [
+          'account-b',
+          [
+            eligibilityRow('account-b', {
+              account_codex_5h_used_percent: 20,
+              account_codex_5h_reset_at: resetAt,
+              account_codex_usage_updated_at: NOW.toISOString(),
+            }),
+          ],
+        ],
+      ]),
+    },
+    { strategies: { quotaAware: { enabled: true } } },
+  );
+  for (let index = 0; index < 16; index += 1) {
+    const result = await scheduler.select({
+      ...input([candidate('account-a'), candidate('account-b')], `attempt-${index}`),
+      requestId: `exhausted-${index}`,
+    });
+    assert.equal(result.decision, 'allow');
+    if (result.decision === 'allow') assert.equal(result.value.accountId, 'account-b');
+  }
+});
+
+test('quota-aware reached resets replenish both candidates', async () => {
+  let current = new Date(NOW);
+  const resetAt = new Date(NOW.getTime() + 5 * MINUTE).toISOString();
+  const rows = new Map([
+    [
+      'account-a',
+      [
+        eligibilityRow('account-a', {
+          account_codex_5h_used_percent: 100,
+          account_codex_5h_reset_at: resetAt,
+          account_codex_usage_updated_at: NOW.toISOString(),
+        }),
+      ],
+    ],
+    [
+      'account-b',
+      [
+        eligibilityRow('account-b', {
+          account_codex_5h_used_percent: 20,
+          account_codex_5h_reset_at: resetAt,
+          account_codex_usage_updated_at: NOW.toISOString(),
+        }),
+      ],
+    ],
+  ]);
+  const { scheduler, input } = setup(
+    { eligibilityRows: rows },
+    {
+      now: () => current,
+      maxHealthAgeMs: 2 * 60 * 60_000,
+      strategies: { quotaAware: { enabled: true } },
+    },
+  );
+  const candidates = [candidate('account-a'), candidate('account-b')];
+  const before = await scheduler.select({ ...input(candidates), requestId: 'before-reset' });
+  assert.equal(before.decision, 'allow');
+  if (before.decision === 'allow') assert.equal(before.value.accountId, 'account-b');
+
+  current = new Date(NOW.getTime() + 10 * MINUTE);
+  const selected = new Set<string>();
+  for (let index = 0; index < 64 && selected.size < 2; index += 1) {
+    const result = await scheduler.select({ ...input(candidates), requestId: `after-reset-${index}` });
+    assert.equal(result.decision, 'allow');
+    if (result.decision === 'allow') selected.add(result.value.accountId);
+  }
+  assert.deepEqual(selected, new Set(['account-a', 'account-b']));
+});
+
+test('quota-aware preserves sticky selection and excludes paused accounts from its domain', async () => {
+  const resetAt = new Date(NOW.getTime() + 60 * MINUTE).toISOString();
+  let observedEligibleIds: readonly string[] = [];
+  const { scheduler, input } = setup(
+    {
+      eligibilityRows: new Map([
+        [
+          'account-a',
+          [
+            eligibilityRow('account-a', {
+              account_codex_5h_used_percent: 90,
+              account_codex_5h_reset_at: resetAt,
+              account_codex_usage_updated_at: NOW.toISOString(),
+            }),
+          ],
+        ],
+        [
+          'account-b',
+          [
+            eligibilityRow('account-b', {
+              account_codex_5h_used_percent: 10,
+              account_codex_5h_reset_at: resetAt,
+              account_codex_usage_updated_at: NOW.toISOString(),
+            }),
+          ],
+        ],
+        [
+          'account-c',
+          [
+            eligibilityRow('account-c', {
+              account_codex_5h_used_percent: 100,
+              account_codex_5h_reset_at: resetAt,
+              account_codex_usage_updated_at: NOW.toISOString(),
+            }),
+          ],
+        ],
+      ]),
+    },
+    {
+      strategies: { quotaAware: { enabled: true } },
+      affinity: {
+        async resolve(affinityInput) {
+          observedEligibleIds = affinityInput.eligibleAccountIds;
+          return { decision: 'allow', accountId: 'account-a' };
+        },
+        async bind() {
+          return { decision: 'allow' };
+        },
+      },
+    },
+  );
+  for (let index = 0; index < 8; index += 1) {
+    const result = await scheduler.select({
+      ...input([candidate('account-a'), candidate('account-b'), candidate('account-c')]),
+      requestId: `sticky-${index}`,
+      scheduling: { sessionId: 'sticky-quota-session' },
+    });
+    assert.equal(result.decision, 'allow');
+    if (result.decision === 'allow') {
+      assert.equal(result.value.accountId, 'account-a');
+      assert.deepEqual(result.scheduling?.reasons, ['affinity']);
+    }
+    assert.deepEqual(observedEligibleIds, ['account-a', 'account-b']);
+  }
+});
+
+test('disabled quota-aware preserves weighted selection and emits no scheduling audit', async () => {
+  const resetAt = new Date(NOW.getTime() + 60 * MINUTE).toISOString();
+  const { scheduler, state, input } = setup({
+    eligibilityRows: new Map([
+      [
+        'account-a',
+        [
+          eligibilityRow('account-a', {
+            account_codex_5h_used_percent: 100,
+            account_codex_5h_reset_at: resetAt,
+            account_codex_usage_updated_at: NOW.toISOString(),
+          }),
+        ],
+      ],
+      [
+        'account-b',
+        [
+          eligibilityRow('account-b', {
+            account_codex_5h_used_percent: 20,
+            account_codex_5h_reset_at: resetAt,
+            account_codex_usage_updated_at: NOW.toISOString(),
+          }),
+        ],
+      ],
+    ]),
+  });
+  const selected = new Set<string>();
+  for (let index = 0; index < 64 && selected.size < 2; index += 1) {
+    const result = await scheduler.select({
+      ...input([candidate('account-a'), candidate('account-b')]),
+      requestId: `default-${index}`,
+    });
+    assert.equal(result.decision, 'allow');
+    if (result.decision === 'allow') {
+      assert.equal(result.scheduling, undefined);
+      selected.add(result.value.accountId);
+    }
+  }
+  assert.deepEqual(selected, new Set(['account-a', 'account-b']));
+  assert.equal(
+    state.statements.some(({ sql }) => sql.includes(':selection-audit')),
+    false,
+  );
+});
+
+test('quota-aware stale snapshots sort as unknown probes rather than full quota', async () => {
+  const resetAt = new Date(NOW.getTime() + 60 * MINUTE).toISOString();
+  const { scheduler, input } = setup(
+    {
+      eligibilityRows: new Map([
+        [
+          'account-a',
+          [
+            eligibilityRow('account-a', {
+              account_codex_5h_used_percent: 0,
+              account_codex_5h_reset_at: resetAt,
+              account_codex_usage_updated_at: new Date(NOW.getTime() - 3 * 60 * 60_000).toISOString(),
+            }),
+          ],
+        ],
+        [
+          'account-b',
+          [
+            eligibilityRow('account-b', {
+              account_codex_5h_used_percent: 80,
+              account_codex_5h_reset_at: resetAt,
+              account_codex_usage_updated_at: NOW.toISOString(),
+            }),
+          ],
+        ],
+      ]),
+    },
+    { strategies: { quotaAware: { enabled: true } } },
+  );
+  for (let index = 0; index < 16; index += 1) {
+    const result = await scheduler.select({
+      ...input([candidate('account-a'), candidate('account-b')]),
+      requestId: `stale-${index}`,
+    });
+    assert.equal(result.decision, 'allow');
+    if (result.decision === 'allow') {
+      assert.equal(result.value.accountId, 'account-b');
+      assert.deepEqual(result.scheduling?.reasons, ['quota-aware']);
+    }
+  }
+  const probe = await scheduler.select({ ...input([candidate('account-a')]), requestId: 'stale-probe' });
+  assert.equal(probe.decision, 'allow');
+  if (probe.decision === 'allow') assert.equal(probe.value.accountId, 'account-a');
+});
+
+test('quota-aware normalizes Claude utilization fractions and Gemini daily request counts', async () => {
+  const resetAt = new Date(NOW.getTime() + 60 * MINUTE).toISOString();
+  const { scheduler, input } = setup(
+    {
+      eligibilityRows: new Map([
+        [
+          'claude-account',
+          [
+            eligibilityRow('claude-account', {
+              account_claude_5h_utilization: 0.1,
+              account_claude_5h_reset_at: resetAt,
+              account_claude_usage_updated_at: NOW.toISOString(),
+            }),
+          ],
+        ],
+        [
+          'gemini-account',
+          [
+            eligibilityRow('gemini-account', {
+              account_gemini_shared_daily_used: 90,
+              account_gemini_shared_daily_limit: 100,
+              account_gemini_daily_reset_at: resetAt,
+              account_gemini_usage_updated_at: NOW.toISOString(),
+            }),
+          ],
+        ],
+      ]),
+    },
+    { strategies: { quotaAware: { enabled: true } } },
+  );
+  for (let index = 0; index < 16; index += 1) {
+    const result = await scheduler.select({
+      ...input([candidate('claude-account'), candidate('gemini-account')]),
+      requestId: `normalized-${index}`,
+    });
+    assert.equal(result.decision, 'allow');
+    if (result.decision === 'allow') {
+      assert.equal(result.value.accountId, 'claude-account');
+      assert.deepEqual(result.scheduling?.reasons, ['quota-aware']);
+    }
+  }
 });
