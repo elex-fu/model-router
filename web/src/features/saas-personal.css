@@ -1,0 +1,125 @@
+.personal-console {
+  display: grid;
+  gap: 1rem;
+}
+
+.personal-home-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+.personal-home-grid > .panel:last-child {
+  grid-column: 1 / -1;
+}
+
+.personal-balance {
+  display: grid;
+  gap: .25rem;
+  margin-bottom: 1rem;
+}
+
+.personal-balance strong {
+  font-size: 1.65rem;
+}
+
+.personal-balance small,
+.personal-key-row small,
+.personal-client-links small {
+  display: block;
+  color: #738078;
+}
+
+.personal-key-form {
+  display: grid;
+  grid-template-columns: minmax(12rem, 1fr) auto;
+  align-items: end;
+  gap: .75rem;
+  margin-bottom: 1rem;
+}
+
+.personal-key-form .actions {
+  margin: 0 0 1px;
+}
+
+.personal-second-key {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: #738078;
+}
+
+.personal-key-list {
+  display: grid;
+  gap: .75rem;
+}
+
+.personal-key-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: .75rem;
+  padding: .75rem 0;
+  border-top: 1px solid #e1e7de;
+}
+
+.personal-secret-form,
+.personal-config {
+  grid-column: 1 / -1;
+}
+
+.personal-secret-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: .75rem;
+}
+
+.personal-config {
+  display: grid;
+  gap: .75rem;
+  margin: .75rem 0;
+}
+
+.personal-config-code {
+  width: 100%;
+  min-height: 8rem;
+  resize: vertical;
+  white-space: pre;
+}
+
+.personal-client-links {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: .75rem;
+  margin: 1rem 0;
+}
+
+.personal-client-links a {
+  padding: .85rem;
+  border: 1px solid #e1e7de;
+  border-radius: 8px;
+}
+
+.personal-secondary-links {
+  display: flex;
+  gap: 1.25rem;
+}
+
+.personal-tutorial-steps {
+  display: grid;
+  gap: .65rem;
+  padding-left: 1.5rem;
+}
+
+@media (max-width: 760px) {
+  .personal-home-grid,
+  .personal-key-form,
+  .personal-secret-form {
+    grid-template-columns: 1fr;
+  }
+
+  .personal-home-grid > .panel:last-child,
+  .personal-second-key {
+    grid-column: auto;
+  }
+}

@@ -98,8 +98,8 @@ function TenantCreation({ userId, disabled, onError, onCreated }: {
   </Panel>;
 }
 
-function TenantActions({ userId, tenant, disabled, onError, refreshProjects }: {
-  userId: string; tenant: SafeTenant; disabled: boolean; onError: (error: unknown) => void; refreshProjects: () => void;
+function TenantActions({ userId, tenant, disabled, onError, refreshProjects, projectCount }: {
+  userId: string; tenant: SafeTenant; disabled: boolean; onError: (error: unknown) => void; refreshProjects: () => void; projectCount: number;
 }) {
   const projectDraft = useWorkspaceDraft({ userId, tenantId: tenant.id, kind: 'project' });
   const inviteDraft = useWorkspaceDraft({ userId, tenantId: tenant.id, kind: 'invitation' });
@@ -159,6 +159,7 @@ function TenantActions({ userId, tenant, disabled, onError, refreshProjects }: {
 
   if (!canManageWorkspace(tenant.role)) return <p className="muted">当前租户角色不能创建项目或邀请成员。</p>;
   return <Panel title="项目与邀请操作">
+    {projectCount === 1 && <p className="muted">需要独立预算或权限时，可以按“家人 / 同事 / 测试”创建第二个项目；每组可以有独立的模型范围、额度和 Key。</p>}
     <form className="saas-project-form" onSubmit={createProject}>
       <Field label="项目名称"><input required maxLength={120} value={projectDraft.draft.name ?? ''} onChange={e => projectDraft.update({ name: e.target.value })} /></Field>
       <Field label="项目标识（可选）" hint="留空时由服务端生成。"><input maxLength={64} value={projectDraft.draft.slug ?? ''} onChange={e => projectDraft.update({ slug: e.target.value })} /></Field>
@@ -287,7 +288,7 @@ function TenantWorkspace({ session, tenant, authorityReady, onError }: {
     <TenantMemberDirectory key={`${session.userId}:${tenant.id}:${tenant.role}`} userId={session.userId} tenant={tenant}
       authorityReady={authorityReady} onError={onError} />
     <TenantActions key={`${session.userId}:${tenant.id}:${tenant.role}`} userId={session.userId} tenant={tenant}
-      disabled={!ready} onError={onError} refreshProjects={() => { void projects.refetch(); }} />
+      disabled={!ready} onError={onError} refreshProjects={() => { void projects.refetch(); }} projectCount={projects.data?.length ?? 0} />
   </>;
 }
 

@@ -55,6 +55,7 @@ import { WorkspaceContent, WorkspaceInvitationAcceptance } from './saas-workspac
 import { clearWorkspaceDrafts, workspaceMembersRootKey, workspaceRoleLabels } from './saas-workspace-state';
 import { CustomerMfaSettings } from './saas-customer-mfa';
 import { ApiKeyMetadataDetails, ApiKeyPrincipalSelector } from './saas-api-key-ui';
+import { PersonalClientGuidePage, PersonalHome, PersonalKeysPage } from './saas-personal';
 export { isApiKeyPrincipalKind, keyPrincipalLabel } from './saas-api-key-ui';
 
 const tenantsKey = ['saas-console', 'tenants'] as const;
@@ -1037,6 +1038,7 @@ function ConsoleHeader({
   onLogout,
 }: {
   active:
+    | 'home'
     | 'workspace'
     | 'catalog'
     | 'usage'
@@ -1080,7 +1082,11 @@ function ConsoleHeader({
       <header className="saas-header">
         <Brand />
         <nav aria-label="客户控制台导航">
-          <Link to="/console" aria-current={active === 'workspace' ? 'page' : undefined}>
+          <Link to="/console" aria-current={active === 'home' ? 'page' : undefined}>
+            我的控制台
+          </Link>
+          {' · '}
+          <Link to="/console/workspace" aria-current={active === 'workspace' ? 'page' : undefined}>
             工作空间
           </Link>
           {' · '}
@@ -1102,7 +1108,7 @@ function ConsoleHeader({
           </Link>
           {' · '}
           <Link to="/console/usage" aria-current={active === 'usage' ? 'page' : undefined}>
-            用量
+            我的用量
           </Link>
           {' · '}
           <Link to="/console/requests" aria-current={active === 'requests' ? 'page' : undefined}>
@@ -1110,7 +1116,7 @@ function ConsoleHeader({
           </Link>
           {' · '}
           <Link to="/console/keys" aria-current={active === 'keys' ? 'page' : undefined}>
-            API Keys
+            我的 Key
           </Link>
           {' · '}
           <Link to="/console/webhooks" aria-current={active === 'webhooks' ? 'page' : undefined}>
@@ -1128,7 +1134,7 @@ function ConsoleHeader({
           {showRefunds && (
             <>
               <Link to="/console/billing" aria-current={active === 'billing' ? 'page' : undefined}>
-                账单
+                订单
               </Link>
               {' · '}
               <Link to="/console/refunds" aria-current={active === 'refunds' ? 'page' : undefined}>
@@ -2211,7 +2217,7 @@ export function CustomerPaymentOrdersPage({ onLogout }: { onLogout: () => Promis
       <div className="page-title">
         <div>
           <p className="eyebrow">BILLING · PAYMENT ORDERS</p>
-          <h1>账单</h1>
+          <h1>订单</h1>
           <p>查看钱包充值订单的支付与入账状态及时间。BYOK 服务计划订单见服务计划目录，退款记录见退款页。</p>
         </div>
       </div>
@@ -4912,7 +4918,7 @@ export function UsagePage({ onLogout }: { onLogout: () => Promise<void> }) {
       <div className="page-title">
         <div>
           <p className="eyebrow">USAGE</p>
-          <h1>用量分析</h1>
+          <h1>我的用量</h1>
           <p>查看有权访问的租户和项目的聚合用量。查询范围最多 31 天。</p>
         </div>
         <button
@@ -5608,10 +5614,13 @@ export function SaasConsoleApp() {
   }
 
   const isRequestDetail = /^\/console\/requests\/[^/]+$/.test(path);
+  const isClientGuide = /^\/console\/connect\/[^/]+$/.test(path);
   if (
     path !== '/console' &&
+    path !== '/console/workspace' &&
     path !== '/console/catalog' &&
     path !== '/console/keys' &&
+    path !== '/console/keys/advanced' &&
     path !== '/console/credentials' &&
     path !== '/console/usage' &&
     path !== '/console/requests' &&
@@ -5621,7 +5630,8 @@ export function SaasConsoleApp() {
     path !== '/console/refunds' &&
     path !== '/console/notifications' &&
     path !== '/console/security' &&
-    !isRequestDetail
+    !isRequestDetail &&
+    !isClientGuide
   ) {
     return <Navigate to="/console" replace />;
   }
@@ -5681,7 +5691,8 @@ export function SaasConsoleApp() {
     );
   }
   if (path === '/console/catalog') return <ServicePlanCatalogPage onLogout={logout} />;
-  if (path === '/console/keys') return <KeyManagementPage onLogout={logout} />;
+  if (path === '/console/keys') return <div className="saas-console"><ConsoleHeader active="keys" onLogout={logout} /><PersonalKeysPage /></div>;
+  if (path === '/console/keys/advanced') return <KeyManagementPage onLogout={logout} />;
   if (path === '/console/webhooks') return <CustomerWebhooksPage onLogout={logout} />;
   if (path === '/console/billing') return <CustomerPaymentOrdersPage onLogout={logout} />;
   if (path === '/console/refunds') return <CustomerRefundsPage onLogout={logout} />;
@@ -5691,5 +5702,7 @@ export function SaasConsoleApp() {
   if (path === '/console/requests') return <RequestsPage onLogout={logout} />;
   if (path === '/console/wallet') return <SaasWalletPage onLogout={logout} />;
   if (isRequestDetail) return <RequestDetailPage onLogout={logout} />;
-  return <ConsoleHome session={session} onLogout={logout} onSessionExpired={clearLocalSession} />;
+  if (isClientGuide) return <div className="saas-console"><ConsoleHeader active="home" onLogout={logout} /><PersonalClientGuidePage /></div>;
+  if (path === '/console/workspace') return <ConsoleHome session={session} onLogout={logout} onSessionExpired={clearLocalSession} />;
+  return <div className="saas-console"><ConsoleHeader active="home" onLogout={logout} /><PersonalHome /></div>;
 }
