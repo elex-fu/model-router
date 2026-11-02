@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { SAAS_AUTHZ_USER_FENCE_SQL } from '../../db/advisory-lock-keys.js';
 import type { SaasDatabase, SqlExecutor } from '../../db/types.js';
 import { hashPassword } from '../../identity/password.js';
 import type { PlatformAdminActor } from '../access/index.js';
@@ -417,9 +418,7 @@ export class PlatformUserGovernanceService {
   }
 
   private async lockTargetUser(tx: SqlExecutor, targetUserId: string): Promise<{ readonly disabled_at: unknown }> {
-    await tx.query("SELECT pg_advisory_xact_lock(hashtextextended('saas-authz:user:' || $1::uuid::text, 0))", [
-      targetUserId,
-    ]);
+    await tx.query(SAAS_AUTHZ_USER_FENCE_SQL, [targetUserId]);
     const result = await tx.query<{ readonly disabled_at: unknown }>(
       `SELECT disabled_at FROM saas_users WHERE id = $1 AND anonymized_at IS NULL LIMIT 1 FOR UPDATE`,
       [targetUserId],

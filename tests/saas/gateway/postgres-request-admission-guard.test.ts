@@ -960,7 +960,7 @@ test('fake-SQL admission takes ordered shared fences before authority reads', as
 
   const tenantFence = fenceKeyIndex(/^saas-authz:tenant:/i);
   const projectFence = fenceKeyIndex(/^saas-authz:project:/i);
-  const userFence = fixture.fenceKeys.indexOf('user-a');
+  const userFence = fixture.fenceKeys.indexOf(saasAdvisoryKey.user('user-a'));
   const poolFence = fenceKeyIndex(/^saas_platform_pool:/i);
   const profileFence = fenceKeyIndex(/^saas_supply_profile:/i);
   const accountFence = fenceKeyIndex(/^(?:saas-authz:tenant|saas-authz:platform)-provider-account:/i);
@@ -1014,7 +1014,7 @@ test('fake-SQL admission takes ordered shared fences before authority reads', as
       saasAdvisoryKey.tenant(request.tenantId),
       saasAdvisoryKey.project(request.tenantId, request.projectId),
       ...[
-        request.principalId,
+        saasAdvisoryKey.user(request.principalId),
         saasAdvisoryKey.apiKey(request.tenantId, request.projectId, request.proxyKeyId),
         saasAdvisoryKey.commercialCustomer(request.tenantId, request.customerMeteringPolicyId),
         saasAdvisoryKey.commercialProvider(attempt.providerId, attempt.providerMeteringPolicyId),

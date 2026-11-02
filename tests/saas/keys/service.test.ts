@@ -7,6 +7,7 @@ import {
   CUSTOMER_KEY_MUTATION_ISSUE_SQL,
   type CustomerKeyMutationSessionHandle,
 } from '../../../src/saas/identity/customer-key-mutation-session.js';
+import { saasAdvisoryKey } from '../../../src/saas/db/advisory-lock-keys.js';
 import { revalidateCustomerKeyMutationSession, SaasIdentityService } from '../../../src/saas/identity/service.js';
 import type { TenantContext } from '../../../src/saas/identity/types.js';
 import { KeyService } from '../../../src/saas/keys/service.js';
@@ -693,7 +694,7 @@ function assertWriterOrder(
   const expected = [
     { key: 'saas-authz:tenant:tenant-1', mode: 'exclusive' },
     { key: 'saas-authz:project:tenant-1:project-1', mode: 'exclusive' },
-    ...[...new Set(userIds)].sort().map((key) => ({ key, mode: 'exclusive' })),
+    ...[...new Set(userIds)].sort().map((key) => ({ key: `saas-authz:user:${key}`, mode: 'exclusive' })),
     ...business.map((key) => ({ key, mode: 'exclusive' })),
   ];
   const actual = database.advisoryFences.slice(fenceStart, fenceStart + expected.length);
@@ -1019,7 +1020,7 @@ test('rechecks current membership and user state after simulated fence waits (fa
   const disabledUser = new FakeKeyDatabase();
   let userDisabled = false;
   disabledUser.authorizationFenceHook = (_sql, values) => {
-    if (!userDisabled && values[0] === baseContext.userId) {
+    if (!userDisabled && values[0] === saasAdvisoryKey.user(baseContext.userId)) {
       userDisabled = true;
       disabledUser.disabledUsers.add(baseContext.userId);
     }

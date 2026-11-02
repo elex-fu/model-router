@@ -192,8 +192,8 @@ class CapacityPolicyDatabase implements SaasDatabase {
         [
           saasAdvisoryKey.tenant(TENANT_ID),
           saasAdvisoryKey.project(TENANT_ID, PROJECT_ID),
-          USER_ID,
-          MEMBER_ID,
+          saasAdvisoryKey.user(USER_ID),
+          saasAdvisoryKey.user(MEMBER_ID),
           saasAdvisoryKey.apiKey(TENANT_ID, PROJECT_ID, API_KEY_ID),
         ].includes(String(key)),
         'only exact fixture scope fences are accepted',
@@ -205,14 +205,14 @@ class CapacityPolicyDatabase implements SaasDatabase {
       } else {
         assert.ok(preceding.some((entry) => entry.values[0] === saasAdvisoryKey.tenant(TENANT_ID)));
       }
-      if (writing && (key === USER_ID || key === MEMBER_ID)) {
+      if (writing && (key === saasAdvisoryKey.user(USER_ID) || key === saasAdvisoryKey.user(MEMBER_ID))) {
         assert.equal(
           preceding.some((entry) => entry.values[0] === saasAdvisoryKey.apiKey(TENANT_ID, PROJECT_ID, API_KEY_ID)),
           false,
           'U cannot be acquired after K',
         );
         const priorUsers = preceding.filter(
-          (entry) => entry.sql === EXCLUSIVE_FENCE && (entry.values[0] === USER_ID || entry.values[0] === MEMBER_ID),
+          (entry) => entry.sql === EXCLUSIVE_FENCE && (entry.values[0] === saasAdvisoryKey.user(USER_ID) || entry.values[0] === saasAdvisoryKey.user(MEMBER_ID)),
         );
         assert.equal(
           priorUsers.some((entry) => entry.values[0] === key),
@@ -245,7 +245,7 @@ class CapacityPolicyDatabase implements SaasDatabase {
         );
       } else {
         assert.equal(
-          preceding.some((entry) => entry.values[0] === USER_ID || entry.values[0] === MEMBER_ID),
+          preceding.some((entry) => entry.values[0] === saasAdvisoryKey.user(USER_ID) || entry.values[0] === saasAdvisoryKey.user(MEMBER_ID)),
           false,
           'hint precedes the user layer',
         );
@@ -487,10 +487,12 @@ class CapacityPolicyDatabase implements SaasDatabase {
       assert.ok(hasFence(saasAdvisoryKey.project(TENANT_ID, PROJECT_ID)));
     }
     if (users) {
-      assert.ok(hasFence(USER_ID));
+      assert.ok(hasFence(saasAdvisoryKey.user(USER_ID)));
       const row = this.state.apiKeys[0];
       if (preceding.some((entry) => entry.sql === KEY_HINT) && row?.execution_principal_type === 'member') {
-        assert.ok(typeof row.execution_principal_id === 'string' && hasFence(row.execution_principal_id));
+        assert.ok(
+          typeof row.execution_principal_id === 'string' && hasFence(saasAdvisoryKey.user(row.execution_principal_id)),
+        );
       }
     }
   }
@@ -563,7 +565,7 @@ test('tenant capacity write uses row lock, revision CAS, and one atomic non-secr
   const advisoryStatements = database.statements.filter(({ sql }) => sql === SHARED_FENCE || sql === EXCLUSIVE_FENCE);
   assert.deepEqual(
     advisoryStatements.map(({ values }) => values[0]),
-    [`saas-authz:tenant:${TENANT_ID}`, USER_ID],
+    [`saas-authz:tenant:${TENANT_ID}`, saasAdvisoryKey.user(USER_ID)],
   );
   assert.deepEqual(
     database.statements.slice(0, 4).map(({ sql }) => sql),
@@ -608,7 +610,7 @@ test('tenant capacity write uses row lock, revision CAS, and one atomic non-secr
     },
     async (tx: SqlExecutor) => {
       for (const sql of ENTRY_CONTROLS) await tx.query(sql);
-      await tx.query(WRITER_G, [USER_ID]);
+      await tx.query(WRITER_G, [saasAdvisoryKey.user(USER_ID)]);
     },
     async (tx: SqlExecutor) => {
       for (const sql of ENTRY_CONTROLS) await tx.query(sql);
@@ -729,7 +731,7 @@ test('project policy write appends a new immutable version, copies non-capacity 
   );
   assert.deepEqual(
     database.statements.filter(({ sql }) => sql === EXCLUSIVE_FENCE).map(({ values }) => values[0]),
-    [saasAdvisoryKey.tenant(TENANT_ID), saasAdvisoryKey.project(TENANT_ID, PROJECT_ID), USER_ID],
+    [saasAdvisoryKey.tenant(TENANT_ID), saasAdvisoryKey.project(TENANT_ID, PROJECT_ID), saasAdvisoryKey.user(USER_ID)],
   );
 });
 
@@ -760,14 +762,14 @@ test('API-key write increments authz_version so stale authorization caches are i
     [
       saasAdvisoryKey.tenant(TENANT_ID),
       saasAdvisoryKey.project(TENANT_ID, PROJECT_ID),
-      MEMBER_ID,
-      USER_ID,
+      saasAdvisoryKey.user(MEMBER_ID),
+      saasAdvisoryKey.user(USER_ID),
       saasAdvisoryKey.apiKey(TENANT_ID, PROJECT_ID, API_KEY_ID),
     ],
   );
   const hintIndex = database.statements.findIndex(({ sql }) => sql === KEY_HINT);
   const memberIndex = database.statements.findIndex(
-    ({ sql, values }) => sql === EXCLUSIVE_FENCE && values[0] === MEMBER_ID,
+    ({ sql, values }) => sql === EXCLUSIVE_FENCE && values[0] === saasAdvisoryKey.user(MEMBER_ID),
   );
   const keyIndex = database.statements.findIndex(
     ({ sql, values }) =>
@@ -802,7 +804,7 @@ test('API-key write increments authz_version so stale authorization caches are i
       [
         saasAdvisoryKey.tenant(TENANT_ID),
         saasAdvisoryKey.project(TENANT_ID, PROJECT_ID),
-        USER_ID,
+        saasAdvisoryKey.user(USER_ID),
         saasAdvisoryKey.apiKey(TENANT_ID, PROJECT_ID, API_KEY_ID),
       ],
     );

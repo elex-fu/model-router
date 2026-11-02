@@ -1559,7 +1559,15 @@ test('evidence fence batch preserves exact layer order, per-layer dedupe and cro
     await service(fake).register(input);
     const expected = expectedEvidenceFences(input);
     assert.deepEqual(fake.fenceKeys, expected);
-    assert.equal(expected.filter((key) => key === saasAdvisoryKey.tenant(input.tenantId)).length, 2);
+    // The prefixed user domain makes the historical cross-layer duplicate
+    // (a principalId crafted to equal another layer's key) structurally
+    // impossible: the tenant fence appears once and the member fence is
+    // always its own domain.
+    assert.equal(expected.filter((key) => key === saasAdvisoryKey.tenant(input.tenantId)).length, 1);
+    assert.equal(
+      expected.filter((key) => key === saasAdvisoryKey.user(saasAdvisoryKey.tenant(input.tenantId))).length,
+      input.principalKind === 'member' ? 1 : 0,
+    );
     assert.equal(
       expected.filter((key) => key === saasAdvisoryKey.supplyProfile(input.tenantId, input.supplyProfileId)).length,
       1,

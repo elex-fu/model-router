@@ -1,3 +1,4 @@
+import { SAAS_AUTHZ_USER_FENCE_SQL } from '../../db/advisory-lock-keys.js';
 import type { SqlExecutor } from '../../db/types.js';
 import {
   hasPlatformRole,
@@ -27,9 +28,7 @@ export async function verifyGovernanceActor(
   actor: PlatformAdminActor,
   acceptedRoles: readonly PlatformAdminRole[],
 ): Promise<void> {
-  await tx.query("SELECT pg_advisory_xact_lock(hashtextextended('saas-authz:user:' || $1::uuid::text, 0))", [
-    actor.userId,
-  ]);
+  await tx.query(SAAS_AUTHZ_USER_FENCE_SQL, [actor.userId]);
 
   const sessionResult = await tx.query<SessionRow>(
     `SELECT s.id, s.user_id

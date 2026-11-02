@@ -1,4 +1,5 @@
 import { createHmac, randomUUID } from 'node:crypto';
+import { SAAS_AUTHZ_USER_FENCE_SQL } from '../db/advisory-lock-keys.js';
 import type { SaasDatabase, SqlExecutor } from '../db/types.js';
 import type { ClientAddressResolution } from '../gateway/client-address.js';
 
@@ -270,9 +271,7 @@ export class PostgresUserAnomalyDetector {
         enforcedUsers.add(row.user_id);
 
         // Same exclusive member authorization fence as governance/admission.
-        await tx.query("SELECT pg_advisory_xact_lock(hashtextextended('saas-authz:user:' || $1::uuid::text, 0))", [
-          row.user_id,
-        ]);
+        await tx.query(SAAS_AUTHZ_USER_FENCE_SQL, [row.user_id]);
         const count = await tx.query<{ count: unknown }>(
           'SELECT count(*)::text AS count FROM saas_user_anomaly_detections WHERE user_id = $1',
           [row.user_id],

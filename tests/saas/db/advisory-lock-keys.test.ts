@@ -19,7 +19,9 @@ test('matches migration 046 global authorization writer fence SQL', () => {
 test('preserves existing tenant, project, user, pool, and supply-profile advisory keys', () => {
   assert.equal(saasAdvisoryKey.tenant('tenant:1'), 'saas-authz:tenant:tenant:1');
   assert.equal(saasAdvisoryKey.project('tenant:1', 'project:2'), 'saas-authz:project:tenant:1:project:2');
-  assert.equal(saasAdvisoryKey.user('user:3'), 'user:3');
+  // The prefixed user key converges the admission fence batch and the
+  // governance/risk writers into one mutual-exclusion domain.
+  assert.equal(saasAdvisoryKey.user('user:3'), 'saas-authz:user:user:3');
   assert.equal(saasAdvisoryKey.platformPool('pool:4'), 'saas_platform_pool:706f6f6c3a34');
   assert.equal(
     saasAdvisoryKey.supplyProfile('tenant:1', 'profile:5'),

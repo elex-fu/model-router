@@ -198,7 +198,7 @@ test('policy service enables, suspends, and disables with versioned CAS and same
   assert.deepEqual(database.executors[0]?.advisoryFenceKeys, [
     'saas-authz:tenant:tenant-a',
     'saas-authz:project:tenant-a:project-a',
-    'user-a',
+    'saas-authz:user:user-a',
   ]);
 
   const suspended = await service.suspend(input('suspended', 2));

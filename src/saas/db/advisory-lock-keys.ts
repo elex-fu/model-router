@@ -16,7 +16,15 @@ const positiveSafeIntegerDecimal = (version: number): string => {
 export const saasAdvisoryKey = {
   tenant: (tenantId: string): string => `saas-authz:tenant:${tenantId}`,
   project: (tenantId: string, projectId: string): string => `saas-authz:project:${tenantId}:${projectId}`,
-  user: (userId: string): string => userId,
+  /**
+   * The member authorization fence. The prefixed form converges the admission
+   * fence batch, the capacity/keys/commercial writers and the governance
+   * disable/unban + risk-ladder writers into ONE mutual-exclusion domain:
+   * previously the JS helper hashed the bare uuid while governance built
+   * 'saas-authz:user:<uuid>' inline — two lock domains that did not exclude
+   * each other despite comments claiming a shared fence.
+   */
+  user: (userId: string): string => `saas-authz:user:${userId}`,
   apiKey: (tenantId: string, projectId: string, keyId: string): string =>
     `saas-authz:api-key:${utf8Hex(tenantId)}:${utf8Hex(projectId)}:${utf8Hex(keyId)}`,
   commercialCustomer: (tenantId: string, headId: string): string =>
@@ -62,5 +70,15 @@ export const saasAdvisoryKey = {
 
 /** The wallet-fence acquisition statement (see saasAdvisoryKey.walletFence). */
 export const WALLET_FENCE_SQL = 'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))';
+
+/**
+ * The member authorization fence acquisition statement for governance and
+ * risk-ladder writers that take the lock directly (not through the fence
+ * batch). Byte-equivalent to the historical inline governance SQL: the
+ * uuid cast keeps canonicalizing the identifier before the domain prefix is
+ * concatenated. Callers pass the raw user uuid.
+ */
+export const SAAS_AUTHZ_USER_FENCE_SQL =
+  "SELECT pg_advisory_xact_lock(hashtextextended('saas-authz:user:' || $1::uuid::text, 0))";
 
 export const sortAndDedupeAdvisoryKeys = (keys: readonly string[]): string[] => [...new Set(keys)].sort();
