@@ -318,6 +318,7 @@ import {
   type RiskControlRetentionWorkerHandle,
   startRiskControlRetentionWorker,
 } from '../saas/risk/retention-worker.js';
+import { PostgresUserRiskObservationRecorder } from '../saas/risk/user-risk.js';
 import { loadCommercialAttestationTrust } from '../saas/runtime/commercial-attestation-trust.js';
 import { loadCredentialValidationTargetsModule } from '../saas/runtime/credential-validation-targets-module.js';
 import {
@@ -2580,11 +2581,27 @@ export async function startManagedSaasServer(
       const observePreparationFailure = createPreparationFailureMetricsObserver();
       const keyBudgetResolution = createKeyBudgetResolution();
       const billingGroupSpendResolution = createBillingGroupSpendResolution();
+      // M3 §7 observation pipeline: with a deployment HMAC key the recorder
+      // captures member-principal request evidence inside the canonical
+      // admission transaction (gateway INSERT grant); a record failure fails
+      // admission — evidence capture is fail-closed by design. Absent key ⇒
+      // observation (and therefore anomaly detection input) stays disabled.
+      const userRiskObservationRecorder = deployment.userRiskAddressHmacKey
+        ? new PostgresUserRiskObservationRecorder(deployment.userRiskAddressHmacKey)
+        : undefined;
+      if (userRiskObservationRecorder === undefined) {
+        console.error(
+          'model-router managed user risk observations disabled: MODEL_ROUTER_SAAS_USER_RISK_ADDRESS_HMAC_KEY is not configured',
+        );
+      }
       const preparationPorts = createPostgresPreparationPorts({
         database,
         metering,
         billing: billingLedger,
-        guard: new PostgresRequestAdmissionGuard(database, { observe: observePreparation }),
+        guard: new PostgresRequestAdmissionGuard(database, {
+          observe: observePreparation,
+          ...(userRiskObservationRecorder ? { riskObservations: userRiskObservationRecorder } : {}),
+        }),
         authorizationPrelock: new PostgresSaasRequestAdmissionAuthorizationPrelock(),
         entitlement: new PostgresRequestPreparationEntitlementAdapter(
           runtimeDependencies.entitlementResolver,
@@ -2652,7 +2669,13 @@ export async function startManagedSaasServer(
       };
       const capabilityReadiness = gatewayRuntimeModule.getCapabilityReadiness?.bind(gatewayRuntimeModule);
       gateway = createManagedSaasGatewayProductionComposition(database, {
-        riskControl: { emailSender: riskControlEmailSender },
+        riskControl: {
+          emailSender: riskControlEmailSender,
+          // Keep member requests off the Redis fast snapshot while the
+          // canonical admission path records user-risk observations; the
+          // READ ONLY fast transaction cannot capture evidence.
+          ...(userRiskObservationRecorder ? { userRiskObservationsEnabled: true } : {}),
+        },
         ...runtimeGatewayOptions,
         ...(options.boundedGatewayOwner
           ? {

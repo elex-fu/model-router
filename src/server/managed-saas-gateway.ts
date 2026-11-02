@@ -1310,6 +1310,14 @@ export interface ManagedSaasGatewayProductionOptions {
   readonly riskControl?: {
     readonly emailSender?: ModerationEmailSender;
     readonly siteName?: string;
+    /**
+     * True once the caller wires a user-risk observation recorder into
+     * canonical admission. While enabled, member-principal requests are kept
+     * off the Redis fast snapshot (READ ONLY REPEATABLE READ cannot capture
+     * evidence) so every observation lands in the canonical admission
+     * transaction; project-service keys keep the fast path.
+     */
+    readonly userRiskObservationsEnabled?: boolean;
   };
   /**
    * Roadmap batch 4 §4.3 (task #17): the async video media binding — the
@@ -2861,6 +2869,7 @@ export function createManagedSaasGatewayProductionComposition(
         }),
       maxBodyBytes: options.maxBodyBytes,
       accountMaxConcurrency: options.maxConcurrency,
+      ...(options.riskControl?.userRiskObservationsEnabled === true ? { userRiskObservationsEnabled: true } : {}),
     });
     const runtimeSnapshotSource = createRuntimeFastGatewaySnapshotSource(snapshotSource, {
       modelCompatibility: options.providerPayload.modelCompatibility,
