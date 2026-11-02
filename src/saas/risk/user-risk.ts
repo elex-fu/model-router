@@ -78,6 +78,8 @@ export interface UserAnomalyBatchResult {
   readonly rateLimited: number;
   readonly keysSuspended: number;
   readonly accountsSuspended: number;
+  /** Present only when another replica held the batch fence this cycle. */
+  readonly skipped?: true;
 }
 
 export interface UserAnomalyDetectorOptions {
@@ -181,6 +183,17 @@ export class PostgresUserAnomalyDetector {
   async runBatch(): Promise<UserAnomalyBatchResult> {
     const now = this.now().toISOString();
     return this.database.transaction(async (tx) => {
+      // Multi-replica fence: ON CONFLICT already makes duplicate detection
+      // impossible, but the per-user lifetime-count escalation reads count(*)
+      // after the insert — the xact lock keeps two replicas from racing the
+      // ladder while both pay the aggregate. A session-level lock is never
+      // used: pooled executors must not leak advisory locks across requests.
+      const fence = await tx.query<{ locked: unknown }>(
+        "SELECT pg_try_advisory_xact_lock(hashtextextended('model-router:user-risk-anomaly-batch', 0)) AS locked",
+      );
+      if (fence.rows[0]?.locked !== true) {
+        return { detected: 0, rateLimited: 0, keysSuspended: 0, accountsSuspended: 0, skipped: true };
+      }
       const inserted = await tx.query<DetectionRow>(
         `WITH recent AS (
            SELECT user_id, tenant_id, api_key_id,

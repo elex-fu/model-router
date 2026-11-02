@@ -8,12 +8,16 @@ class RiskFake implements Pick<SqlExecutor, 'query'> {
   inserted: Array<Record<string, unknown>> = [];
   readonly counts = new Map<string, string>();
   readonly audits: Array<Record<string, unknown>> = [];
+  /** Another replica holding the batch fence makes runBatch skip. */
+  fenceLocked = true;
 
   async query<Row>(sql: string, values: readonly unknown[] = []): Promise<SqlResult<Row>> {
     this.statements.push({ sql, values });
     let rows: Record<string, unknown>[] = [];
     let rowCount = rows.length;
-    if (sql.includes('WITH recent AS')) {
+    if (sql.includes('pg_try_advisory_xact_lock')) {
+      rows = [{ locked: this.fenceLocked }];
+    } else if (sql.includes('WITH recent AS')) {
       rows = this.inserted;
     } else if (sql.includes('SELECT count(*)::text AS count FROM saas_user_anomaly_detections')) {
       rows = [{ count: this.counts.get(String(values[0])) ?? '0' }];
@@ -147,11 +151,32 @@ test('detection insertion is idempotent and abrupt-pattern SQL compares a preced
   const executor = new RiskFake();
   const result = await new PostgresUserAnomalyDetector(executor).runBatch();
   assert.deepEqual(result, { detected: 0, rateLimited: 0, keysSuspended: 0, accountsSuspended: 0 });
-  const batch = executor.statements[0];
+  const batch = executor.statements.find(({ sql }) => sql.includes('WITH recent AS'));
   assert.ok(batch);
   assert.match(batch.sql, /ON CONFLICT \(api_key_id, kind, window_start\) DO NOTHING/);
   assert.match(batch.sql, /r\.calls >= 2 \* b\.calls/);
   assert.match(batch.sql, /r\.models > b\.models OR r\.protocols > b\.protocols/);
+  assert.equal(executor.audits.length, 0);
+});
+
+test('a batch held by another replica skips without detection or enforcement', async () => {
+  const executor = new RiskFake();
+  executor.inserted = [detection('user-rate', 'key-rate')];
+  executor.counts.set('user-rate', '1');
+  executor.fenceLocked = false;
+  const detector = new PostgresUserAnomalyDetector(executor);
+  assert.deepEqual(await detector.runBatch(), {
+    detected: 0,
+    rateLimited: 0,
+    keysSuspended: 0,
+    accountsSuspended: 0,
+    skipped: true,
+  });
+  assert.equal(
+    executor.statements.some(({ sql }) => sql.includes('WITH recent AS')),
+    false,
+    'a skipped cycle never pays the detection aggregate',
+  );
   assert.equal(executor.audits.length, 0);
 });
 
@@ -164,7 +189,7 @@ test('detection window_start is bucket-aligned, never the raw batch run time', a
   // window size, not from $1 (the batch "now").
   const executor = new RiskFake();
   await new PostgresUserAnomalyDetector(executor, { windowSeconds: 300 }).runBatch();
-  const batch = executor.statements[0];
+  const batch = executor.statements.find(({ sql }) => sql.includes('WITH recent AS'));
   assert.ok(batch);
   const insert = batch.sql.slice(batch.sql.indexOf('INSERT INTO saas_user_anomaly_detections'));
   assert.match(insert, /to_timestamp\(floor\(extract\(epoch FROM \$1::timestamptz\) \/ \$2\) \* \$2\)/);

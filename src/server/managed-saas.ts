@@ -319,6 +319,7 @@ import {
   startRiskControlRetentionWorker,
 } from '../saas/risk/retention-worker.js';
 import { PostgresUserRiskObservationRecorder } from '../saas/risk/user-risk.js';
+import { type UserAnomalyWorkerHandle, startUserAnomalyDetectionWorker } from '../saas/risk/user-anomaly-worker.js';
 import { loadCommercialAttestationTrust } from '../saas/runtime/commercial-attestation-trust.js';
 import { loadCredentialValidationTargetsModule } from '../saas/runtime/credential-validation-targets-module.js';
 import {
@@ -524,6 +525,8 @@ export interface ManagedSaasRuntime {
   readonly probeRunRetentionWorker: ProbeMonitorWorkerHandle | null;
   /** Batch-5 §5.4 risk-control retention loop; control-plane workload only. */
   readonly riskControlRetentionWorker: RiskControlRetentionWorkerHandle | null;
+  /** M3 §7.2 user anomaly detection batch loop; control-plane workload only. */
+  readonly userAnomalyWorker: UserAnomalyWorkerHandle | null;
   /** Batch-5 §5.2 public brand snapshot materialization loop; control-plane workload only. */
   readonly publicBrandSnapshotWorker: PublicBrandSnapshotWorkerHandle | null;
   /** R4 OAuth refresh loop; only when the deployment wires a privileged rotator. */
@@ -1933,6 +1936,7 @@ async function startCredentialValidationWorkerRuntime(
       probeMonitorWorker: probeMonitorWorker ?? null,
       probeRunRetentionWorker: null,
       riskControlRetentionWorker: null,
+      userAnomalyWorker: null,
       publicBrandSnapshotWorker: null,
       oauthTokenRefreshWorker: oauthRefreshWorker ?? null,
       announcementFanoutWorker: null,
@@ -2212,6 +2216,7 @@ export async function startManagedSaasServer(
       probeMonitorWorker: null,
       probeRunRetentionWorker: null,
       riskControlRetentionWorker: null,
+      userAnomalyWorker: null,
       publicBrandSnapshotWorker: null,
       oauthTokenRefreshWorker: null,
       announcementFanoutWorker: null,
@@ -2284,6 +2289,7 @@ export async function startManagedSaasServer(
   let probeRunRetentionWorker: ProbeMonitorWorkerHandle | undefined;
   let accountBanDispositionWorker: AccountBanDispositionWorkerHandle | undefined;
   let riskControlRetentionWorker: RiskControlRetentionWorkerHandle | undefined;
+  let userAnomalyWorker: UserAnomalyWorkerHandle | undefined;
   let publicBrandSnapshotWorker: PublicBrandSnapshotWorkerHandle | undefined;
   let paymentWorker: PaymentWebhookWorkerHandle | undefined;
   let oauthRefreshWorker: OauthTokenRefreshWorkerHandle | undefined;
@@ -2320,6 +2326,7 @@ export async function startManagedSaasServer(
         ...(probeRunRetentionWorker ? [probeRunRetentionWorker.close()] : []),
         ...(accountBanDispositionWorker ? [accountBanDispositionWorker.close()] : []),
         ...(riskControlRetentionWorker ? [riskControlRetentionWorker.close()] : []),
+        ...(userAnomalyWorker ? [userAnomalyWorker.close()] : []),
         ...(publicBrandSnapshotWorker ? [publicBrandSnapshotWorker.close()] : []),
       ];
       await closeAllResources(
@@ -3785,6 +3792,17 @@ export async function startManagedSaasServer(
       riskControlRetentionWorker = startRiskControlRetentionWorker(database, {
         onError: (error) => console.error('model-router managed risk-control retention cycle failed', error),
       });
+      // M3 §7.2: the anomaly detection batch (migration 153 ladder). Harmless
+      // on an empty observation table; each cycle logs only aggregate counts.
+      userAnomalyWorker = startUserAnomalyDetectionWorker(database, {
+        onError: (error) => console.error('model-router managed user anomaly detection cycle failed', error),
+        onCycle: (result) => {
+          if (result.skipped === true) return;
+          if (result.detected > 0 || result.rateLimited > 0 || result.keysSuspended > 0 || result.accountsSuspended > 0) {
+            console.warn('model-router managed user anomaly cycle', JSON.stringify(result));
+          }
+        },
+      });
 
       // Batch-5 §5.2 OEM white-label: the control plane owns the snapshot
       // materialization loop (periodic cycles; the first is delayed by the
@@ -3971,6 +3989,7 @@ export async function startManagedSaasServer(
       probeMonitorWorker: null,
       probeRunRetentionWorker: probeRunRetentionWorker ?? null,
       riskControlRetentionWorker: riskControlRetentionWorker ?? null,
+      userAnomalyWorker: userAnomalyWorker ?? null,
       publicBrandSnapshotWorker: publicBrandSnapshotWorker ?? null,
       oauthTokenRefreshWorker: oauthRefreshWorker ?? null,
       announcementFanoutWorker: announcementFanoutWorker ?? null,
