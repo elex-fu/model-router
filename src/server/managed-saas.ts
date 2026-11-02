@@ -350,6 +350,9 @@ import {
   loadValidationWorkerProviderCredentialKms,
   SAAS_VALIDATION_WORKER_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE,
 } from '../saas/runtime/validation-worker-provider-credential-kms.js';
+import { createBulkImportCredentialSinks } from '../saas/supply/bulk-import-adapters.js';
+import { BulkAccountImportService } from '../saas/supply/bulk-import-service.js';
+import { PostgresBulkImportValidationQueue } from '../saas/supply/bulk-import-validation.js';
 import { PostgresCnProvidersQuotaStore } from '../saas/supply/cn-providers-quota-store-postgres.js';
 import {
   type CnProvidersQuotaWorkerHandle,
@@ -409,6 +412,8 @@ import {
 } from '../saas/supply/openrouter-model-pricing-sync-worker.js';
 import { createBuiltinPlatformInferenceAccessAdmissionReadiness } from '../saas/supply/platform-inference-access-admission-readiness.js';
 import { PlatformInferenceAccessProvisioningService } from '../saas/supply/platform-inference-access-provisioning.js';
+import { PostgresBulkImportReadStore } from '../saas/supply/postgres-bulk-import-read-store.js';
+import { PostgresBulkImportStore } from '../saas/supply/postgres-bulk-import-store.js';
 import {
   PostgresProbeMonitorStore,
   type ProbeMonitorWorkerHandle,
@@ -2040,6 +2045,26 @@ export function createDeploymentRequestDiagnostics(
   });
 }
 
+/**
+ * Bulk import is disabled when the fingerprint key is unset (routes answer
+ * 503); a configured but malformed key fails startup closed. Accepts canonical
+ * base64 or hex decoding to at least 32 bytes.
+ */
+function bulkImportFingerprintKey(env: Readonly<Record<string, string | undefined>>): Buffer | undefined {
+  const name = 'MODEL_ROUTER_SAAS_BULK_IMPORT_FINGERPRINT_KEY';
+  const encoded = env[name]?.trim();
+  if (encoded === undefined || encoded.length === 0) return undefined;
+  const hex = encoded.length % 2 === 0 && /^[0-9a-fA-F]+$/.test(encoded);
+  const key = Buffer.from(encoded, hex ? 'hex' : 'base64');
+  const validBase64 =
+    /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded) &&
+    key.toString('base64') === encoded;
+  if ((!hex && !validBase64) || key.length < 32) {
+    throw new Error(`${name} must be base64 or hex decoding to at least 32 bytes`);
+  }
+  return key;
+}
+
 export async function startManagedSaasServer(
   deployment: ManagedSaasDeploymentConfig,
   options: ManagedSaasStartOptions = {},
@@ -2768,6 +2793,36 @@ export async function startManagedSaasServer(
               supplyProfileResolver,
             })
           : undefined;
+      const bulkImportFingerprint = bulkImportFingerprintKey(process.env);
+      const bulkImport =
+        providerSupplyService === undefined || bulkImportFingerprint === undefined
+          ? undefined
+          : {
+              service: new BulkAccountImportService({
+                store: new PostgresBulkImportStore(database),
+                sinks: createBulkImportCredentialSinks({
+                  codex: createProviderSupplyCodexCredentialSink({
+                    supply: providerSupplyService,
+                    resolveCatalogBinding: createPostgresCodexCatalogBindingResolver(database),
+                  }),
+                  claude: createProviderSupplyClaudeCredentialSink({
+                    supply: providerSupplyService,
+                    resolveCatalogBinding: createPostgresClaudeCatalogBindingResolver(database),
+                  }),
+                  gemini: createProviderSupplyGeminiCredentialSink({
+                    supply: providerSupplyService,
+                    resolveCatalogBinding: createPostgresGeminiCatalogBindingResolver(database),
+                  }),
+                  grok: createProviderSupplyGrokCredentialSink({
+                    supply: providerSupplyService,
+                    resolveCatalogBinding: createPostgresGrokCatalogBindingResolver(database),
+                  }),
+                }),
+                validationQueue: new PostgresBulkImportValidationQueue(database),
+                fingerprintKey: bulkImportFingerprint,
+              }),
+              store: new PostgresBulkImportReadStore(database),
+            };
       const customerKeyService = new KeyService(database, { resolver: supplyProfileResolver });
       const customerSessionTtlSeconds = options.customerSessionTtlSeconds ?? DEFAULT_CUSTOMER_SESSION_TTL_SECONDS;
       const customerKeyHandler = createSaasKeyHandler({
@@ -3422,6 +3477,7 @@ export async function startManagedSaasServer(
         audit: platformAuditService,
         pricing: platformPricingService,
         supply: providerSupplyService,
+        ...(bulkImport === undefined ? {} : { bulkImport }),
         ...(providerSupplyService && commercialTrust && effectiveControlPlanePoolMax >= 2
           ? {
               platformInferenceAccess: new PlatformInferenceAccessProvisioningService(database, {
