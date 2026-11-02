@@ -1012,6 +1012,35 @@ test('managed provider close failure remains rejected while settled owners recei
   assert.equal(events.filter((event) => event === 'database-close').length, 1);
 });
 
+test('managed control plane owns and closes the account ban disposition worker', async () => {
+  const events: string[] = [];
+  const environment = managedEnvironment({ customer: 45121, platform: 45122, gateway: 45123 });
+  let starts = 0;
+  let closes = 0;
+  const runtime = await startManagedSaasServer(
+    deploymentFrom(environment),
+    managedOptions(events, {
+      createListener: () => inertListener(),
+      accountBanDispositionWorkerOptions: { pollIntervalMs: 1234 },
+      startAccountBanDispositionWorker: (service, options) => {
+        starts += 1;
+        assert.equal(service.constructor.name, 'AccountBanDispositionService');
+        assert.equal(options.pollIntervalMs, 1234);
+        return {
+          close: async () => {
+            closes += 1;
+          },
+        };
+      },
+    }),
+  );
+  assert.equal(starts, 1);
+  await runtime.close();
+  assert.equal(closes, 1);
+  await runtime.close();
+  assert.equal(closes, 1);
+});
+
 test('managed hung provider close is bounded and prevents dependent database close', async () => {
   const events: string[] = [];
   const environment = managedEnvironment({ customer: 45121, platform: 45122, gateway: 45123 });

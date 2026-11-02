@@ -7,6 +7,7 @@ import {
   PostgresAccountBanLedger,
   PostgresGatewayAccountBanCandidateSource,
   type ProviderAccountBanCommand,
+  startAccountBanDispositionWorker,
 } from '../../../src/saas/supply/account-ban-service.js';
 
 function databaseWith(query: (sql: string, values: readonly unknown[]) => Promise<SqlResult<never>>): SaasDatabase {
@@ -96,6 +97,62 @@ test('the batched disposition preserves authz CAS and isolates one failed accoun
   assert.equal(calls[1]?.audit.actorUserId, 'account-ban-disposition-worker');
   assert.equal(errors.length, 1);
   assert.doesNotMatch(JSON.stringify(calls), /response|body|credential|secret/i);
+});
+
+test('the disposition worker waits before its first sweep and close waits for an in-flight sweep', async () => {
+  let sweeps = 0;
+  let release: (() => void) | undefined;
+  let entered: (() => void) | undefined;
+  const enteredSweep = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const inFlight = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const service = new AccountBanDispositionService(
+    {
+      async listGatewayAccountBanCandidates() {
+        sweeps += 1;
+        entered?.();
+        await inFlight;
+        return [];
+      },
+    },
+    {
+      async banProviderAccount() {
+        return null as never;
+      },
+    },
+  );
+  const worker = startAccountBanDispositionWorker(service, { pollIntervalMs: 5 });
+  assert.equal(sweeps, 0);
+  await enteredSweep;
+  const closing = worker.close();
+  const duplicateClose = worker.close();
+  release?.();
+  await Promise.all([closing, duplicateClose]);
+  assert.equal(sweeps, 1);
+});
+
+test('closing the disposition worker before the first interval prevents a sweep', async () => {
+  let sweeps = 0;
+  const service = new AccountBanDispositionService(
+    {
+      async listGatewayAccountBanCandidates() {
+        sweeps += 1;
+        return [];
+      },
+    },
+    {
+      async banProviderAccount() {
+        return null as never;
+      },
+    },
+  );
+  const worker = startAccountBanDispositionWorker(service, { pollIntervalMs: 60_000 });
+  await worker.close();
+  await worker.close();
+  assert.equal(sweeps, 0);
 });
 
 test('the ban ledger reports lifecycle facts, whole alive days, and injected cumulative output', async () => {

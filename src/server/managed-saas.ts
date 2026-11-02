@@ -350,6 +350,14 @@ import {
   loadValidationWorkerProviderCredentialKms,
   SAAS_VALIDATION_WORKER_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE,
 } from '../saas/runtime/validation-worker-provider-credential-kms.js';
+import {
+  AccountBanDispositionService,
+  type AccountBanDispositionWorkerHandle,
+  type AccountBanDispositionWorkerOptions,
+  PostgresGatewayAccountBanCandidateSource,
+  type ProviderAccountBanWriter,
+  startAccountBanDispositionWorker,
+} from '../saas/supply/account-ban-service.js';
 import { createBulkImportCredentialSinks } from '../saas/supply/bulk-import-adapters.js';
 import { BulkAccountImportService } from '../saas/supply/bulk-import-service.js';
 import { PostgresBulkImportValidationQueue } from '../saas/supply/bulk-import-validation.js';
@@ -712,6 +720,18 @@ export interface ManagedSaasStartOptions {
   ) => ProbeMonitorWorkerHandle;
   /** R6a: optional probe monitor loop tuning. */
   probeMonitorWorkerOptions?: ProbeMonitorWorkerOptions;
+  /**
+   * Optional privileged probe-ban composition. The restricted validation-worker
+   * role does not hold account/credential lifecycle grants; deployments must
+   * provide a writer bound to an audited, authorized control-plane store.
+   */
+  probeMonitorBanWriter?: ProviderAccountBanWriter;
+  /** Control-plane gateway-health ban sweep; starts when provider supply is available. */
+  accountBanDispositionWorkerOptions?: AccountBanDispositionWorkerOptions;
+  startAccountBanDispositionWorker?: (
+    service: AccountBanDispositionService,
+    options: AccountBanDispositionWorkerOptions,
+  ) => AccountBanDispositionWorkerHandle;
   /** R6a: deterministic seam for the control-plane probe run retention loop. */
   startProbeRunRetentionWorker?: (
     database: SaasDatabase,
@@ -1866,6 +1886,7 @@ async function startCredentialValidationWorkerRuntime(
         ...(options.probeMonitorWorkerOptions ?? {}),
         deployment: deployment.deploymentId,
         environment: deployment.environmentId,
+        ...(options.probeMonitorBanWriter === undefined ? {} : { banWriter: options.probeMonitorBanWriter }),
         // R9 §4 P1: account probes honor the same operator egress allowlist.
         ...providerEgressAllowlistOption,
       }),
@@ -2249,6 +2270,7 @@ export async function startManagedSaasServer(
   let alertEvaluatorWorker: AlertEvaluatorWorkerHandle | undefined;
   let reportSchedulerWorker: ReportSchedulerWorkerHandle | undefined;
   let probeRunRetentionWorker: ProbeMonitorWorkerHandle | undefined;
+  let accountBanDispositionWorker: AccountBanDispositionWorkerHandle | undefined;
   let riskControlRetentionWorker: RiskControlRetentionWorkerHandle | undefined;
   let publicBrandSnapshotWorker: PublicBrandSnapshotWorkerHandle | undefined;
   let paymentWorker: PaymentWebhookWorkerHandle | undefined;
@@ -2284,6 +2306,7 @@ export async function startManagedSaasServer(
         ...(alertEvaluatorWorker ? [alertEvaluatorWorker.close()] : []),
         ...(reportSchedulerWorker ? [reportSchedulerWorker.close()] : []),
         ...(probeRunRetentionWorker ? [probeRunRetentionWorker.close()] : []),
+        ...(accountBanDispositionWorker ? [accountBanDispositionWorker.close()] : []),
         ...(riskControlRetentionWorker ? [riskControlRetentionWorker.close()] : []),
         ...(publicBrandSnapshotWorker ? [publicBrandSnapshotWorker.close()] : []),
       ];
@@ -3695,6 +3718,23 @@ export async function startManagedSaasServer(
         ...(options.probeRunRetentionWorkerOptions ?? {}),
         onError: () => console.error('model-router managed probe run retention cycle failed'),
       });
+      // Permanent lifecycle writes stay on the control-plane role. The gateway
+      // only records durable health evidence; this bounded background sweep
+      // applies the audited account/credential ban with authz-version CAS.
+      if (providerSupplyService) {
+        const banOptions: AccountBanDispositionWorkerOptions = {
+          ...(options.accountBanDispositionWorkerOptions ?? {}),
+          onError: (error) => console.error('model-router account ban disposition failed', error),
+        };
+        accountBanDispositionWorker = (options.startAccountBanDispositionWorker ?? startAccountBanDispositionWorker)(
+          new AccountBanDispositionService(
+            new PostgresGatewayAccountBanCandidateSource(database),
+            providerSupplyService,
+            banOptions,
+          ),
+          banOptions,
+        );
+      }
       // Batch-5 §5.4 (task #19): moderation log retention (hit/non-hit
       // windows) plus flagged-hash expiry, on the control-plane DELETE grant.
       riskControlRetentionWorker = startRiskControlRetentionWorker(database, {

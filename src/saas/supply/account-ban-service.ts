@@ -160,6 +160,57 @@ export class AccountBanDispositionService {
   }
 }
 
+export interface AccountBanDispositionWorkerOptions extends AccountBanDispositionOptions {
+  readonly pollIntervalMs?: number;
+}
+
+export interface AccountBanDispositionWorkerHandle {
+  close(): Promise<void>;
+}
+
+/** Control-plane scheduler; the first sweep waits one interval and close is idempotent. */
+export function startAccountBanDispositionWorker(
+  service: AccountBanDispositionService,
+  options: AccountBanDispositionWorkerOptions = {},
+): AccountBanDispositionWorkerHandle {
+  const intervalMs = positiveInteger(options.pollIntervalMs, 60_000, 3_600_000);
+  let stopped = false;
+  let timer: NodeJS.Timeout | undefined;
+  let resolveWait: (() => void) | undefined;
+  const delay = (): Promise<void> => {
+    if (stopped) return Promise.resolve();
+    return new Promise((resolve) => {
+      resolveWait = resolve;
+      timer = setTimeout(() => {
+        timer = undefined;
+        resolveWait = undefined;
+        resolve();
+      }, intervalMs);
+    });
+  };
+  const loop = (async () => {
+    await delay();
+    while (!stopped) {
+      try {
+        await service.runGatewaySweep();
+      } catch (error) {
+        options.onError?.(error);
+      }
+      if (stopped) break;
+      await delay();
+    }
+  })();
+  return {
+    async close() {
+      if (stopped) return loop;
+      stopped = true;
+      if (timer !== undefined) clearTimeout(timer);
+      resolveWait?.();
+      await loop;
+    },
+  };
+}
+
 export interface AccountBanLedgerEntry {
   readonly accountId: string;
   readonly ownerKind: 'tenant' | 'platform';
