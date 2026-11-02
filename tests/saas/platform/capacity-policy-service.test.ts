@@ -128,6 +128,15 @@ class CapacityPolicyDatabase implements SaasDatabase {
   malformedPolicyRows = false;
   malformedKeyRows = false;
   lockedPrincipalOverride: Row | null = null;
+  /** M3 §7.2: resolved user ceiling served to the key clamp read. */
+  userLimits: {
+    requestsPerMinute?: string;
+    maxConcurrentRequests?: string;
+    dailyTokenUnits?: string;
+    dailyChargeMinorUnits?: string;
+    chargeCurrency?: string;
+  } | null = null;
+  userLimitReads: string[] = [];
   private transactionStart: number | null = null;
 
   async query<RowType>(_sql: string, _values: readonly unknown[] = []): Promise<SqlResult<RowType>> {
@@ -367,6 +376,23 @@ class CapacityPolicyDatabase implements SaasDatabase {
       );
       if (this.malformedKeyRows && rows[0]) rows.push({ ...rows[0] });
       return result(rows as RowType[]);
+    }
+    if (lower.includes('from saas_user_limit_defaults')) {
+      // M3 §7.2 clamp read: the resolved user ceiling for the key principal.
+      // Absent configuration (null) is unlimited — the clamp is identity.
+      const [userId] = values;
+      assert.ok(typeof userId === 'string');
+      this.userLimitReads.push(String(userId));
+      const configured = this.userLimits;
+      return result([
+        {
+          requests_per_minute: configured?.requestsPerMinute ?? null,
+          max_concurrent_requests: configured?.maxConcurrentRequests ?? null,
+          daily_token_units: configured?.dailyTokenUnits ?? null,
+          daily_charge_minor_units: configured?.dailyChargeMinorUnits ?? null,
+          charge_currency: configured?.dailyChargeMinorUnits === undefined ? null : (configured.chargeCurrency ?? null),
+        },
+      ] as RowType[]);
     }
     if (lower.startsWith('update saas_api_keys')) {
       this.requireWriterFences(preceding, true);
@@ -1136,4 +1162,52 @@ test('every scope write persists a single whitelisted revision detail and never 
     database.statements.some(({ sql }) => /key_hash|secret_value|api_key_secret/i.test(sql)),
     false,
   );
+});
+
+test('member key writes clamp to the resolved user ceiling; project-service keys never read it', async () => {
+  const { database, service } = createService();
+  database.userLimits = { requestsPerMinute: '10', maxConcurrentRequests: '2' };
+  const updated = await service.setApiKeyPolicy({
+    tenantId: TENANT_ID,
+    projectId: PROJECT_ID,
+    apiKeyId: API_KEY_ID,
+    ...setBase(),
+  });
+
+  assert.deepEqual(database.userLimitReads, [MEMBER_ID], 'the clamp resolves the member principal ceiling once');
+  assert.equal(updated.limits.requestsPerMinute, 10);
+  assert.equal(updated.limits.maxConcurrentRequests, 2);
+  assert.equal(updated.limits.tokensPerMinute, POLICY_LIMITS.tokensPerMinute, 'tpm has no user tier');
+  assert.equal(database.state.apiKeys[0]?.requests_per_minute, 10);
+  assert.equal(database.state.apiKeys[0]?.max_concurrent_requests, 2);
+  assert.equal(database.state.auditDetails[0]?.after_requests_per_minute, 10, 'the audit records what was stored');
+  assert.equal(database.state.auditDetails[0]?.after_max_concurrent_requests, 2);
+
+  // A request that clamps to the currently stored values is an honest NO_CHANGE.
+  database.state.apiKeys[0]!.authz_version = '2';
+  await assert.rejects(
+    () =>
+      service.setApiKeyPolicy({
+        tenantId: TENANT_ID,
+        projectId: PROJECT_ID,
+        apiKeyId: API_KEY_ID,
+        ...setBase(2),
+      }),
+    (error: unknown) => assertCapacityError(error, 'NO_CHANGE'),
+  );
+
+  // Project-service principals keep tenant/project/key controls only.
+  const projectKey = createService();
+  projectKey.database.state.apiKeys[0]!.principal_user_id = null;
+  projectKey.database.state.apiKeys[0]!.execution_principal_type = 'project_service';
+  projectKey.database.state.apiKeys[0]!.execution_principal_id = PROJECT_ID;
+  projectKey.database.userLimits = { requestsPerMinute: '1' };
+  const untouched = await projectKey.service.setApiKeyPolicy({
+    tenantId: TENANT_ID,
+    projectId: PROJECT_ID,
+    apiKeyId: API_KEY_ID,
+    ...setBase(),
+  });
+  assert.deepEqual(projectKey.database.userLimitReads, []);
+  assert.equal(untouched.limits.requestsPerMinute, POLICY_LIMITS.requestsPerMinute);
 });

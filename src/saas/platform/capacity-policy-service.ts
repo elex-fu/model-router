@@ -5,6 +5,8 @@ import {
   sortAndDedupeAdvisoryKeys,
 } from '../db/advisory-lock-keys.js';
 import type { SaasDatabase, SqlExecutor, SqlResult } from '../db/types.js';
+import { selectUserLimitPolicy } from '../risk/postgres-user-limits.js';
+import { capKeyLimitsByUser } from '../risk/user-limits.js';
 import { hasPlatformRole } from './access/authorization.js';
 import { isPlatformAdminRole, type PlatformAdminActor, type PlatformAdminRole } from './access/types.js';
 
@@ -1022,7 +1024,28 @@ export class PlatformCapacityPolicyService {
       if (beforeRecord.revision !== write.expectedRevision) {
         fail('CAS_CONFLICT', 'API key authorization revision conflict');
       }
-      ensureChanged(beforeRecord.limits, write.limits);
+      // M3 §7.2: key self-tuning can only tighten the resolved user ceiling
+      // (override → default). This is the administrative clamp — admission
+      // enforces the user tier independently, so a concurrent user-limit
+      // change cannot be bypassed. A request that clamps to the currently
+      // stored values fails NO_CHANGE, the honest operator signal.
+      let limits = write.limits;
+      if (principal.kind === 'member') {
+        const userPolicy = await selectUserLimitPolicy(tx, principal.userId);
+        const capped = capKeyLimitsByUser(
+          {
+            requestsPerMinute: BigInt(write.limits.requestsPerMinute),
+            maxConcurrentRequests: BigInt(write.limits.maxConcurrentRequests),
+          },
+          userPolicy,
+        );
+        limits = {
+          ...write.limits,
+          requestsPerMinute: Number(capped.requestsPerMinute),
+          maxConcurrentRequests: Number(capped.maxConcurrentRequests),
+        };
+      }
+      ensureChanged(beforeRecord.limits, limits);
       const afterRevision = nextRevision(beforeRecord.revision);
       const updated = await tx.query<ApiKeyCapacityRow>(
         `UPDATE saas_api_keys
@@ -1037,15 +1060,15 @@ export class PlatformCapacityPolicyService {
           tenantId,
           projectId,
           apiKeyId,
-          write.limits.requestsPerMinute,
-          write.limits.tokensPerMinute,
-          write.limits.maxConcurrentRequests,
+          limits.requestsPerMinute,
+          limits.tokensPerMinute,
+          limits.maxConcurrentRequests,
           beforeRecord.revision,
         ],
       );
       const afterRow = oneRow(resultRows(updated, 'API key capacity update'), 'CAS_CONFLICT', 'API key update');
       const afterRecord = apiKeyRecord(tenantId, projectId, apiKeyId, afterRow);
-      if (afterRecord.revision !== afterRevision || !sameLimits(afterRecord.limits, write.limits)) {
+      if (afterRecord.revision !== afterRevision || !sameLimits(afterRecord.limits, limits)) {
         fail('STORAGE_ERROR', 'API key capacity update returned inconsistent state');
       }
       await appendAudit(tx, {
@@ -1058,7 +1081,7 @@ export class PlatformCapacityPolicyService {
         beforeRevision: beforeRecord.revision,
         afterRevision,
         before: beforeRecord.limits,
-        after: write.limits,
+        after: limits,
         reason: write.reason,
         requestId: write.requestId,
         actorId: actor.userId,
