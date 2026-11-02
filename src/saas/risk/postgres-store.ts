@@ -52,6 +52,11 @@ export interface RiskControlCleanupResult {
   readonly deletedObservations: number;
 }
 
+export interface ApiKeyDispositionOutcome {
+  readonly status: 'suspended' | 'resumed' | 'unchanged';
+  readonly reason?: 'not_found' | 'not_active' | 'not_suspended' | 'revoked' | 'principal_disabled';
+}
+
 const LOG_COLUMNS = `id, request_id, tenant_id, user_id, api_key_id, api_key_name, model, protocol, mode,
   action, flagged, highest_category, highest_score, matched_keyword, category_scores, threshold_snapshot,
   input_excerpt, input_hash, upstream_latency_ms, error, violation_count, auto_banned, email_sent,
@@ -421,6 +426,75 @@ export class PostgresRiskControlAdminStore {
       );
       await tx.query('DELETE FROM saas_user_risk_markers WHERE user_id = $1', [userId]);
       return result.rowCount === 1;
+    });
+  }
+
+  /**
+   * M3 §7.2 reversible key pause (migration 154): suspend an active key.
+   * Admission already fails closed on any non-active status, so the gateway
+   * needs no change. Revoked keys are terminal — only 'active' suspends.
+   */
+  async suspendApiKey(tenantId: string, projectId: string, apiKeyId: string): Promise<ApiKeyDispositionOutcome> {
+    return this.atomic(async (tx) => {
+      const existing = await tx.query<{ readonly status: unknown }>(
+        'SELECT status FROM saas_api_keys WHERE tenant_id = $1 AND project_id = $2 AND id = $3 FOR UPDATE',
+        [tenantId, projectId, apiKeyId],
+      );
+      const row = existing.rows[0];
+      if (row === undefined) return { status: 'unchanged' as const, reason: 'not_found' as const };
+      if (row.status !== 'active') return { status: 'unchanged' as const, reason: 'not_active' as const };
+      await tx.query(
+        `UPDATE saas_api_keys
+            SET status = 'suspended', suspended_at = clock_timestamp(), suspended_by_user_id = NULL,
+                authz_version = authz_version + 1
+          WHERE tenant_id = $1 AND project_id = $2 AND id = $3`,
+        [tenantId, projectId, apiKeyId],
+      );
+      return { status: 'suspended' as const };
+    });
+  }
+
+  /**
+   * Resume a suspended key. Revoked keys never resume (the same terminal
+   * contract as unban), and a key whose principal is disabled or carries an
+   * account_suspended marker refuses to resume — an operator cannot
+   * resurrect a key inside a banned account.
+   */
+  async resumeApiKey(tenantId: string, projectId: string, apiKeyId: string): Promise<ApiKeyDispositionOutcome> {
+    return this.atomic(async (tx) => {
+      const existing = await tx.query<{
+        readonly status: unknown;
+        readonly principal_disabled: boolean;
+        readonly account_suspended: boolean;
+      }>(
+        `SELECT key.status,
+                (principal.disabled_at IS NOT NULL) AS principal_disabled,
+                EXISTS (
+                  SELECT 1 FROM saas_user_risk_markers marker
+                   WHERE marker.user_id = key.principal_user_id
+                     AND marker.stage = 'account_suspended'
+                ) AS account_suspended
+           FROM saas_api_keys key
+           LEFT JOIN saas_users principal ON principal.id = key.principal_user_id
+          WHERE key.tenant_id = $1 AND key.project_id = $2 AND key.id = $3
+          FOR UPDATE OF key`,
+        [tenantId, projectId, apiKeyId],
+      );
+      const row = existing.rows[0];
+      if (row === undefined) return { status: 'unchanged' as const, reason: 'not_found' as const };
+      if (row.principal_disabled || row.account_suspended) {
+        return { status: 'unchanged' as const, reason: 'principal_disabled' as const };
+      }
+      if (row.status === 'revoked') return { status: 'unchanged' as const, reason: 'revoked' as const };
+      if (row.status !== 'suspended') return { status: 'unchanged' as const, reason: 'not_suspended' as const };
+      await tx.query(
+        `UPDATE saas_api_keys
+            SET status = 'active', suspended_at = NULL, suspended_by_user_id = NULL,
+                authz_version = authz_version + 1
+          WHERE tenant_id = $1 AND project_id = $2 AND id = $3`,
+        [tenantId, projectId, apiKeyId],
+      );
+      return { status: 'resumed' as const };
     });
   }
 

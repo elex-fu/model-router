@@ -33,6 +33,9 @@ import { PlatformGovernanceError } from './governance/errors.js';
  *   filter dimensions (action / tenant / model / flagged / time / search).
  * - POST /admin/api/v1/risk-control/unban — clears saas_users.disabled_at
  *   for risk-control bans (refuses platform-role accounts).
+ * - POST /admin/api/v1/risk-control/suspend-key | /resume-key — the
+ *   reversible key pause disposition (migration 154); revoked keys and
+ *   keys inside a banned account never resume.
  * - POST /admin/api/v1/risk-control/delete-hash | /clear-hashes — pre-hash
  *   blocklist lifecycle.
  * - POST /admin/api/v1/risk-control/run-cleanup — manual retention sweep
@@ -51,6 +54,8 @@ const ROUTES = new Set([
   'delete-hash',
   'clear-hashes',
   'run-cleanup',
+  'suspend-key',
+  'resume-key',
   'get-default-limits',
   'update-default-limits',
   'get-user-limits',
@@ -71,6 +76,8 @@ export interface RiskControlHttpOptions {
     | 'cleanupExpired'
     | 'enableUser'
     | 'userHoldsPlatformRole'
+    | 'suspendApiKey'
+    | 'resumeApiKey'
   >;
   readonly audit?: RiskControlAuditWriter;
   /** Observation retention window for the manual run-cleanup sweep; default 7. */
@@ -419,6 +426,45 @@ export function createRiskControlHttpHandler(options: RiskControlHttpOptions): R
           const enabled = await options.store.enableUser(userId);
           writeAudit('risk_control.user.unbanned', userId);
           sendJson(res, 200, requestId, { userId, status: enabled ? 'enabled' : 'already_active' });
+          return true;
+        }
+        case 'suspend-key':
+        case 'resume-key': {
+          const body = await readJson(req);
+          requireExactKeys(body, ['tenantId', 'projectId', 'apiKeyId']);
+          const tenantId = bodyIdentifier(body, 'tenantId', 128);
+          const projectId = bodyIdentifier(body, 'projectId', 128);
+          const apiKeyId = bodyIdentifier(body, 'apiKeyId', 128);
+          const outcome =
+            action === 'suspend-key'
+              ? await options.store.suspendApiKey(tenantId, projectId, apiKeyId)
+              : await options.store.resumeApiKey(tenantId, projectId, apiKeyId);
+          writeAudit(
+            action === 'suspend-key' ? 'risk_control.api_key.suspended' : 'risk_control.api_key.resumed',
+            apiKeyId,
+          );
+          if (outcome.status === 'unchanged') {
+            const code =
+              outcome.reason === 'not_found'
+                ? 404
+                : outcome.reason === 'principal_disabled'
+                  ? 409
+                  : outcome.reason === 'revoked'
+                    ? 409
+                    : 400;
+            const safeReason =
+              outcome.reason === 'not_found'
+                ? 'API key not found'
+                : outcome.reason === 'not_active'
+                  ? 'API key is not active'
+                  : outcome.reason === 'not_suspended'
+                    ? 'API key is not suspended'
+                    : outcome.reason === 'revoked'
+                      ? 'Revoked keys never resume; the user must create a new key'
+                      : 'The key principal is disabled or account-suspended';
+            throw new HttpError(code, 'API_KEY_DISPOSITION', safeReason);
+          }
+          sendJson(res, 200, requestId, { apiKeyId, status: outcome.status });
           return true;
         }
         case 'delete-hash': {

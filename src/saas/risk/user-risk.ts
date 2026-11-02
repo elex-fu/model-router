@@ -288,22 +288,25 @@ export class PostgresUserAnomalyDetector {
           });
           rateLimited += 1;
         } else if (detections === 2n) {
-          const revoked = await tx.query<{ id: unknown; tenant_id: unknown }>(
+          // Reversible pause (migration 154): the second rung suspends the
+          // offending key; revocation stays the terminal disposition of the
+          // account-suspension rung.
+          const suspended = await tx.query<{ id: unknown; tenant_id: unknown }>(
             `UPDATE saas_api_keys
-                SET status = 'revoked', revoked_at = clock_timestamp(), revoked_by_user_id = NULL,
+                SET status = 'suspended', suspended_at = clock_timestamp(), suspended_by_user_id = NULL,
                     authz_version = authz_version + 1
               WHERE id = $2 AND principal_user_id = $1 AND status = 'active'
               RETURNING id::text, tenant_id::text`,
             [row.user_id, row.api_key_id],
           );
           await setMarker(tx, row.user_id, 'key_suspended', null);
-          for (const key of revoked.rows) {
+          for (const key of suspended.rows) {
             if (typeof key.id !== 'string' || typeof key.tenant_id !== 'string') {
-              throw new TypeError('Malformed revoked key row');
+              throw new TypeError('Malformed suspended key row');
             }
             await audit(tx, {
               tenantId: key.tenant_id,
-              action: 'api_key.revoked',
+              action: 'api_key.suspended',
               targetType: 'api_key',
               targetId: key.id,
             });

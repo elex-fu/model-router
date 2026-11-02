@@ -131,6 +131,7 @@ import { BULK_ACCOUNT_IMPORT_SAAS_MIGRATION } from './150_bulk_account_import.js
 import { PROVIDER_ACCOUNT_COST_SAAS_MIGRATION } from './151_provider_account_cost.js';
 import { ACCOUNT_BAN_LEDGER_SAAS_MIGRATION } from './152_account_ban_ledger.js';
 import { USER_RISK_CONTROLS_SAAS_MIGRATION } from './153_user_risk_controls.js';
+import { USER_KEY_SUSPENSION_SAAS_MIGRATION } from './154_user_key_suspension.js';
 
 export interface SaasMigration {
   version: number;
@@ -831,4 +832,7 @@ export const SAAS_MIGRATIONS: readonly SaasMigration[] = [
   // escalation markers, and digest-only risk observations. Usage accounting
   // itself stays in the migration-081 reservation ledger.
   USER_RISK_CONTROLS_SAAS_MIGRATION,
+  // Reversible key pause: the anomaly ladder's second rung suspends instead
+  // of revoking; revocation stays terminal.
+  USER_KEY_SUSPENSION_SAAS_MIGRATION,
 ];

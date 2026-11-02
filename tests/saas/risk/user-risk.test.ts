@@ -121,9 +121,13 @@ test('batch detection audits evidence and escalates rate limit, key suspension, 
     accountsSuspended: 0,
   });
   assert.ok(second.statements.some(({ values }) => values.includes('key_suspended')));
+  const suspension = second.statements.find(({ sql }) => sql.includes("SET status = 'suspended'"));
+  assert.ok(suspension, 'the second rung suspends instead of revoking');
+  assert.match(suspension.sql, /suspended_at = clock_timestamp\(\)/);
+  assert.match(suspension.sql, /authz_version = authz_version \+ 1/);
   assert.deepEqual(
     second.audits.map((event) => event.action),
-    ['user_anomaly.detected', 'api_key.revoked'],
+    ['user_anomaly.detected', 'api_key.suspended'],
   );
 
   const third = new RiskFake();

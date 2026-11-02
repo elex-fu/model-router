@@ -12,13 +12,13 @@ test('098 registers after 097 ahead of later forwards with the documented gaps',
   assert.equal(migration.name, 'provider_account_rate_counters_and_health_score');
   assert.deepEqual(Object.keys(migration).sort(), ['name', 'sql', 'version']);
   const registered = SAAS_MIGRATIONS.map(({ version }) => version);
-  assert.deepEqual(registered.slice(-11), [143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153]);
+  assert.deepEqual(registered.slice(-12), [143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154]);
   for (let skipped = 64; skipped <= 79; skipped += 1) {
     assert.equal(registered.includes(skipped), false);
   }
   // Later forwards retain their order through 143 journal, 144 audited
   // resolution and the current 153 user-risk head.
-  assert.equal(registered.at(-1), 153);
+  assert.equal(registered.at(-1), 154);
   assert.equal(SAAS_MIGRATIONS[78], migration);
 });
 

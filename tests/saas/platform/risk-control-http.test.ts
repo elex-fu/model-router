@@ -70,9 +70,12 @@ class FakeAdminStore {
   logs: ContentModerationLogRecord[] = [logRecord()];
   listFilters: ContentModerationLogFilter[] = [];
   hashes = new Set(['a'.repeat(64)]);
-  cleanupCalls: { hitBefore: string; nonHitBefore: string }[] = [];
+  cleanupCalls: { hitBefore: string; nonHitBefore: string; observationBefore: string }[] = [];
   enabledUsers: string[] = [];
   platformRoleUsers = new Set<string>();
+  suspendedKeys: Array<{ tenantId: string; projectId: string; apiKeyId: string }> = [];
+  resumedKeys: Array<{ tenantId: string; projectId: string; apiKeyId: string }> = [];
+  keyDisposition: 'ok' | 'not_found' | 'not_active' | 'not_suspended' | 'revoked' | 'principal_disabled' = 'ok';
 
   asStore(): Pick<
     PostgresRiskControlAdminStore,
@@ -85,6 +88,8 @@ class FakeAdminStore {
     | 'cleanupExpired'
     | 'enableUser'
     | 'userHoldsPlatformRole'
+    | 'suspendApiKey'
+    | 'resumeApiKey'
   > {
     return {
       loadConfig: async () => ({ config: this.config, exists: this.exists }),
@@ -106,15 +111,25 @@ class FakeAdminStore {
         this.hashes.clear();
         return deleted;
       },
-      cleanupExpired: async (hitBefore: string, nonHitBefore: string) => {
-        this.cleanupCalls.push({ hitBefore, nonHitBefore });
-        return { deletedHit: 3, deletedNonHit: 7, deletedHashes: 1 };
+      cleanupExpired: async (hitBefore: string, nonHitBefore: string, observationBefore: string) => {
+        this.cleanupCalls.push({ hitBefore, nonHitBefore, observationBefore });
+        return { deletedHit: 3, deletedNonHit: 7, deletedHashes: 1, deletedObservations: 2 };
       },
       enableUser: async (userId: string) => {
         this.enabledUsers.push(userId);
         return { newlyEnabled: true } as never;
       },
       userHoldsPlatformRole: async (userId: string) => this.platformRoleUsers.has(userId),
+      suspendApiKey: async (tenantId: string, projectId: string, apiKeyId: string) => {
+        this.suspendedKeys.push({ tenantId, projectId, apiKeyId });
+        if (this.keyDisposition === 'ok') return { status: 'suspended' } as const;
+        return { status: 'unchanged' as const, reason: this.keyDisposition } as const;
+      },
+      resumeApiKey: async (tenantId: string, projectId: string, apiKeyId: string) => {
+        this.resumedKeys.push({ tenantId, projectId, apiKeyId });
+        if (this.keyDisposition === 'ok') return { status: 'resumed' } as const;
+        return { status: 'unchanged' as const, reason: this.keyDisposition } as const;
+      },
     } as never;
   }
 }
@@ -368,4 +383,52 @@ describe('risk-control admin http surface', () => {
     assert.equal(unknown.handled, false);
     assert.equal(h.store.savedConfigs.length, 0);
   });
+});
+
+it('suspends and resumes keys with audited dispositions and terminal-contract refusals', async () => {
+  const h = harness();
+  const target = { tenantId: 'tenant-1', projectId: 'project-1', apiKeyId: 'key-1' };
+  const suspended = await h.request('/admin/api/v1/risk-control/suspend-key', target);
+  assert.equal(suspended.status, 200);
+  assert.deepEqual(h.store.suspendedKeys, [target]);
+  assert.equal((suspended.body.data as Record<string, unknown>).status, 'suspended');
+
+  h.store.keyDisposition = 'ok';
+  const resumed = await h.request('/admin/api/v1/risk-control/resume-key', target);
+  assert.equal(resumed.status, 200);
+  assert.deepEqual(h.store.resumedKeys, [target]);
+  assert.equal((resumed.body.data as Record<string, unknown>).status, 'resumed');
+  assert.deepEqual(
+    h.auditCalls.map((call) => call.action),
+    ['risk_control.api_key.suspended', 'risk_control.api_key.resumed'],
+  );
+
+  h.store.keyDisposition = 'revoked';
+  const revoked = await h.request('/admin/api/v1/risk-control/resume-key', target);
+  assert.equal(revoked.status, 409);
+  assert.equal((revoked.body.error as Record<string, unknown>).code, 'API_KEY_DISPOSITION');
+  assert.match(String((revoked.body.error as Record<string, unknown>).message), /never resume/);
+
+  h.store.keyDisposition = 'principal_disabled';
+  const banned = await h.request('/admin/api/v1/risk-control/resume-key', target);
+  assert.equal(banned.status, 409);
+
+  h.store.keyDisposition = 'not_found';
+  const missing = await h.request('/admin/api/v1/risk-control/suspend-key', target);
+  assert.equal(missing.status, 404);
+
+  h.store.keyDisposition = 'not_active';
+  const inactive = await h.request('/admin/api/v1/risk-control/suspend-key', target);
+  assert.equal(inactive.status, 400);
+
+  h.store.keyDisposition = 'not_suspended';
+  const notSuspended = await h.request('/admin/api/v1/risk-control/resume-key', target);
+  assert.equal(notSuspended.status, 400);
+
+  const strict = await h.request('/admin/api/v1/risk-control/suspend-key', {
+    tenantId: 'tenant-1',
+    projectId: 'project-1',
+  });
+  assert.equal(strict.status, 400);
+  assert.equal((strict.body.error as Record<string, unknown>).code, 'INVALID_BODY');
 });

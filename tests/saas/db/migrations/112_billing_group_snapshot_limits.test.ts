@@ -12,8 +12,8 @@ test('112 remains registered after the 111 Gemini forward', () => {
   assert.equal(migration.name, 'billing_group_snapshot_limits');
   assert.deepEqual(Object.keys(migration).sort(), ['name', 'sql', 'version']);
   const registered = SAAS_MIGRATIONS.map(({ version }) => version);
-  assert.deepEqual(registered.slice(-11), [143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153]);
-  assert.equal(registered.at(-1), 153);
+  assert.deepEqual(registered.slice(-12), [143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154]);
+  assert.equal(registered.at(-1), 154);
   assert.equal(registered.includes(migration.version), true);
 });
 

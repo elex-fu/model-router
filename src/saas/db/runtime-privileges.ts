@@ -1470,6 +1470,8 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'status',
     'revoked_at',
     'revoked_by_user_id',
+    'suspended_at',
+    'suspended_by_user_id',
     'rotated_by_user_id',
     'last_used_at',
     'authz_version',
