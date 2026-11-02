@@ -1,12 +1,10 @@
 import { randomUUID } from 'node:crypto';
-import { FastGatewayResolutionService } from '../saas/gateway/fast/resolution.js';
-import { createFastOutcomePlatformHttpHandler } from '../saas/gateway/fast/resolution-http.js';
-import type { Socket } from 'node:net';
-import { closeManagedSaasResources, drainManagedSaasShutdown, ManagedSaasRequestTracker } from './managed-saas-shutdown.js';
 import { createReadStream, existsSync, realpathSync, statSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import http, { type IncomingMessage, type RequestListener, type Server, type ServerResponse } from 'node:http';
+import type { Socket } from 'node:net';
 import { basename, extname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { RedisQuotaState } from '../quota/redis-state.js';
 import { createSaasBackupHttpHandler } from '../saas/backup/http.js';
 import { SaasCompositeModelRoutesService } from '../saas/billing/composite-routes/service.js';
 import { SaasCustomerWalletQueryService } from '../saas/billing/customer-query.js';
@@ -18,7 +16,6 @@ import { createSaasConsoleHandler, type SaasConsoleHttpHandler } from '../saas/c
 import { SaasConsoleUsageQueryService } from '../saas/console/index.js';
 import { verifyCredentialValidationWorkerSchemaReadiness } from '../saas/db/credential-validation-worker-schema-readiness.js';
 import { resolveSaasDatabasePoolSettings } from '../saas/db/database.js';
-import { managedQuotaPoolBudget } from './managed-saas-quota-pool.js';
 import {
   closeSaasDatabase,
   createSaasDatabase,
@@ -40,6 +37,9 @@ import {
   SAAS_GATEWAY_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE,
 } from '../saas/deployment.js';
 import { PostgresSaasRequestAdmissionAuthorizationPrelock } from '../saas/gateway/authorization-prelock.js';
+import { SaasCommercialMeteringPolicyService } from '../saas/gateway/commercial-metering-policy-service.js';
+import { FastGatewayResolutionService } from '../saas/gateway/fast/resolution.js';
+import { createFastOutcomePlatformHttpHandler } from '../saas/gateway/fast/resolution-http.js';
 import type { SaasGatewayHttpHandler } from '../saas/gateway/http-handler.js';
 import { MODEL_PLAZA_SETTINGS_KEYS } from '../saas/gateway/model-plaza/settings.js';
 import { mergeOpenCodeGoModelCatalog } from '../saas/gateway/opencode-go/model-catalog-sync.js';
@@ -47,11 +47,6 @@ import { createPostgresBillingGroupSpendAdmission } from '../saas/gateway/postgr
 import { PostgresPreDispatchCompensation } from '../saas/gateway/postgres-pre-dispatch-compensation.js';
 import { createPostgresKeyBudgetAdmission } from '../saas/gateway/postgres-preparation-budget.js';
 import { createPostgresPreparationCapacityPort } from '../saas/gateway/postgres-preparation-capacity.js';
-import {
-  PostgresCapacityStatePersistence,
-  RedisPreparationCapacity,
-} from '../saas/gateway/redis-preparation-capacity.js';
-import { RedisQuotaState } from '../quota/redis-state.js';
 import { createPostgresPreparationPorts } from '../saas/gateway/postgres-preparation-ports.js';
 import { PostgresProviderAccountAffinity } from '../saas/gateway/postgres-provider-account-affinity.js';
 import { PostgresRequestAdmissionGuard } from '../saas/gateway/postgres-request-admission-guard.js';
@@ -61,11 +56,21 @@ import {
   type ProviderHttpEgressAllowlist,
 } from '../saas/gateway/provider-http-address.js';
 import { parseProviderEgressAllowlistSettings } from '../saas/gateway/provider-http-egress-allowlist.js';
+import {
+  PostgresCapacityStatePersistence,
+  RedisPreparationCapacity,
+} from '../saas/gateway/redis-preparation-capacity.js';
+import { REQUEST_DIAGNOSTIC_PHASES, type RequestDiagnosticTrace } from '../saas/gateway/request-diagnostic-trace.js';
+import { SaasRouteConfigService } from '../saas/gateway/route-config-service.js';
 import { ConsoleEmailSender, type EmailSender, SmtpEmailSender } from '../saas/identity/email-sender.js';
 import { EmailVerificationService } from '../saas/identity/email-verification-service.js';
 import { createSaasIdentityHandler, type SaasIdentityHttpOptions } from '../saas/identity/http.js';
 import { SaasIdentityService } from '../saas/identity/index.js';
 import { RegistrationService } from '../saas/identity/register-service.js';
+import {
+  RegistrationDefaultAccessService,
+  registrationDefaultAccessConfigFromEnv,
+} from '../saas/identity/registration-default-access-service.js';
 import {
   parseRegistrationAdmissionSettings,
   type RegistrationAdmissionSettings,
@@ -155,6 +160,11 @@ import {
   createSaasPaymentHandler,
   type SaasPaymentHttpHandler,
 } from '../saas/payments/http.js';
+import {
+  assertPaymentBindingsReady,
+  type PaymentBindingResolver,
+  registerPaymentBindings,
+} from '../saas/payments/merchant-binding.js';
 import { createPlatformPaymentRefundOperations } from '../saas/payments/platform-refund-operations.js';
 import {
   createPlatformRefundHttpHandler,
@@ -163,8 +173,6 @@ import {
 import { type PaymentRefundWorkerHandle, startPaymentRefundWorker } from '../saas/payments/refund-worker.js';
 import { PaymentRefundService } from '../saas/payments/refunds.js';
 import { PaymentFulfillmentService } from '../saas/payments/service.js';
-import { assertPaymentBindingsReady, registerPaymentBindings, type PaymentBindingResolver } from '../saas/payments/merchant-binding.js';
-import { loadPaymentDeployment, type LoadedPaymentDeployment } from '../saas/runtime/payment-deployment.js';
 import type {
   PaymentCheckoutOptions,
   PaymentCheckoutRedirectPolicy,
@@ -209,14 +217,6 @@ import {
   startPublicBrandSnapshotWorker,
 } from '../saas/platform/brand/store.js';
 import { PlatformCapacityPolicyService } from '../saas/platform/capacity-policy-service.js';
-import { SaasRouteConfigService } from '../saas/gateway/route-config-service.js';
-import { SaasCommercialMeteringPolicyService } from '../saas/gateway/commercial-metering-policy-service.js';
-import { PlatformInferenceAccessProvisioningService } from '../saas/supply/platform-inference-access-provisioning.js';
-import { createBuiltinPlatformInferenceAccessAdmissionReadiness } from '../saas/supply/platform-inference-access-admission-readiness.js';
-import { loadCommercialAttestationTrust } from '../saas/runtime/commercial-attestation-trust.js';
-import { loadResponsesContinuationDeployment, type LoadedResponsesContinuationDeployment } from '../saas/runtime/responses-continuation-deployment.js';
-import { createPaymentsControlHttpHandler } from '../saas/platform/payments-control-http.js';
-import { REQUEST_DIAGNOSTIC_PHASES, type RequestDiagnosticTrace } from '../saas/gateway/request-diagnostic-trace.js';
 import { PlatformCatalogQueryService } from '../saas/platform/catalog/index.js';
 import {
   ClaudeOAuthBindingService,
@@ -288,6 +288,7 @@ import {
   type OpencodeGoRulesHttpHandler,
 } from '../saas/platform/opencode-go-rules-http.js';
 import { PlatformOperationsSummaryService } from '../saas/platform/operations/index.js';
+import { createPaymentsControlHttpHandler } from '../saas/platform/payments-control-http.js';
 import { createPluginsHttpHandler, type PluginsHttpHandler } from '../saas/platform/plugins-http.js';
 import {
   createPostgresRiskControlAuditWriter,
@@ -311,6 +312,7 @@ import {
   type RiskControlRetentionWorkerHandle,
   startRiskControlRetentionWorker,
 } from '../saas/risk/retention-worker.js';
+import { loadCommercialAttestationTrust } from '../saas/runtime/commercial-attestation-trust.js';
 import { loadCredentialValidationTargetsModule } from '../saas/runtime/credential-validation-targets-module.js';
 import {
   assertCustomerMfaDeploymentConfiguration,
@@ -329,6 +331,7 @@ import {
   type LoadedManagedSaasGatewayRuntimeModule,
   loadManagedSaasGatewayRuntimeModule,
 } from '../saas/runtime/gateway-runtime-module.js';
+import { type LoadedPaymentDeployment, loadPaymentDeployment } from '../saas/runtime/payment-deployment.js';
 import {
   loadManagedSaasProviders,
   MANAGED_SAAS_REDIS_KEY_PREFIX,
@@ -338,6 +341,10 @@ import {
   type RedisProvider,
 } from '../saas/runtime/providers.js';
 import { createRedisProvider } from '../saas/runtime/redis-rate-limit-provider.js';
+import {
+  type LoadedResponsesContinuationDeployment,
+  loadResponsesContinuationDeployment,
+} from '../saas/runtime/responses-continuation-deployment.js';
 import {
   type LoadedValidationWorkerProviderCredentialKms,
   loadValidationWorkerProviderCredentialKms,
@@ -349,13 +356,6 @@ import {
   type CnProvidersQuotaWorkerOptions,
   startCnProvidersQuotaWorker,
 } from '../saas/supply/cn-providers-quota-worker.js';
-import type { CredentialValidationTransportTestOptions } from '../saas/supply/credential-validation-http-transport.js';
-import { compileApprovedCredentialValidationTargets } from '../saas/supply/credential-validation-targets.js';
-import {
-  type CredentialValidationWorkerHandle,
-  type CredentialValidationWorkerOptions,
-  startCredentialValidationWorker as startValidationWorkerLoop,
-} from '../saas/supply/credential-validation-worker.js';
 import {
   type CodexVersionSyncSettings,
   type CodexVersionSyncWorkerHandle,
@@ -364,10 +364,14 @@ import {
   startCodexVersionSyncWorker,
 } from '../saas/supply/codex-version-sync.js';
 import { PostgresCodexWhamUsageStore } from '../saas/supply/codex-wham-usage-store-postgres.js';
+import { type CodexWhamUsageWorkerHandle, startCodexWhamUsageWorker } from '../saas/supply/codex-wham-usage-worker.js';
+import type { CredentialValidationTransportTestOptions } from '../saas/supply/credential-validation-http-transport.js';
+import { compileApprovedCredentialValidationTargets } from '../saas/supply/credential-validation-targets.js';
 import {
-  type CodexWhamUsageWorkerHandle,
-  startCodexWhamUsageWorker,
-} from '../saas/supply/codex-wham-usage-worker.js';
+  type CredentialValidationWorkerHandle,
+  type CredentialValidationWorkerOptions,
+  startCredentialValidationWorker as startValidationWorkerLoop,
+} from '../saas/supply/credential-validation-worker.js';
 import { type CustomerByokHttpHandler, createCustomerByokHttpHandler } from '../saas/supply/customer-http.js';
 import {
   type EgressProxyProbeWorkerHandle,
@@ -403,6 +407,8 @@ import {
   type OpenRouterModelPricingSyncWorkerOptions,
   startOpenRouterModelPricingSyncWorker,
 } from '../saas/supply/openrouter-model-pricing-sync-worker.js';
+import { createBuiltinPlatformInferenceAccessAdmissionReadiness } from '../saas/supply/platform-inference-access-admission-readiness.js';
+import { PlatformInferenceAccessProvisioningService } from '../saas/supply/platform-inference-access-provisioning.js';
 import {
   PostgresProbeMonitorStore,
   type ProbeMonitorWorkerHandle,
@@ -441,10 +447,16 @@ import type { WebhookSigningSecretProtector } from '../saas/webhooks/signing-sec
 import { CustomerWebhookTenantPolicyService } from '../saas/webhooks/tenant-policy-service.js';
 import {
   createManagedSaasGatewayProductionComposition,
-  resolveManagedSaasFastGatewayConfiguration,
   type ManagedSaasGatewayComposition,
   type ManagedSaasGatewayProductionOptions,
+  resolveManagedSaasFastGatewayConfiguration,
 } from './managed-saas-gateway.js';
+import { managedQuotaPoolBudget } from './managed-saas-quota-pool.js';
+import {
+  closeManagedSaasResources,
+  drainManagedSaasShutdown,
+  ManagedSaasRequestTracker,
+} from './managed-saas-shutdown.js';
 
 const CUSTOMER_MOUNT = '/console' as const;
 const PLATFORM_MOUNT = '/admin' as const;
@@ -1504,7 +1516,9 @@ async function closeAllResources(
   if (refundWorker) workerStops.push(refundWorker.stop());
   await drainManagedSaasShutdown(
     [...listenerDrains, ...additionalDrains, ...workerStops, ...(gateway ? [gateway.close()] : [])],
-    forceConnectionsClosed, shutdownGraceMs, shutdownCleanupMs,
+    forceConnectionsClosed,
+    shutdownGraceMs,
+    shutdownCleanupMs,
   );
 }
 
@@ -1557,11 +1571,7 @@ function adaptPlatformSettingsForCodexVersionSync(database: SaasDatabase): Codex
         return undefined;
       }
     },
-    async put(
-      key: string,
-      value: string,
-      context: Readonly<{ actor: string; entryPoint: string }>,
-    ): Promise<void> {
+    async put(key: string, value: string, context: Readonly<{ actor: string; entryPoint: string }>): Promise<void> {
       const record = await service.get(key);
       await service.set({
         key,
@@ -1719,7 +1729,9 @@ async function startCredentialValidationWorkerRuntime(
 
     worker = startWorker(database, kms, {
       ...options.credentialValidationWorkerOptions,
-      ...(deployment.validationWorkerMaxAttempts === undefined ? {} : { maxAttempts: deployment.validationWorkerMaxAttempts }),
+      ...(deployment.validationWorkerMaxAttempts === undefined
+        ? {}
+        : { maxAttempts: deployment.validationWorkerMaxAttempts }),
       approvedTargets,
       transportTestOptions: options.credentialValidationWorkerTestTransport,
       deployment: deployment.deploymentId,
@@ -1820,10 +1832,7 @@ async function startCredentialValidationWorkerRuntime(
         // An unreadable settings store keeps the compile-time baseline; the
         // loop's forward-only writes re-seed the slot on the next success.
       }
-      codexVersionSyncWorker = startCodexVersionSyncWorker(
-        codexVersionSettings,
-        options.codexVersionSync.worker,
-      );
+      codexVersionSyncWorker = startCodexVersionSyncWorker(codexVersionSettings, options.codexVersionSync.worker);
     }
     // Track R3: the egress-proxy probe/sweep loop shares this workload's
     // database role and decrypt-only KMS, exactly like the quota sync loop.
@@ -1953,10 +1962,16 @@ function operatorTenantId(input: { readonly tenantId: string | null }): string {
  * changes the database schema.
  */
 /** Deployment opt-in only. Samples are bounded and enqueued after handler completion. */
-export function createDeploymentRequestDiagnostics(environment: Readonly<Record<string, string | undefined>>, sink: (line: string, done: () => void) => void = (line, done) => {
-  if (process.stderr.writableLength > 65536) { done(); return; }
-  process.stderr.write(line, () => done());
-}) {
+export function createDeploymentRequestDiagnostics(
+  environment: Readonly<Record<string, string | undefined>>,
+  sink: (line: string, done: () => void) => void = (line, done) => {
+    if (process.stderr.writableLength > 65536) {
+      done();
+      return;
+    }
+    process.stderr.write(line, () => done());
+  },
+) {
   const setting = environment.MODEL_ROUTER_REQUEST_DIAGNOSTICS_SAMPLE_EVERY;
   if (setting === undefined) return undefined;
   if (!/^[1-9]\d{0,8}$/u.test(setting)) throw new TypeError('REQUEST_DIAGNOSTICS_CONFIG_INVALID');
@@ -2030,11 +2045,20 @@ export async function startManagedSaasServer(
   options: ManagedSaasStartOptions = {},
 ): Promise<ManagedSaasRuntime> {
   if (deployment.mode !== 'managed-saas') throw new TypeError('managed SaaS deployment configuration is required');
-  if (deployment.paymentsConfigFile && deployment.workloadRole !== 'combined' && deployment.workloadRole !== 'control-plane') {
+  if (
+    deployment.paymentsConfigFile &&
+    deployment.workloadRole !== 'combined' &&
+    deployment.workloadRole !== 'control-plane'
+  ) {
     throw new TypeError('PAYMENT_ROLE_FORBIDDEN');
   }
-  const configuredHistoryMode = (options.environment ?? process.env).MODEL_ROUTER_SAAS_RESPONSES_HISTORY_MODE ?? 'disabled';
-  if (configuredHistoryMode !== 'disabled' && deployment.workloadRole !== 'gateway' && deployment.workloadRole !== 'combined') {
+  const configuredHistoryMode =
+    (options.environment ?? process.env).MODEL_ROUTER_SAAS_RESPONSES_HISTORY_MODE ?? 'disabled';
+  if (
+    configuredHistoryMode !== 'disabled' &&
+    deployment.workloadRole !== 'gateway' &&
+    deployment.workloadRole !== 'combined'
+  ) {
     throw new TypeError('RESPONSES_HISTORY_ROLE_FORBIDDEN');
   }
   assertCustomerMfaDeploymentConfiguration(deployment, options.environment ?? process.env);
@@ -2062,7 +2086,9 @@ export async function startManagedSaasServer(
   const effectiveControlPlanePoolMax = resolveSaasDatabasePoolSettings({}, environment).max;
   const gatewayPoolBudget = managedQuotaPoolBudget(
     effectiveControlPlanePoolMax,
-    deployment.workloadRole === 'gateway' && deployment.gatewayRedisUrl !== undefined && options.createDatabase === undefined,
+    deployment.workloadRole === 'gateway' &&
+      deployment.gatewayRedisUrl !== undefined &&
+      options.createDatabase === undefined,
   );
   const requestDiagnostics = createDeploymentRequestDiagnostics(environment);
   const httpInFlightRaw = environment.MODEL_ROUTER_SAAS_GATEWAY_MAX_HTTP_IN_FLIGHT;
@@ -2287,17 +2313,32 @@ export async function startManagedSaasServer(
   };
 
   try {
-    database = gatewayPoolBudget.quota > 0
-      ? defaultCreateDatabase({ connectionString: deployment.postgresUrl, max: gatewayPoolBudget.business }, environment)
-      : createDatabase({ connectionString: deployment.postgresUrl });
+    database =
+      gatewayPoolBudget.quota > 0
+        ? defaultCreateDatabase(
+            { connectionString: deployment.postgresUrl, max: gatewayPoolBudget.business },
+            environment,
+          )
+        : createDatabase({ connectionString: deployment.postgresUrl });
     const historyMode = environment.MODEL_ROUTER_SAAS_RESPONSES_HISTORY_MODE ?? 'disabled';
     if (!gatewayEnabled && historyMode !== 'disabled') throw new TypeError('RESPONSES_HISTORY_ROLE_FORBIDDEN');
-    if (gatewayEnabled) responsesHistoryDeployment = await loadResponsesContinuationDeployment({ database, env: environment });
+    if (gatewayEnabled)
+      responsesHistoryDeployment = await loadResponsesContinuationDeployment({ database, env: environment });
     if (responsesHistoryDeployment) {
       const history = responsesHistoryDeployment;
       responsesHistoryExpiryTimer = setInterval(() => {
         if (responsesHistoryExpiryRun) return;
-        responsesHistoryExpiryRun = history.purgeExpired(100).then(() => {}, () => { console.error('model-router responses history expiry failed'); }).finally(() => { responsesHistoryExpiryRun = undefined; });
+        responsesHistoryExpiryRun = history
+          .purgeExpired(100)
+          .then(
+            () => {},
+            () => {
+              console.error('model-router responses history expiry failed');
+            },
+          )
+          .finally(() => {
+            responsesHistoryExpiryRun = undefined;
+          });
       }, 60000);
       responsesHistoryExpiryTimer.unref();
     }
@@ -2307,7 +2348,14 @@ export async function startManagedSaasServer(
       if (!paymentDeployment) throw new TypeError('PAYMENT_CONFIG_INVALID');
       await registerPaymentBindings(database, paymentDeployment.resolver);
       await assertPaymentBindingsReady(database, paymentDeployment.resolver);
-      options = { ...options, payments: { adapter: paymentDeployment.resolver, refundAdapter: paymentDeployment.resolver, walletTopUpPolicy: paymentDeployment.walletTopUpPolicy } };
+      options = {
+        ...options,
+        payments: {
+          adapter: paymentDeployment.resolver,
+          refundAdapter: paymentDeployment.resolver,
+          walletTopUpPolicy: paymentDeployment.walletTopUpPolicy,
+        },
+      };
     }
 
     try {
@@ -2404,7 +2452,11 @@ export async function startManagedSaasServer(
               // mandatory readiness check above remains unchanged.
               const failedHintRedis = gatewayHintRedis;
               gatewayHintRedis = undefined;
-              try { await failedHintRedis?.close(); } catch { /* Optional cache cleanup is best effort. */ }
+              try {
+                await failedHintRedis?.close();
+              } catch {
+                /* Optional cache cleanup is best effort. */
+              }
             }
           }
         } catch {
@@ -2445,7 +2497,8 @@ export async function startManagedSaasServer(
         // the configured budget; quota recovery never waits behind wallet locks.
         if (gatewayPoolBudget.quota > 0) {
           gatewayQuotaDatabase = defaultCreateDatabase(
-            { connectionString: deployment.postgresUrl, max: gatewayPoolBudget.quota }, environment,
+            { connectionString: deployment.postgresUrl, max: gatewayPoolBudget.quota },
+            environment,
           );
         }
         const quotaDatabase = gatewayQuotaDatabase ?? database;
@@ -2542,11 +2595,13 @@ export async function startManagedSaasServer(
       gateway = createManagedSaasGatewayProductionComposition(database, {
         riskControl: { emailSender: riskControlEmailSender },
         ...runtimeGatewayOptions,
-        ...(options.boundedGatewayOwner ? {
-          boundedGatewayOwner: options.boundedGatewayOwner,
-          // The private supervisor, not the runtime module, owns these budget-bearing settings.
-          fastGateway: resolveManagedSaasFastGatewayConfiguration({}, environment),
-        } : {}),
+        ...(options.boundedGatewayOwner
+          ? {
+              boundedGatewayOwner: options.boundedGatewayOwner,
+              // The private supervisor, not the runtime module, owns these budget-bearing settings.
+              fastGateway: resolveManagedSaasFastGatewayConfiguration({}, environment),
+            }
+          : {}),
         ...(requestDiagnostics ? { requestDiagnostics } : {}),
         ...(responsesHistoryDeployment ? { continuationHistoryResolver: responsesHistoryDeployment.resolver } : {}),
         ...(maxHttpInFlight === undefined ? {} : { maxHttpInFlight }),
@@ -2836,6 +2891,10 @@ export async function startManagedSaasServer(
         settings: registrationSettings,
         settingsResolver: resolveRegistrationSettingsFailClosed,
         sessionTtlSeconds: customerSessionTtlSeconds,
+        defaultAccess: new RegistrationDefaultAccessService({
+          database,
+          config: registrationDefaultAccessConfigFromEnv(process.env),
+        }),
         affiliate: new MarketingRegistrationRewards({
           database,
           affiliate: marketingAffiliateService,
@@ -3363,13 +3422,17 @@ export async function startManagedSaasServer(
         audit: platformAuditService,
         pricing: platformPricingService,
         supply: providerSupplyService,
-        ...(providerSupplyService && commercialTrust && effectiveControlPlanePoolMax >= 2 ? { platformInferenceAccess: new PlatformInferenceAccessProvisioningService(database, {
-          supply: providerSupplyService,
-          routes: new SaasRouteConfigService(database),
-          commercial: new SaasCommercialMeteringPolicyService(database, commercialTrust),
-          admissionReadiness: createBuiltinPlatformInferenceAccessAdmissionReadiness(),
-          capacity: platformCapacityPolicyService,
-        }) } : {}),
+        ...(providerSupplyService && commercialTrust && effectiveControlPlanePoolMax >= 2
+          ? {
+              platformInferenceAccess: new PlatformInferenceAccessProvisioningService(database, {
+                supply: providerSupplyService,
+                routes: new SaasRouteConfigService(database),
+                commercial: new SaasCommercialMeteringPolicyService(database, commercialTrust),
+                admissionReadiness: createBuiltinPlatformInferenceAccessAdmissionReadiness(),
+                capacity: platformCapacityPolicyService,
+              }),
+            }
+          : {}),
         capacityPolicies: platformCapacityPolicyService,
         capacityPolicyTargets: platformCapacityPolicyTargets,
         governance: {
@@ -3635,7 +3698,17 @@ export async function startManagedSaasServer(
         observabilityHandler,
         alertSilencesHandler,
         [
-          ...(paymentDeployment ? [createPaymentsControlHttpHandler({ database, resolver: paymentDeployment.resolver, access: platformAccessService, authService: platformAuthService, publicOrigin: deploymentListener(deployment, 'platform').origin })] : []),
+          ...(paymentDeployment
+            ? [
+                createPaymentsControlHttpHandler({
+                  database,
+                  resolver: paymentDeployment.resolver,
+                  access: platformAccessService,
+                  authService: platformAuthService,
+                  publicOrigin: deploymentListener(deployment, 'platform').origin,
+                }),
+              ]
+            : []),
           createOperationsActionHttpHandler({
             access: platformAccessService,
             authService: platformAuthService,
@@ -3670,7 +3743,12 @@ export async function startManagedSaasServer(
       const handler = handlers[name];
       if (!handler) throw new Error(`Managed SaaS ${name} handler is not configured for this workload`);
       const listener = createListener(name, (request, response) => {
-        if (name === 'gateway' && options.privateGatewayBoundary && !options.privateGatewayBoundary.accept(request, response)) return;
+        if (
+          name === 'gateway' &&
+          options.privateGatewayBoundary &&
+          !options.privateGatewayBoundary.accept(request, response)
+        )
+          return;
         if (draining) {
           response.writeHead(503, { connection: 'close', 'content-type': 'text/plain' });
           response.end('Service unavailable');
@@ -3685,7 +3763,8 @@ export async function startManagedSaasServer(
         }
       });
       listeners.set(name, listener);
-      if (name === 'gateway' && options.privateGatewayBoundary) listener.maxConnections = options.privateGatewayBoundary.maximumConnections;
+      if (name === 'gateway' && options.privateGatewayBoundary)
+        listener.maxConnections = options.privateGatewayBoundary.maximumConnections;
       listener.on('connection', (socket: Socket) => {
         ownedSockets.add(socket);
         socket.once('close', () => ownedSockets.delete(socket));
@@ -3693,8 +3772,14 @@ export async function startManagedSaasServer(
       if (name === 'gateway' && gateway) {
         const gatewayComposition = gateway;
         listener.on('upgrade', (request, socket, head) => {
-          if (options.privateGatewayBoundary) { socket.destroy(); return; }
-          if (draining) { socket.destroy(); return; }
+          if (options.privateGatewayBoundary) {
+            socket.destroy();
+            return;
+          }
+          if (draining) {
+            socket.destroy();
+            return;
+          }
           try {
             if (!gatewayComposition.handleUpgrade(request, socket, head)) socket.destroy();
           } catch {
@@ -3711,9 +3796,17 @@ export async function startManagedSaasServer(
       if (name === 'gateway' && options.privateGatewayBoundary) {
         await new Promise<void>((resolve, reject) => {
           listener.once('error', reject);
-          listener.listen({ path: options.privateGatewayBoundary!.socketPath,
-            backlog: Math.min(options.privateGatewayBoundary!.maximumConnections, 128), exclusive: true },
-          () => { listener.off('error', reject); resolve(); });
+          listener.listen(
+            {
+              path: options.privateGatewayBoundary!.socketPath,
+              backlog: Math.min(options.privateGatewayBoundary!.maximumConnections, 128),
+              exclusive: true,
+            },
+            () => {
+              listener.off('error', reject);
+              resolve();
+            },
+          );
         });
       } else await bindListener(listener, listenerConfig);
       console.log(`model-router managed ${name} listening on ${listenerAddress(listenerConfig)}`);
