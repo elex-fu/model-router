@@ -18,9 +18,9 @@ test('118 registers directly after 117 as the reserved Vertex slot', () => {
   assert.ok(index > 0, '118 is registered');
   assert.equal(registered[index - 1], 117, '118 lands directly after the bedrock 117');
   assert.equal(registered[index + 1], 119, 'the grok 119 follows the vertex 118');
-  assert.equal(registered.at(-1), 149, 'fast ledger retention 149 is the applied head');
+  assert.equal(registered.at(-1), 153, 'user risk controls 153 is the applied head');
   assert.equal(SAAS_MIGRATIONS[index], migration);
-  assert.deepEqual(registered.slice(-7), [143, 144, 145, 146, 147, 148, 149]);
+  assert.deepEqual(registered.slice(-11), [143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153]);
   // The assert-count guard: exactly one registration for the version.
   assert.equal(SAAS_MIGRATIONS.filter((m) => m.version === 118).length, 1);
 });

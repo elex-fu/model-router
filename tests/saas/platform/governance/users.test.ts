@@ -195,6 +195,62 @@ test('freshly re-verifies the actor session and role assignments inside the tran
   assert.equal(listQueries.length, 0);
 });
 
+test('disable revokes every session and member key; unban never restores keys', async () => {
+  const data = fixture();
+  data.apiKeys.push(
+    {
+      id: '20000000-0000-4000-8000-0000000000a1',
+      tenant_id: '30000000-0000-4000-8000-0000000000a1',
+      principal_user_id: TARGET_ID,
+      status: 'active',
+      revoked_at: null,
+      revoked_by_user_id: null,
+      authz_version: 4,
+    },
+    {
+      id: '20000000-0000-4000-8000-0000000000a2',
+      tenant_id: '30000000-0000-4000-8000-0000000000a2',
+      principal_user_id: TARGET_ID,
+      status: 'active',
+      revoked_at: null,
+      revoked_by_user_id: null,
+      authz_version: 7,
+    },
+    {
+      id: '20000000-0000-4000-8000-0000000000b1',
+      tenant_id: '30000000-0000-4000-8000-0000000000a1',
+      principal_user_id: OTHER_ID,
+      status: 'active',
+      revoked_at: null,
+      revoked_by_user_id: null,
+      authz_version: 2,
+    },
+  );
+  const { service } = harness(data);
+
+  await service.setUserDisabled(actor(), TARGET_ID, true);
+  const revoked = data.apiKeys.filter((key) => key.principal_user_id === TARGET_ID);
+  assert.ok(revoked.every((key) => key.status === 'revoked'));
+  assert.deepEqual(
+    revoked.map((key) => key.authz_version),
+    [5, 8],
+  );
+  assert.ok(revoked.every((key) => key.revoked_by_user_id === OPERATOR_ID));
+  assert.equal(data.apiKeys.find((key) => key.principal_user_id === OTHER_ID)?.status, 'active');
+  assert.deepEqual(
+    data.auditEvents.map((event) => event.action),
+    ['api_key.revoked', 'api_key.revoked', 'platform_user.disabled'],
+  );
+
+  await service.setUserDisabled(actor(), TARGET_ID, false);
+  assert.equal(data.users.find((user) => user.id === TARGET_ID)?.disabled_at, null);
+  assert.ok(revoked.every((key) => key.status === 'revoked'));
+  assert.deepEqual(
+    revoked.map((key) => key.authz_version),
+    [5, 8],
+  );
+});
+
 test('disable revokes every session, refuses self and operators, and audits the action', async () => {
   const data = fixture();
   const { database, service } = harness(data);

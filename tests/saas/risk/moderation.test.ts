@@ -20,7 +20,7 @@ import {
   serializeRiskControlConfig,
   shouldSample,
 } from '../../../src/saas/risk/moderation.js';
-import { moderationInputHash } from '../../../src/saas/risk/moderation-input.js';
+import { MAX_MODERATION_EXCERPT_RUNES, moderationInputHash } from '../../../src/saas/risk/moderation-input.js';
 
 interface FetchCall {
   url: string;
@@ -191,10 +191,10 @@ function harness(
 }
 
 describe('risk control config parsing', () => {
-  it('defaults every field (feature off, pre_block, all tenants, 13 thresholds)', () => {
+  it('defaults every field (feature off, observe, all tenants, 13 thresholds)', () => {
     const config = defaultRiskControlConfig();
     assert.equal(config.enabled, false);
-    assert.equal(config.mode, 'pre_block');
+    assert.equal(config.mode, 'observe');
     assert.equal(config.baseUrl, 'https://api.openai.com');
     assert.equal(config.model, 'omni-moderation-latest');
     assert.equal(config.apiKeys.length, 0);
@@ -239,7 +239,7 @@ describe('risk control config parsing', () => {
       thresholds: { hate: 5, made_up: 0.1 },
     });
     assert.equal(config.enabled, false);
-    assert.equal(config.mode, 'pre_block');
+    assert.equal(config.mode, 'observe');
     assert.equal(config.sampleRate, 100);
     assert.equal(config.timeoutMs, 3000);
     assert.deepEqual(config.apiKeys, ['a']);
@@ -541,6 +541,43 @@ describe('content moderation judgment chain', () => {
 });
 
 describe('observe mode', () => {
+  it('records local keyword hits synchronously without enforcement or an API call', async () => {
+    const h = harness();
+    h.store.rawConfig = configJson({
+      mode: 'observe',
+      blocked_keywords: ['forbidden-phrase'],
+      auto_ban_enabled: true,
+      ban_threshold: 1,
+    });
+    const decision = await h.service.check(
+      baseInput({ body: { messages: [{ role: 'user', content: 'FORBIDDEN-PHRASE' }] } }),
+    );
+    assert.equal(decision.allowed, true);
+    assert.equal(decision.flagged, true);
+    assert.equal(h.fetch.calls.length, 0);
+    assert.equal(h.store.disabledUsers.length, 0);
+    assert.equal(h.store.auditEvents.length, 0);
+    assert.equal(h.store.flaggedHashes.size, 0);
+    assert.equal(h.store.logs.length, 1);
+    assert.equal(h.store.logs[0].mode, 'observe');
+    assert.equal(h.store.logs[0].action, 'allow');
+    assert.equal(h.store.logs[0].matchedKeyword, 'forbidden-phrase');
+    assert.equal(h.store.logs[0].violationCount, 0);
+    assert.ok([...h.store.logs[0].inputExcerpt].length <= MAX_MODERATION_EXCERPT_RUNES);
+  });
+
+  it('keeps observe hash hits audit-only', async () => {
+    const h = harness();
+    h.store.rawConfig = configJson({ mode: 'observe', pre_hash_check_enabled: true });
+    h.store.flaggedHashes.add(moderationInputHash('hello world'));
+    const decision = await h.service.check(baseInput());
+    assert.equal(decision.allowed, true);
+    assert.equal(decision.flagged, true);
+    assert.equal(h.fetch.calls.length, 0);
+    assert.equal(h.store.logs[0].action, 'allow');
+    assert.equal(h.store.logs[0].highestCategory, 'hash');
+  });
+
   it('allows the request immediately and audits asynchronously without blocking', async () => {
     let resolveFirst: (() => void) | null = null;
     const slow = fakeFetch(

@@ -4773,6 +4773,69 @@ export const MANIFEST_CONTROL_PLANE_COLUMN_GROUPS: readonly SaasControlPlaneColu
     privilege: 'SELECT',
     columns: ['window_cost_limit_minor_units', 'window_cost_sticky_reserve_minor_units', 'claude_session_window_start'],
   },
+  // M3-G user abuse controls: operator limit defaults and per-user overrides
+  // (the user-limit admin surface). NULL fields inherit defaults; NULL
+  // defaults mean unlimited.
+  {
+    table: 'saas_user_limit_defaults',
+    privilege: 'SELECT',
+    columns: ['id', 'version', 'requests_per_minute', 'max_concurrent_requests', 'daily_token_units', 'daily_charge_minor_units', 'charge_currency'],
+  },
+  {
+    table: 'saas_user_limit_defaults',
+    privilege: 'UPDATE',
+    columns: ['requests_per_minute', 'max_concurrent_requests', 'daily_token_units', 'daily_charge_minor_units', 'charge_currency', 'updated_by_user_id', 'version', 'updated_at'],
+  },
+  {
+    table: 'saas_user_limit_policies',
+    privilege: 'SELECT',
+    columns: ['user_id', 'version', 'requests_per_minute', 'max_concurrent_requests', 'daily_token_units', 'daily_charge_minor_units', 'charge_currency'],
+  },
+  {
+    table: 'saas_user_limit_policies',
+    privilege: 'INSERT',
+    columns: ['user_id', 'requests_per_minute', 'max_concurrent_requests', 'daily_token_units', 'daily_charge_minor_units', 'charge_currency', 'updated_by_user_id', 'created_at', 'updated_at'],
+  },
+  {
+    table: 'saas_user_limit_policies',
+    privilege: 'UPDATE',
+    columns: ['requests_per_minute', 'max_concurrent_requests', 'daily_token_units', 'daily_charge_minor_units', 'charge_currency', 'updated_by_user_id', 'version', 'updated_at'],
+  },
+  {
+    tsComment: [
+      'M3-G user abuse controls: the detector batch reads observations and',
+      'writes detections plus escalation markers on the control-plane role',
+      '(the gateway role gets INSERT-only observation access of its own).',
+    ],
+    table: 'saas_user_risk_observations',
+    privilege: 'SELECT',
+    columns: ['id', 'user_id', 'tenant_id', 'api_key_id', 'client_address_digest', 'public_model', 'protocol', 'occurred_at'],
+  },
+  {
+    table: 'saas_user_anomaly_detections',
+    privilege: 'SELECT',
+    columns: ['id', 'user_id', 'tenant_id', 'api_key_id', 'kind', 'window_start', 'observed_at'],
+  },
+  {
+    tsComment: ['Detector-batch inserts; id is identity-generated and never set.'],
+    table: 'saas_user_anomaly_detections',
+    privilege: 'INSERT',
+    columns: ['user_id', 'tenant_id', 'api_key_id', 'kind', 'window_start', 'observed_at', 'facts'],
+  },
+  {
+    tsComment: [
+      'Staged risk-escalation marker upsert (detector batch). Un-ban DELETE',
+      'rides the control-plane table grants above.',
+    ],
+    table: 'saas_user_risk_markers',
+    privilege: 'INSERT',
+    columns: ['user_id', 'stage', 'requests_per_minute', 'revision', 'updated_at'],
+  },
+  {
+    table: 'saas_user_risk_markers',
+    privilege: 'UPDATE',
+    columns: ['stage', 'requests_per_minute', 'revision', 'updated_at'],
+  },
 ];
 
 export const MANIFEST_CONTROL_PLANE_COLUMN_SQL_ROWS: readonly SaasControlPlaneColumnSqlRow[] = [
@@ -9155,6 +9218,16 @@ export const MANIFEST_CONTROL_PLANE_COLUMN_SQL_ROWS: readonly SaasControlPlaneCo
     privilege: 'SELECT',
     columns: ['window_cost_limit_minor_units', 'window_cost_sticky_reserve_minor_units', 'claude_session_window_start'],
   },
+  { table: 'saas_user_limit_defaults', privilege: 'SELECT', columns: ['id', 'version', 'requests_per_minute', 'max_concurrent_requests', 'daily_token_units', 'daily_charge_minor_units', 'charge_currency'] },
+  { table: 'saas_user_limit_defaults', privilege: 'UPDATE', columns: ['requests_per_minute', 'max_concurrent_requests', 'daily_token_units', 'daily_charge_minor_units', 'charge_currency', 'updated_by_user_id', 'version', 'updated_at'] },
+  { table: 'saas_user_limit_policies', privilege: 'SELECT', columns: ['user_id', 'version', 'requests_per_minute', 'max_concurrent_requests', 'daily_token_units', 'daily_charge_minor_units', 'charge_currency'] },
+  { table: 'saas_user_limit_policies', privilege: 'INSERT', columns: ['user_id', 'requests_per_minute', 'max_concurrent_requests', 'daily_token_units', 'daily_charge_minor_units', 'charge_currency', 'updated_by_user_id', 'created_at', 'updated_at'] },
+  { table: 'saas_user_limit_policies', privilege: 'UPDATE', columns: ['requests_per_minute', 'max_concurrent_requests', 'daily_token_units', 'daily_charge_minor_units', 'charge_currency', 'updated_by_user_id', 'version', 'updated_at'] },
+  { table: 'saas_user_risk_observations', privilege: 'SELECT', columns: ['id', 'user_id', 'tenant_id', 'api_key_id', 'client_address_digest', 'public_model', 'protocol', 'occurred_at'] },
+  { table: 'saas_user_anomaly_detections', privilege: 'SELECT', columns: ['id', 'user_id', 'tenant_id', 'api_key_id', 'kind', 'window_start', 'observed_at'] },
+  { table: 'saas_user_anomaly_detections', privilege: 'INSERT', columns: ['user_id', 'tenant_id', 'api_key_id', 'kind', 'window_start', 'observed_at', 'facts'] },
+  { table: 'saas_user_risk_markers', privilege: 'INSERT', columns: ['user_id', 'stage', 'requests_per_minute', 'revision', 'updated_at'] },
+  { table: 'saas_user_risk_markers', privilege: 'UPDATE', columns: ['stage', 'requests_per_minute', 'revision', 'updated_at'] },
 ];
 
 export const MANIFEST_CONTROL_PLANE_TABLE_GRANTS: readonly SaasControlPlaneTableGrant[] = [
@@ -9251,6 +9324,13 @@ export const MANIFEST_CONTROL_PLANE_TABLE_GRANTS: readonly SaasControlPlaneTable
   {
     table: 'saas_plugin_bindings',
   },
+  {
+    tsComment: [
+      'M3-G user abuse controls: un-banning a user retires the staged risk',
+      'escalation markers; revoked keys deliberately stay revoked.',
+    ],
+    table: 'saas_user_risk_markers',
+  },
 ];
 
 export const MANIFEST_CONTROL_PLANE_TABLE_SQL_ROWS: readonly SaasControlPlaneTableSqlRow[] = [
@@ -9336,6 +9416,13 @@ export const MANIFEST_CONTROL_PLANE_TABLE_SQL_ROWS: readonly SaasControlPlaneTab
   },
   {
     table: 'saas_plugin_bindings',
+  },
+  {
+    sqlComment: [
+      'M3-G user abuse controls: un-banning a user retires the staged risk',
+      'escalation markers; revoked keys deliberately stay revoked.',
+    ],
+    table: 'saas_user_risk_markers',
   },
 ];
 
@@ -9634,10 +9721,26 @@ export const MANIFEST_GATEWAY_READ_TABLES: readonly SaasGatewayReadTableTsEntry[
     ],
     table: 'saas_provider_account_model_cooldowns',
   },
+  {
+    tsComment: [
+      'M3-G user abuse controls: per-user limit resolution and staged risk',
+      'markers feed the fast snapshot and admission paths. The tables carry',
+      'policy and markers only; usage accounting stays in the reservation',
+      'ledger.',
+    ],
+    table: 'saas_user_limit_defaults',
+  },
+  {
+    table: 'saas_user_limit_policies',
+  },
+  {
+    table: 'saas_user_risk_markers',
+  },
 ];
 
 export const MANIFEST_GATEWAY_READ_SQL_ROWS: readonly SaasGatewayReadSqlRow[] = [
   { tables: ['saas_fast_gateway_deployments', 'saas_fast_gateway_owner_slots', 'saas_fast_gateway_owner_activations', 'saas_fast_gateway_credit_budgets'] },
+  { tables: ['saas_user_limit_defaults', 'saas_user_limit_policies', 'saas_user_risk_markers'] },
   { tables: ['saas_fast_receipt_liability_releases'] },
   { tables: ['saas_fast_gateway_resolutions'] },
   { tables: ['saas_fast_gateway_owners', 'saas_fast_credit_allocations', 'saas_fast_gateway_intents', 'saas_fast_gateway_receipts', 'saas_fast_billing_jobs'] },
@@ -11005,6 +11108,18 @@ export const MANIFEST_GATEWAY_COLUMN_GROUPS: readonly SaasGatewayColumnTsGroup[]
     table: 'saas_provider_account_model_cooldowns',
     privilege: 'UPDATE',
     columns: ['cooled_until', 'updated_at'],
+    tsStyle: 'inline',
+  },
+  {
+    tsComment: [
+      'M3-G user abuse controls: the admission-path observation recorder —',
+      'one append-only insert per accepted request inside the admission',
+      'transaction. Detection reads and enforcement never run on the gateway',
+      'role.',
+    ],
+    table: 'saas_user_risk_observations',
+    privilege: 'INSERT',
+    columns: ['user_id', 'tenant_id', 'api_key_id', 'client_address_digest', 'public_model', 'protocol', 'occurred_at'],
     tsStyle: 'inline',
   },
 ];
@@ -14800,6 +14915,48 @@ export const MANIFEST_GATEWAY_COLUMN_SQL_ENTRIES: readonly SaasGatewayColumnSqlE
     table: 'saas_provider_account_model_cooldowns',
     column: 'updated_at',
     privilege: 'UPDATE',
+    sqlJoinLine: true,
+  },
+  {
+    sqlComment: [
+      'M3-G user abuse controls: the admission-path observation recorder —',
+      'one append-only insert per accepted request inside the admission',
+      'transaction. Detection reads and enforcement never run on the gateway',
+      'role.',
+    ],
+    table: 'saas_user_risk_observations',
+    column: 'user_id',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_user_risk_observations',
+    column: 'tenant_id',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_user_risk_observations',
+    column: 'api_key_id',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_user_risk_observations',
+    column: 'client_address_digest',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_user_risk_observations',
+    column: 'public_model',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_user_risk_observations',
+    column: 'protocol',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_user_risk_observations',
+    column: 'occurred_at',
+    privilege: 'INSERT',
     sqlJoinLine: true,
   },
 ];

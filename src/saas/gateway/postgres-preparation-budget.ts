@@ -9,6 +9,7 @@ import {
   selectKeyBudgetPolicyHead,
   selectKeyBudgetRollingChargeWindows,
 } from '../keys/budget-store.js';
+import { evaluatePostgresUserDailyBudget } from '../risk/postgres-user-budget.js';
 import type { SupplyMode } from './contracts.js';
 import { prepareFencedReservation } from './fenced-reservation-plan.js';
 
@@ -224,6 +225,21 @@ export function createPostgresKeyBudgetAdmission(options: PostgresKeyBudgetAdmis
       if (!rollingVerdict.allowed) {
         throw new KeyBudgetAdmissionDeniedError(rollingVerdict.deniedDimension);
       }
+    }
+
+    const userDeniedDimension = await evaluatePostgresUserDailyBudget(executor, {
+      tenantId: facts.tenantId,
+      projectId: facts.projectId,
+      keyId: facts.keyId,
+      requestId: facts.requestId,
+      supplyMode: facts.supplyMode,
+      day,
+      tokenUnits,
+      chargeMinorUnits: charge?.amountMinorUnits ?? '0',
+      chargeCurrency: charge?.currency ?? null,
+    });
+    if (userDeniedDimension !== null) {
+      throw new KeyBudgetAdmissionDeniedError(userDeniedDimension);
     }
   };
   const reserve = async (executor: SqlExecutor, facts: KeyBudgetAdmissionFacts) =>

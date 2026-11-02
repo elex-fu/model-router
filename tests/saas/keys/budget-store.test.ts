@@ -227,6 +227,23 @@ class FakeBudgetDatabase implements SqlExecutor {
       return result<Row>([], 1);
     }
 
+    // M3-G user-wide daily ceiling authority read (migration 153 surface).
+    // Admission consults it on every reserve; a key without a principal user
+    // yields a non-string principal_user_id and the evaluator opts out, so the
+    // key-level 081 semantics under test stay unchanged.
+    if (statement.startsWith('select k.principal_user_id, coalesce(u.requests_per_minute')) {
+      return result<Row>([
+        {
+          principal_user_id: null,
+          requests_per_minute: null,
+          max_concurrent_requests: null,
+          daily_token_units: null,
+          daily_charge_minor_units: null,
+          charge_currency: null,
+        } as Row,
+      ]);
+    }
+
     if (statement.startsWith('select tenant_id, project_id, lineage_id, request_id, day::text as day,')) {
       const row = this.reservations.find(
         (candidate) => candidate.tenant_id === String(a) && candidate.request_id === String(b),

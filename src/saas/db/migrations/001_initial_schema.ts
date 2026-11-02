@@ -130,6 +130,7 @@ import { FAST_GATEWAY_RETENTION_SAAS_MIGRATION } from './149_fast_gateway_retent
 import { BULK_ACCOUNT_IMPORT_SAAS_MIGRATION } from './150_bulk_account_import.js';
 import { PROVIDER_ACCOUNT_COST_SAAS_MIGRATION } from './151_provider_account_cost.js';
 import { ACCOUNT_BAN_LEDGER_SAAS_MIGRATION } from './152_account_ban_ledger.js';
+import { USER_RISK_CONTROLS_SAAS_MIGRATION } from './153_user_risk_controls.js';
 
 export interface SaasMigration {
   version: number;
@@ -826,4 +827,8 @@ export const SAAS_MIGRATIONS: readonly SaasMigration[] = [
   BULK_ACCOUNT_IMPORT_SAAS_MIGRATION,
   PROVIDER_ACCOUNT_COST_SAAS_MIGRATION,
   ACCOUNT_BAN_LEDGER_SAAS_MIGRATION,
+  // User abuse controls: platform/user limit defaults and policy overrides,
+  // escalation markers, and digest-only risk observations. Usage accounting
+  // itself stays in the migration-081 reservation ledger.
+  USER_RISK_CONTROLS_SAAS_MIGRATION,
 ];

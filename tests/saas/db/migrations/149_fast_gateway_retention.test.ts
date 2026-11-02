@@ -4,7 +4,7 @@ import { SAAS_MIGRATIONS } from '../../../../src/saas/db/migrations/001_initial_
 import { FAST_GATEWAY_RETENTION_SAAS_MIGRATION as migration } from '../../../../src/saas/db/migrations/149_fast_gateway_retention.js';
 
 test('149 narrows ledger triggers to UPDATE-only and gates DELETEs behind the retention flag', () => {
-  assert.equal(SAAS_MIGRATIONS.at(-1), migration);
+  assert.equal(SAAS_MIGRATIONS.at(-5), migration);
   assert.equal(migration.version, 149);
   assert.equal(migration.name, 'fast_gateway_retention');
   // The DELETE guard refuses every runtime role unless the transaction-local

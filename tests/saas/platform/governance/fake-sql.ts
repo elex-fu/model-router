@@ -63,6 +63,16 @@ export interface FakeMfaCredential {
   revoked_at: string | null;
 }
 
+export interface FakeApiKey {
+  id: string;
+  tenant_id: string;
+  principal_user_id: string | null;
+  status: 'active' | 'revoked';
+  revoked_at: string | null;
+  revoked_by_user_id: string | null;
+  authz_version: number;
+}
+
 export interface FakeAuditEvent {
   id: string;
   tenant_id: string | null;
@@ -82,6 +92,7 @@ export interface GovernanceFixture {
   platformSessions: FakePlatformSession[];
   customerSessions: FakeCustomerSession[];
   mfaCredentials: FakeMfaCredential[];
+  apiKeys: FakeApiKey[];
   auditEvents: FakeAuditEvent[];
 }
 
@@ -94,6 +105,7 @@ export function emptyFixture(): GovernanceFixture {
     platformSessions: [],
     customerSessions: [],
     mfaCredentials: [],
+    apiKeys: [],
     auditEvents: [],
   };
 }
@@ -381,6 +393,22 @@ export class FakeGovernanceDatabase {
     }
 
     // User mutations.
+    if (/UPDATE saas_api_keys\s+SET status = 'revoked'/.test(sql)) {
+      const [userId, now, actorUserId] = values as [string, string, string];
+      const revoked: Array<{ id: string; tenant_id: string }> = [];
+      for (const key of f.apiKeys) {
+        if (key.principal_user_id !== userId || key.status !== 'active') continue;
+        key.status = 'revoked';
+        key.revoked_at = now;
+        key.revoked_by_user_id = actorUserId;
+        key.authz_version += 1;
+        revoked.push({ id: key.id, tenant_id: key.tenant_id });
+      }
+      return Promise.resolve(rows(revoked));
+    }
+    if (sql.includes('DELETE FROM saas_user_risk_markers')) {
+      return Promise.resolve({ rows: [], rowCount: 0 });
+    }
     if (sql.includes('UPDATE saas_users SET disabled_at')) {
       const [id, disabledAt] = values as [string, string | null];
       const user = f.users.find((u) => u.id === id);

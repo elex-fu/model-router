@@ -344,7 +344,7 @@ function clampInteger(value: unknown, fallback: number, min: number, max: number
 /** Lenient runtime parse: unknown/invalid fields fall back to defaults. */
 export function normalizeRiskControlConfig(raw: unknown): RiskControlConfig {
   const input = isRecord(raw) ? raw : {};
-  const mode = RISK_CONTROL_MODES.has(String(input.mode)) ? (input.mode as RiskControlMode) : 'pre_block';
+  const mode = RISK_CONTROL_MODES.has(String(input.mode)) ? (input.mode as RiskControlMode) : 'observe';
   const keywordMode = KEYWORD_BLOCKING_MODES.has(String(input.keyword_blocking_mode))
     ? (input.keyword_blocking_mode as KeywordBlockingMode)
     : 'keyword_and_api';
@@ -667,30 +667,44 @@ export class SaasContentModerationService {
     if (!includesTenant(config, input.tenantId)) return ALLOWED_DECISION;
     if (!includesModel(config, input.model)) return ALLOWED_DECISION;
 
-    if (config.mode === 'pre_block') {
-      if (config.keywordBlockingMode !== 'api_only' && config.blockedKeywords.length > 0) {
-        const keywordText = extractModerationText(input.protocol, input.body, false);
-        const matched = matchKeyword(snapshot.keywordMatcher, keywordText);
-        if (matched.hit) {
-          const row = this.buildLog(
-            input,
-            config,
-            'keyword_block',
-            true,
-            'keyword',
-            1,
-            { keyword: 1 },
-            keywordText,
-            null,
-            '',
-          );
-          row.matchedKeyword = matched.keyword;
-          await this.persistSideEffects(row, { recordHash: false, applySideEffects: true });
-          return this.blockDecision(config, 'keyword_block', 'keyword', 1, '');
-        }
+    if (config.keywordBlockingMode !== 'api_only' && config.blockedKeywords.length > 0) {
+      const keywordText = trimRunes(
+        extractModerationText(input.protocol, input.body, false),
+        MAX_MODERATION_INPUT_RUNES,
+      );
+      const matched = matchKeyword(snapshot.keywordMatcher, keywordText);
+      if (matched.hit) {
+        const blocking = config.mode === 'pre_block';
+        const row = this.buildLog(
+          input,
+          config,
+          blocking ? 'keyword_block' : 'allow',
+          true,
+          'keyword',
+          1,
+          { keyword: 1 },
+          keywordText,
+          null,
+          '',
+        );
+        row.matchedKeyword = matched.keyword;
+        // Observe is audit-only: no hash poisoning, violation count, auto-ban,
+        // email or synchronous external moderation call follows a local hit.
+        await this.persistSideEffects(row, { recordHash: false, applySideEffects: blocking });
+        return blocking
+          ? this.blockDecision(config, 'keyword_block', 'keyword', 1, '')
+          : {
+              allowed: true,
+              statusCode: 0,
+              message: '',
+              action: 'allow',
+              flagged: true,
+              highestCategory: 'keyword',
+              highestScore: 1,
+            };
       }
-      if (config.keywordBlockingMode === 'keyword_only') return ALLOWED_DECISION;
     }
+    if (config.keywordBlockingMode === 'keyword_only') return ALLOWED_DECISION;
 
     const text = trimRunes(extractModerationText(input.protocol, input.body, true), MAX_MODERATION_INPUT_RUNES);
     if (text === '') return ALLOWED_DECISION;
@@ -708,8 +722,31 @@ export class SaasContentModerationService {
         });
       }
       if (matched) {
-        const row = this.buildLog(input, config, 'hash_block', true, 'hash', 1, { hash: 1 }, text, null, '');
+        const blocking = config.mode === 'pre_block';
+        const row = this.buildLog(
+          input,
+          config,
+          blocking ? 'hash_block' : 'allow',
+          true,
+          'hash',
+          1,
+          { hash: 1 },
+          text,
+          null,
+          '',
+        );
         await this.persistSideEffects(row, { recordHash: false, applySideEffects: false });
+        if (!blocking) {
+          return {
+            allowed: true,
+            statusCode: 0,
+            message: '',
+            action: 'allow',
+            flagged: true,
+            highestCategory: 'hash',
+            highestScore: 1,
+          };
+        }
         const message =
           config.blockMessage !== '' ? `${config.blockMessage}（hash: ${inputHash}）` : `hash: ${inputHash}`;
         return this.blockDecision(config, 'hash_block', 'hash', 1, message);
@@ -796,8 +833,8 @@ export class SaasContentModerationService {
         '',
       );
       await this.persistSideEffects(row, {
-        recordHash: evaluation.flagged,
-        applySideEffects: evaluation.flagged,
+        recordHash: config.mode === 'pre_block' && evaluation.flagged,
+        applySideEffects: config.mode === 'pre_block' && evaluation.flagged,
         inputHash,
       });
     }

@@ -10,7 +10,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import type { SqlExecutor } from '../db/types.js';
+import type { SaasDatabase, SqlExecutor } from '../db/types.js';
 import {
   type ContentModerationLogRow,
   type ContentModerationStore,
@@ -116,16 +116,20 @@ function mapLogRow(row: LogRow): ContentModerationLogRecord {
   };
 }
 
-/**
- * Gateway-role store: config read, log insert, hash blocklist, violation
- * count and auto-ban. All statements run on the shared pool executor — no
- * transactions (moderation is outside the preparation transaction by design).
- */
-export class PostgresContentModerationStore implements ContentModerationStore {
-  private readonly executor: SqlExecutor;
+type ModerationStoreExecutor = SqlExecutor & Partial<Pick<SaasDatabase, 'transaction'>>;
 
-  constructor(executor: SqlExecutor) {
+/** Gateway-role store for moderation logs, hash evidence and auto-ban. */
+export class PostgresContentModerationStore implements ContentModerationStore {
+  private readonly executor: ModerationStoreExecutor;
+
+  constructor(executor: ModerationStoreExecutor) {
     this.executor = executor;
+  }
+
+  private async atomic<T>(work: (executor: SqlExecutor) => Promise<T>): Promise<T> {
+    // Production composition supplies SaasDatabase, making account/key/audit
+    // revocation atomic. The minimal SqlExecutor remains usable by legacy fakes.
+    return this.executor.transaction ? this.executor.transaction(work) : work(this.executor);
   }
 
   readRawConfig(): Promise<string | null> {
@@ -202,22 +206,50 @@ export class PostgresContentModerationStore implements ContentModerationStore {
   }
 
   /**
-   * Auto-ban: flips disabled_at on the caller's principal user. Users holding
-   * any platform role assignment are never auto-banned by risk control (the
-   * governance surface owns those accounts).
+   * Auto-ban uses the same disabled/key revocation channels as governance.
+   * The transaction also converges legacy already-disabled users whose keys
+   * remained active. Unban never restores these keys.
    */
   async disableUser(userId: string): Promise<ModerationDisableUserResult> {
-    const result = await this.executor.query(
-      `UPDATE saas_users
-          SET disabled_at = now(), updated_at = now()
-        WHERE id = $1
-          AND disabled_at IS NULL
-          AND NOT EXISTS (
-            SELECT 1 FROM saas_platform_role_assignments WHERE user_id = $1
-          )`,
-      [userId],
-    );
-    return { newlyDisabled: result.rowCount === 1 };
+    return this.atomic(async (tx) => {
+      const result = await tx.query(
+        `UPDATE saas_users
+            SET disabled_at = now(), updated_at = now()
+          WHERE id = $1
+            AND disabled_at IS NULL
+            AND NOT EXISTS (
+              SELECT 1 FROM saas_platform_role_assignments WHERE user_id = $1
+            )`,
+        [userId],
+      );
+      const newlyDisabled = result.rowCount === 1;
+      if (newlyDisabled || result.rowCount === 0) {
+        const revoked = await tx.query<{ id: unknown; tenant_id: unknown }>(
+          `UPDATE saas_api_keys
+              SET status = 'revoked', revoked_at = now(), revoked_by_user_id = NULL,
+                  authz_version = authz_version + 1
+            WHERE principal_user_id = $1 AND status = 'active'
+              AND NOT EXISTS (
+                SELECT 1 FROM saas_platform_role_assignments WHERE user_id = $1
+              )
+            RETURNING id, tenant_id`,
+          [userId],
+        );
+        for (const key of revoked.rows) {
+          if (typeof key.id !== 'string' || typeof key.tenant_id !== 'string') {
+            throw new TypeError('Malformed moderation key revocation');
+          }
+          await tx.query(
+            `INSERT INTO saas_audit_events (id, tenant_id, actor_user_id, action, target_type, target_id,
+                                            occurred_at, entry_point, request_id)
+             VALUES ($1, $2, NULL, 'api_key.revoked', 'api_key', $3,
+                     clock_timestamp(), 'gateway-content-moderation', NULL)`,
+            [randomUUID(), key.tenant_id, key.id],
+          );
+        }
+      }
+      return { newlyDisabled };
+    });
   }
 
   async userContact(userId: string): Promise<ModerationUserContact | null> {
@@ -241,10 +273,14 @@ export class PostgresContentModerationStore implements ContentModerationStore {
 
 /** Control-plane store: config upsert, log listing, retention, hash lifecycle. */
 export class PostgresRiskControlAdminStore {
-  private readonly executor: SqlExecutor;
+  private readonly executor: ModerationStoreExecutor;
 
-  constructor(executor: SqlExecutor) {
+  constructor(executor: ModerationStoreExecutor) {
     this.executor = executor;
+  }
+
+  private async atomic<T>(work: (executor: SqlExecutor) => Promise<T>): Promise<T> {
+    return this.executor.transaction ? this.executor.transaction(work) : work(this.executor);
   }
 
   /** Current normalized config plus whether a row exists yet. */
@@ -364,13 +400,16 @@ export class PostgresRiskControlAdminStore {
     };
   }
 
-  /** Unban: clears disabled_at (the governance path audits this separately). */
+  /** Unban clears risk enforcement markers but never restores revoked keys. */
   async enableUser(userId: string): Promise<boolean> {
-    const result = await this.executor.query(
-      'UPDATE saas_users SET disabled_at = NULL, updated_at = now() WHERE id = $1 AND disabled_at IS NOT NULL',
-      [userId],
-    );
-    return result.rowCount === 1;
+    return this.atomic(async (tx) => {
+      const result = await tx.query(
+        'UPDATE saas_users SET disabled_at = NULL, updated_at = now() WHERE id = $1 AND disabled_at IS NOT NULL',
+        [userId],
+      );
+      await tx.query('DELETE FROM saas_user_risk_markers WHERE user_id = $1', [userId]);
+      return result.rowCount === 1;
+    });
   }
 
   /** Whether the target user holds any platform role (unban guard for the admin surface). */

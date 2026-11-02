@@ -108,6 +108,10 @@ import { FAST_RECEIPT_LIABILITY_RELEASES_SAAS_MIGRATION } from '../../../src/saa
 import { BOUNDED_FAST_GATEWAY_BUDGET_SAAS_MIGRATION } from '../../../src/saas/db/migrations/147_bounded_fast_gateway_budget.js';
 import { BOUNDED_FAST_GATEWAY_BUDGET_LIMIT_SEARCH_PATH_SAAS_MIGRATION } from '../../../src/saas/db/migrations/148_bounded_fast_gateway_budget_limit_search_path.js';
 import { FAST_GATEWAY_RETENTION_SAAS_MIGRATION } from '../../../src/saas/db/migrations/149_fast_gateway_retention.js';
+import { BULK_ACCOUNT_IMPORT_SAAS_MIGRATION } from '../../../src/saas/db/migrations/150_bulk_account_import.js';
+import { PROVIDER_ACCOUNT_COST_SAAS_MIGRATION } from '../../../src/saas/db/migrations/151_provider_account_cost.js';
+import { ACCOUNT_BAN_LEDGER_SAAS_MIGRATION } from '../../../src/saas/db/migrations/152_account_ban_ledger.js';
+import { USER_RISK_CONTROLS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/153_user_risk_controls.js';
 
 test('SaaS migration registry keeps a stable append order with only documented gaps', () => {
   assert.deepEqual(
@@ -256,6 +260,12 @@ test('SaaS migration registry keeps a stable append order with only documented g
       147,
       148,
       149,
+      // Operator/ops forwards: 150 bulk account import, 151 provider account
+      // cost, 152 account ban ledger, 153 user risk controls.
+      150,
+      151,
+      152,
+      153,
     ],
   );
 });
@@ -319,7 +329,7 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
     TLS_FINGERPRINT_PROFILES_SAAS_MIGRATION,
   ];
 
-  assert.equal(SAAS_MIGRATIONS.length, 130);
+  assert.equal(SAAS_MIGRATIONS.length, 134);
   assert.deepEqual(
     SAAS_MIGRATIONS.slice(42).map(({ name }) => name),
     [
@@ -411,6 +421,10 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
       'bounded_fast_gateway_global_budget',
       'bounded_fast_gateway_budget_limit_search_path',
       'fast_gateway_retention',
+      'bulk_account_import',
+      'provider_account_cost',
+      'account_ban_ledger',
+      'user_risk_controls',
     ],
   );
   assert.deepEqual(
@@ -524,10 +538,16 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
       147,
       148,
       149,
+      // Operator/ops forwards: 150 bulk account import, 151 provider account
+      // cost, 152 account ban ledger, 153 user risk controls.
+      150,
+      151,
+      152,
+      153,
     ],
   );
-  assert.equal(new Set(SAAS_MIGRATIONS.map(({ version }) => version)).size, 130);
-  assert.equal(new Set(SAAS_MIGRATIONS.map(({ name }) => name)).size, 130);
+  assert.equal(new Set(SAAS_MIGRATIONS.map(({ version }) => version)).size, 134);
+  assert.equal(new Set(SAAS_MIGRATIONS.map(({ name }) => name)).size, 134);
   appendedMigrations.forEach((migration, index) => {
     assert.equal(SAAS_MIGRATIONS[index + 42], migration);
   });
@@ -616,8 +636,8 @@ test('059 preserves its exact forward after frozen 001-058 without changing the 
   );
 });
 
-test('060 follows the complete frozen 001-059 prefix and 095 is the current forward', () => {
-  assert.equal(SAAS_MIGRATIONS.length, 130);
+test('060 follows the complete frozen 001-059 prefix and 153 is the current head', () => {
+  assert.equal(SAAS_MIGRATIONS.length, 134);
   assert.deepEqual(
     SAAS_MIGRATIONS.slice(0, 59).map(({ version }) => version),
     Array.from({ length: 59 }, (_, index) => index + 1),
@@ -695,6 +715,10 @@ test('060 follows the complete frozen 001-059 prefix and 095 is the current forw
     BOUNDED_FAST_GATEWAY_BUDGET_SAAS_MIGRATION,
     BOUNDED_FAST_GATEWAY_BUDGET_LIMIT_SEARCH_PATH_SAAS_MIGRATION,
     FAST_GATEWAY_RETENTION_SAAS_MIGRATION,
+    BULK_ACCOUNT_IMPORT_SAAS_MIGRATION,
+    PROVIDER_ACCOUNT_COST_SAAS_MIGRATION,
+    ACCOUNT_BAN_LEDGER_SAAS_MIGRATION,
+    USER_RISK_CONTROLS_SAAS_MIGRATION,
   ]);
   assert.equal(SAAS_MIGRATIONS[59]?.version, 60);
   assert.equal(SAAS_MIGRATIONS[59]?.name, 'prepared_evidence_claim_generated_account');
@@ -894,7 +918,7 @@ test('migrations 029-033 preserve append order without constraining later migrat
   assert.ok(SAAS_MIGRATIONS.slice(33).every(({ version }) => version > 33));
 });
 
-test('134-149 are the exact runtime, operations and P0 forwards after the frozen 133 tail', () => {
+test('134-153 are the exact runtime, operations and P0 forwards after the frozen 133 tail', () => {
   assert.deepEqual(SAAS_MIGRATIONS.slice(114), [
     RESPONSES_COMPACT_OPERATION_SAAS_MIGRATION,
     KIMI_CODING_QUOTA_SNAPSHOTS_SAAS_MIGRATION,
@@ -912,6 +936,10 @@ test('134-149 are the exact runtime, operations and P0 forwards after the frozen
     BOUNDED_FAST_GATEWAY_BUDGET_SAAS_MIGRATION,
     BOUNDED_FAST_GATEWAY_BUDGET_LIMIT_SEARCH_PATH_SAAS_MIGRATION,
     FAST_GATEWAY_RETENTION_SAAS_MIGRATION,
+    BULK_ACCOUNT_IMPORT_SAAS_MIGRATION,
+    PROVIDER_ACCOUNT_COST_SAAS_MIGRATION,
+    ACCOUNT_BAN_LEDGER_SAAS_MIGRATION,
+    USER_RISK_CONTROLS_SAAS_MIGRATION,
   ]);
   assert.deepEqual(
     SAAS_MIGRATIONS.slice(114).map(({ version, name }) => [version, name]),
@@ -932,6 +960,10 @@ test('134-149 are the exact runtime, operations and P0 forwards after the frozen
       [147, 'bounded_fast_gateway_global_budget'],
       [148, 'bounded_fast_gateway_budget_limit_search_path'],
       [149, 'fast_gateway_retention'],
+      [150, 'bulk_account_import'],
+      [151, 'provider_account_cost'],
+      [152, 'account_ban_ledger'],
+      [153, 'user_risk_controls'],
     ],
   );
   assert.equal(

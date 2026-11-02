@@ -313,6 +313,7 @@ import { PostgresPluginStore } from '../saas/plugins/store.js';
 import { SaasPricingService } from '../saas/pricing/index.js';
 import type { ModerationEmailSender } from '../saas/risk/moderation.js';
 import { PostgresRiskControlAdminStore } from '../saas/risk/postgres-store.js';
+import { UserLimitAdminService } from '../saas/risk/user-limit-admin-service.js';
 import {
   type RiskControlRetentionWorkerHandle,
   startRiskControlRetentionWorker,
@@ -3350,11 +3351,14 @@ export async function startManagedSaasServer(
       });
       // Batch-5 §5.4 (task #19): the content risk-control admin surface
       // (config, decision logs, unban, blocklist lifecycle, retention sweep).
+      // M3-G: the same surface carries the user-limit admin routes; without
+      // userLimits they would permanently return 503 RISK_CONTROL_UNAVAILABLE.
       const riskControlAdminHandler = createRiskControlHttpHandler({
         access: platformAccessService,
         authService: platformAuthService,
         store: new PostgresRiskControlAdminStore(database),
         audit: createPostgresRiskControlAuditWriter(database),
+        userLimits: new UserLimitAdminService(database),
         publicOrigin: deploymentListener(deployment, 'platform').origin,
       });
       // Batch-5 §5.1 plugin admin surface (install/enable/disable/config/

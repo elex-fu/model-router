@@ -11,6 +11,7 @@ import {
   PostgresPreparationCapacityAdapter,
 } from '../../../src/saas/gateway/postgres-preparation-capacity.js';
 import type { PostgresPreparationCapacityReservation } from '../../../src/saas/gateway/postgres-preparation-ports.js';
+import type { RedisPreparationCapacity } from '../../../src/saas/gateway/redis-preparation-capacity.js';
 import type { RequestPreparationDecision } from '../../../src/saas/gateway/request-preparation-service.js';
 
 const capacity = new PostgresPreparationCapacityAdapter();
@@ -56,6 +57,9 @@ const allowedAuthority = {
   key_requests_per_minute: '5',
   key_tokens_per_minute: '5000',
   key_max_concurrent_requests: 2,
+  user_id: null,
+  user_requests_per_minute: null,
+  user_max_concurrent_requests: null,
 };
 
 class CapacityFakeExecutor implements SqlExecutor {
@@ -71,6 +75,8 @@ class CapacityFakeExecutor implements SqlExecutor {
     key_rate_count: '0',
     key_concurrent_count: '0',
     key_token_units: '0',
+    user_rate_count: '0',
+    user_concurrent_count: '0',
   };
   reservation: Record<string, unknown> | null = null;
   attempt: Record<string, unknown> | null = null;
@@ -334,6 +340,63 @@ test('reserve enforces explicit request, token, and concurrency ceilings', async
   assert.equal(executor.insertCount, 0);
 });
 
+test('member user ceilings use cross-tenant canonical counters and release without a Redis lease', async () => {
+  const executor = new CapacityFakeExecutor();
+  executor.authority.user_id = 'user-1';
+  executor.authority.user_requests_per_minute = '2';
+  executor.authority.user_max_concurrent_requests = '1';
+  executor.counts.user_rate_count = '2';
+
+  const rateLimited = await capacity.reserve(executor, baseInput);
+  assert.equal(rateLimited.decision, 'reject');
+  if (rateLimited.decision === 'reject') assert.equal(rateLimited.code, 'rate_limited');
+
+  executor.counts.user_rate_count = '0';
+  executor.counts.user_concurrent_count = '1';
+  const concurrencyLimited = await capacity.reserve(executor, baseInput);
+  assert.equal(concurrencyLimited.decision, 'reject');
+  if (concurrencyLimited.decision === 'reject') assert.equal(concurrencyLimited.code, 'rate_limited');
+
+  executor.counts.user_concurrent_count = '0';
+  const redis = {
+    find: async () => null,
+    reserve: async () => {
+      throw new Error('governed user capacity must not use Redis');
+    },
+  } as unknown as RedisPreparationCapacity;
+  const canonical = new PostgresPreparationCapacityAdapter(redis);
+  const admission = allowed(await canonical.reserve(executor, baseInput));
+  const statements = executor.statements.map(({ sql }) => sql);
+  assert.ok(executor.statements.some(({ values }) => values[0] === 'model-router:request-capacity:user:user-1'));
+  const countSql = statements.find((sql) => sql.trimStart().startsWith('WITH existing AS'));
+  assert.match(countSql ?? '', /q\.principal_id = \$5/);
+  assert.match(countSql ?? '', /rq\.principal_id = \$5/);
+
+  executor.attempt = {
+    project_id: baseInput.projectId,
+    proxy_key_id: baseInput.proxyKeyId,
+    supply_mode: 'byok',
+    execution_state: 'pending',
+    financial_status: 'not_applicable',
+    reconciliation_state: 'none',
+    dispatch_state: 'not_sent',
+    result_state: 'pending',
+    response_started: false,
+    any_attempt_dispatched: false,
+  };
+  assert.deepEqual(
+    await canonical.release(executor, {
+      tenantId: baseInput.tenantId,
+      projectId: baseInput.projectId,
+      requestId: baseInput.requestId,
+      attemptId: baseInput.attemptId,
+      quotaReservation: admission.quotaReservation,
+      rateReservation: admission.rateReservation,
+    }),
+    { quotaReservation: 'released', rateReservation: 'released' },
+  );
+});
+
 const platformInput = { ...baseInput, supplyMode: 'platform' as const };
 
 function platformExecutor(): CapacityFakeExecutor {
@@ -523,6 +586,7 @@ async function seedMinimalCapacitySchema(client: PoolClient): Promise<void> {
     CREATE TABLE saas_api_keys (
       tenant_id uuid NOT NULL, project_id uuid NOT NULL, id uuid NOT NULL PRIMARY KEY,
       status text NOT NULL, authz_version bigint NOT NULL, supply_mode text NOT NULL, expires_at timestamptz,
+      principal_user_id uuid,
       UNIQUE (tenant_id, project_id, id),
       FOREIGN KEY (tenant_id, project_id) REFERENCES saas_projects (tenant_id, id)
     );
@@ -530,6 +594,7 @@ async function seedMinimalCapacitySchema(client: PoolClient): Promise<void> {
       tenant_id uuid NOT NULL, id uuid NOT NULL PRIMARY KEY, project_id uuid NOT NULL,
       proxy_key_id uuid NOT NULL, supply_mode text NOT NULL, execution_state text NOT NULL, financial_status text NOT NULL,
       reconciliation_state text NOT NULL, updated_at timestamptz NOT NULL DEFAULT now(),
+      principal_kind text, principal_id uuid,
       UNIQUE (tenant_id, id),
       FOREIGN KEY (tenant_id, project_id) REFERENCES saas_projects (tenant_id, id),
       FOREIGN KEY (tenant_id, project_id, proxy_key_id)
@@ -539,6 +604,21 @@ async function seedMinimalCapacitySchema(client: PoolClient): Promise<void> {
       tenant_id uuid NOT NULL, id uuid NOT NULL PRIMARY KEY, request_id uuid NOT NULL,
       dispatch_state text NOT NULL, result_state text NOT NULL, response_started boolean NOT NULL,
       UNIQUE (tenant_id, id), FOREIGN KEY (tenant_id, request_id) REFERENCES saas_requests (tenant_id, id)
+    );
+    /* M3-G user-limit / risk surfaces the capacity authority read depends on:
+       CROSS JOIN saas_user_limit_defaults d ... AND d.id = 1 (the single defaults
+       row must exist or the authority read yields zero rows and admission blocks
+       fail-closed), plus the LEFT JOINed per-user policy and risk-marker tables.
+       The columns below are the minimal read projection of migration 153. */
+    CREATE TABLE saas_user_limit_defaults (
+      id smallint PRIMARY KEY, requests_per_minute bigint, max_concurrent_requests bigint
+    );
+    INSERT INTO saas_user_limit_defaults (id) VALUES (1);
+    CREATE TABLE saas_user_limit_policies (
+      user_id uuid PRIMARY KEY, requests_per_minute bigint, max_concurrent_requests bigint
+    );
+    CREATE TABLE saas_user_risk_markers (
+      user_id uuid PRIMARY KEY, stage text NOT NULL, requests_per_minute bigint
     );
   `);
   await client.query(GATEWAY_REQUEST_CAPACITY_SAAS_MIGRATION.sql);

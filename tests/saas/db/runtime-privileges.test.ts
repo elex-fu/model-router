@@ -684,6 +684,9 @@ test('control-plane manifest covers startup and representative mounted SQL witho
     // upsertInstallation/replaceBindings.
     ['saas_plugin_installations', 'DELETE'],
     ['saas_plugin_bindings', 'DELETE'],
+    // M3-G (153) user risk controls: ban lifecycle clears the stage marker
+    // row on unban (retention keeps observations immutable).
+    ['saas_user_risk_markers', 'DELETE'],
   ]);
   assert.deepEqual(SAAS_CONTROL_PLANE_RUNTIME_SEQUENCE_GRANTS, []);
 });

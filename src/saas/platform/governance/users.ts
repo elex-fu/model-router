@@ -286,9 +286,9 @@ export class PlatformUserGovernanceService {
   }
 
   /**
-   * Disable or re-enable a customer user. Disabling revokes every customer and
-   * platform session. Users holding platform role assignments are managed
-   * through the operator endpoints and cannot be disabled here.
+   * Disable or re-enable a customer user. Disabling revokes every session and
+   * every member API key through the authoritative status/revocation/version
+   * channels. Re-enabling never restores a revoked key.
    */
   async setUserDisabled(actor: PlatformAdminActor, targetUserIdInput: unknown, disabled: unknown): Promise<void> {
     const verifiedActor = validateActor(actor);
@@ -317,7 +317,14 @@ export class PlatformUserGovernanceService {
           disabled ? now : null,
         ]);
         if (!updated || updated.rowCount !== 1) governanceStorage();
-        if (disabled) await revokeAllSessions(tx, targetUserId, now);
+        if (disabled) {
+          await revokeAllSessions(tx, targetUserId, now);
+          await revokeAllApiKeys(tx, targetUserId, verifiedActor.userId, now);
+        } else {
+          // Operator unban also retires staged risk enforcement; revoked keys
+          // deliberately stay revoked and require a separate explicit repair.
+          await tx.query('DELETE FROM saas_user_risk_markers WHERE user_id = $1', [targetUserId]);
+        }
         await appendGovernanceAudit(tx, {
           action: disabled ? 'platform_user.disabled' : 'platform_user.enabled',
           targetType: 'platform_user',
@@ -434,6 +441,33 @@ async function revokeAllSessions(tx: SqlExecutor, userId: string, now: string): 
     [userId, now],
   );
   if (!platformSessions || typeof platformSessions.rowCount !== 'number') governanceStorage();
+}
+
+async function revokeAllApiKeys(tx: SqlExecutor, userId: string, actorUserId: string, now: string): Promise<void> {
+  // lockTargetUser holds the exclusive member authorization fence. Admissions
+  // hold it shared, so no new admission can pass between this revocation and
+  // its commit. Existing in-flight cancellation remains request AbortSignal
+  // semantics; this control-plane mutation does not invent a forced abort.
+  const revoked = await tx.query<{ readonly id: unknown; readonly tenant_id: unknown }>(
+    `UPDATE saas_api_keys
+        SET status = 'revoked', revoked_at = $2, revoked_by_user_id = $3,
+            authz_version = authz_version + 1
+      WHERE principal_user_id = $1 AND status = 'active'
+      RETURNING id, tenant_id`,
+    [userId, now, actorUserId],
+  );
+  if (!revoked || !Array.isArray(revoked.rows)) governanceStorage();
+  for (const row of revoked.rows) {
+    if (typeof row.id !== 'string' || typeof row.tenant_id !== 'string') governanceStorage();
+    await appendGovernanceAudit(tx, {
+      action: 'api_key.revoked',
+      targetType: 'api_key',
+      targetId: row.id,
+      tenantId: row.tenant_id,
+      actorUserId,
+      occurredAt: now,
+    });
+  }
 }
 
 interface GovernanceAuditEntry {

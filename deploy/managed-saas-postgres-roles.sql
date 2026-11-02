@@ -1128,7 +1128,17 @@ BEGIN
       ('saas_platform_credential_validation_requeue_requests', 'INSERT', 'actor_user_id actor_session_id account_id credential_id job_id expected_credential_version expected_credential_authz_version expected_lease_generation idempotency_key request_id reason'),
       ('saas_platform_credential_validation_requeue_requests', 'SELECT', 'actor_user_id account_id credential_id job_id expected_credential_version expected_credential_authz_version expected_lease_generation idempotency_key request_id reason id audit_event_id request_digest result_lease_generation recorded_at'),
       ('saas_platform_provider_accounts', 'SELECT', 'scheduling_threshold_pause_until scheduling_threshold_pause_reason claude_usage_updated_at codex_usage_updated_at gemini_usage_updated_at grok_usage_updated_at bedrock_usage_updated_at zhipu_usage_updated_at minimax_usage_updated_at window_cost_limit_minor_units window_cost_sticky_reserve_minor_units claude_session_window_start'),
-      ('saas_tenant_provider_accounts', 'SELECT', 'window_cost_limit_minor_units window_cost_sticky_reserve_minor_units claude_session_window_start')
+      ('saas_tenant_provider_accounts', 'SELECT', 'window_cost_limit_minor_units window_cost_sticky_reserve_minor_units claude_session_window_start'),
+      ('saas_user_limit_defaults', 'SELECT', 'id version requests_per_minute max_concurrent_requests daily_token_units daily_charge_minor_units charge_currency'),
+      ('saas_user_limit_defaults', 'UPDATE', 'requests_per_minute max_concurrent_requests daily_token_units daily_charge_minor_units charge_currency updated_by_user_id version updated_at'),
+      ('saas_user_limit_policies', 'SELECT', 'user_id version requests_per_minute max_concurrent_requests daily_token_units daily_charge_minor_units charge_currency'),
+      ('saas_user_limit_policies', 'INSERT', 'user_id requests_per_minute max_concurrent_requests daily_token_units daily_charge_minor_units charge_currency updated_by_user_id created_at updated_at'),
+      ('saas_user_limit_policies', 'UPDATE', 'requests_per_minute max_concurrent_requests daily_token_units daily_charge_minor_units charge_currency updated_by_user_id version updated_at'),
+      ('saas_user_risk_observations', 'SELECT', 'id user_id tenant_id api_key_id client_address_digest public_model protocol occurred_at'),
+      ('saas_user_anomaly_detections', 'SELECT', 'id user_id tenant_id api_key_id kind window_start observed_at'),
+      ('saas_user_anomaly_detections', 'INSERT', 'user_id tenant_id api_key_id kind window_start observed_at facts'),
+      ('saas_user_risk_markers', 'INSERT', 'user_id stage requests_per_minute revision updated_at'),
+      ('saas_user_risk_markers', 'UPDATE', 'stage requests_per_minute revision updated_at')
     ) AS manifest(table_name, privilege_type, column_names)
   LOOP
     SELECT pg_catalog.string_agg(pg_catalog.format('%I', attribute.attname), ', ' ORDER BY attribute.attnum)
@@ -1187,7 +1197,10 @@ BEGIN
       -- cascade via the FK) and the binding-set replacement DELETE inside
       -- upsertInstallation/replaceBindings.
       ('saas_plugin_installations', 'DELETE'),
-      ('saas_plugin_bindings', 'DELETE')
+      ('saas_plugin_bindings', 'DELETE'),
+      -- M3-G user abuse controls: un-banning a user retires the staged risk
+      -- escalation markers; revoked keys deliberately stay revoked.
+      ('saas_user_risk_markers', 'DELETE')
     ) AS manifest(table_name, privilege_type)
   LOOP
     IF EXISTS (
@@ -1267,6 +1280,7 @@ BEGIN
     SELECT read_relation.table_name
     FROM (VALUES
       ('saas_fast_gateway_deployments'), ('saas_fast_gateway_owner_slots'), ('saas_fast_gateway_owner_activations'), ('saas_fast_gateway_credit_budgets'),
+      ('saas_user_limit_defaults'), ('saas_user_limit_policies'), ('saas_user_risk_markers'),
       ('saas_fast_receipt_liability_releases'),
       ('saas_fast_gateway_resolutions'),
       ('saas_fast_gateway_owners'), ('saas_fast_credit_allocations'), ('saas_fast_gateway_intents'), ('saas_fast_gateway_receipts'), ('saas_fast_billing_jobs'),
@@ -2112,7 +2126,17 @@ BEGIN
       ('saas_provider_account_model_cooldowns', 'account_id', 'INSERT'),
       ('saas_provider_account_model_cooldowns', 'model', 'INSERT'),
       ('saas_provider_account_model_cooldowns', 'cooled_until', 'INSERT'), ('saas_provider_account_model_cooldowns', 'updated_at', 'INSERT'),
-      ('saas_provider_account_model_cooldowns', 'cooled_until', 'UPDATE'), ('saas_provider_account_model_cooldowns', 'updated_at', 'UPDATE')
+      ('saas_provider_account_model_cooldowns', 'cooled_until', 'UPDATE'), ('saas_provider_account_model_cooldowns', 'updated_at', 'UPDATE'),
+      -- M3-G user abuse controls: the admission-path observation recorder —
+      -- one append-only insert per accepted request inside the admission
+      -- transaction. Detection reads and enforcement never run on the gateway
+      -- role.
+      ('saas_user_risk_observations', 'user_id', 'INSERT'),
+      ('saas_user_risk_observations', 'tenant_id', 'INSERT'),
+      ('saas_user_risk_observations', 'api_key_id', 'INSERT'),
+      ('saas_user_risk_observations', 'client_address_digest', 'INSERT'),
+      ('saas_user_risk_observations', 'public_model', 'INSERT'),
+      ('saas_user_risk_observations', 'protocol', 'INSERT'), ('saas_user_risk_observations', 'occurred_at', 'INSERT')
     ) AS manifest(table_name, column_name, privilege_type)
     GROUP BY manifest.table_name, manifest.privilege_type
   LOOP

@@ -17,6 +17,7 @@ import type {
 } from '../metering/types.js';
 import { calculatePriceVersion } from '../pricing/calculator.js';
 import { SaasPricingError, SaasPricingService } from '../pricing/index.js';
+import type { UserRiskObservationRecorder } from '../risk/user-risk.js';
 import {
   PLATFORM_REQUEST_ADMISSION_UPPER_BOUNDS_KIND,
   type PlatformRequestAdmissionHoldEvidence,
@@ -264,6 +265,8 @@ export interface PostgresRequestAdmissionGuardOptions {
   /** Injectable only to keep fake-SQL tests on the same service contracts. */
   readonly catalog?: SaasCatalogService;
   readonly observe?: PostgresPreparationObserver;
+  /** Optional durable evidence capture; detection remains a separate batch job. */
+  readonly riskObservations?: UserRiskObservationRecorder;
 }
 
 function deny(code: Exclude<PostgresRequestAdmissionGuardErrorCode, 'STORAGE_ERROR'>): never {
@@ -1187,12 +1190,14 @@ export class PostgresRequestAdmissionGuard implements SaasRequestAdmissionGuard 
   private readonly pricing: SaasPricingService;
   private readonly catalog: SaasCatalogService;
   private readonly observe: PostgresPreparationObserver | undefined;
+  private readonly riskObservations: UserRiskObservationRecorder | undefined;
 
   constructor(database: SaasDatabase, options: PostgresRequestAdmissionGuardOptions = {}) {
     const now = options.now ?? (() => new Date());
     this.pricing = options.pricing ?? new SaasPricingService(database, { now, idFactory: options.idFactory });
     this.catalog = options.catalog ?? new SaasCatalogService(database, { now });
     this.observe = options.observe;
+    this.riskObservations = options.riskObservations;
   }
 
   async revalidate(input: SaasRequestAdmissionGuardInput): Promise<SaasRequestAdmissionGuardResult> {
@@ -1295,6 +1300,16 @@ export class PostgresRequestAdmissionGuard implements SaasRequestAdmissionGuard 
     const ipPolicy = validateRequestAdmissionIpPolicy(authority.many('key-ip-policy'), input.clientAddress);
     if (ipPolicy === 'storage_failure') storage();
     if (ipPolicy === 'caller_denied') deny('CALLER_DENIED');
+    if (request.principalKind === 'member' && this.riskObservations) {
+      await this.riskObservations.record(executor, {
+        userId: request.principalId,
+        tenantId: request.tenantId,
+        apiKeyId: request.proxyKeyId,
+        publicModel: request.publicModel,
+        protocol: request.protocol,
+        clientAddress: input.clientAddress,
+      });
+    }
 
     const persistedRequest = await lockOne(
       executor,

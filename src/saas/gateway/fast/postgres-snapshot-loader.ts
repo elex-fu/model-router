@@ -26,6 +26,7 @@ export type FastGatewaySnapshotUnsupportedReason =
   | 'operation'
   | 'group_controls'
   | 'key_budget'
+  | 'user_limits'
   | 'route_protocol'
   | 'candidate_count'
   | 'group_account_pool'
@@ -51,6 +52,8 @@ export interface PostgresFastGatewaySnapshotLoaderOptions {
   readonly coldTimeoutMs?: number;
   readonly maxCandidates?: number;
   readonly monotonicNow?: () => number;
+  /** Observation capture requires canonical admission; never silently skip it in fast mode. */
+  readonly userRiskObservationsEnabled?: boolean;
   /** Fixed reason labels only; observer failure cannot change authorization. */
   readonly observeUnsupported?: (reason: FastGatewaySnapshotUnsupportedReason) => void;
 }
@@ -144,6 +147,16 @@ SELECT t.status AS tenant_status, t.requests_per_minute AS tenant_rpm,
        k.max_concurrent_requests AS key_concurrency,
        ip.mode AS ip_mode, ip.rules AS ip_rules,
        b.token_daily, b.token_lifetime, b.charge_daily, b.charge_lifetime,
+       (k.principal_user_id IS NOT NULL AND (
+         $4::boolean OR
+         EXISTS(SELECT 1 FROM saas_user_limit_defaults d WHERE d.id = 1 AND (
+           d.requests_per_minute IS NOT NULL OR d.max_concurrent_requests IS NOT NULL OR
+           d.daily_token_units IS NOT NULL OR d.daily_charge_minor_units IS NOT NULL)) OR
+         EXISTS(SELECT 1 FROM saas_user_limit_policies up WHERE up.user_id = k.principal_user_id AND (
+           up.requests_per_minute IS NOT NULL OR up.max_concurrent_requests IS NOT NULL OR
+           up.daily_token_units IS NOT NULL OR up.daily_charge_minor_units IS NOT NULL)) OR
+         EXISTS(SELECT 1 FROM saas_user_risk_markers risk WHERE risk.user_id = k.principal_user_id)
+       )) AS user_controls,
        EXISTS(SELECT 1 FROM saas_billing_spending_freezes f WHERE f.tenant_id = t.id) AS spending_frozen,
        to_jsonb(g) AS billing_group,
        (SELECT COALESCE(jsonb_agg(gp.account_id ORDER BY gp.account_id), '[]'::jsonb)
@@ -343,7 +356,14 @@ export function createPostgresFastGatewaySnapshotLoader(
             authenticatedKey: input.authenticatedCaller,
           });
           const policy = one(
-            (await scoped.query<Row>(POLICY_SQL, [caller.tenantId, caller.projectId, caller.proxyKeyId])).rows,
+            (
+              await scoped.query<Row>(POLICY_SQL, [
+                caller.tenantId,
+                caller.projectId,
+                caller.proxyKeyId,
+                options.userRiskObservationsEnabled === true,
+              ])
+            ).rows,
           );
           if (
             policy.tenant_status !== 'active' ||
@@ -360,6 +380,8 @@ export function createPostgresFastGatewaySnapshotLoader(
             )
           )
             unsupported('key_budget');
+          if (typeof policy.user_controls !== 'boolean') unavailable();
+          if (policy.user_controls) unsupported('user_limits');
           if (typeof policy.spending_frozen !== 'boolean') unavailable();
           if (caller.supplyMode === 'platform' && policy.spending_frozen) denied();
           const group = record(policy.billing_group);

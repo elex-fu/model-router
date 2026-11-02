@@ -109,6 +109,12 @@ test('migration 034 registers after the immutable 033 history', () => {
       147,
       148,
       149,
+      // Operator/ops forwards: 150 bulk account import, 151 provider account
+      // cost, 152 account ban ledger, 153 user risk controls.
+      150,
+      151,
+      152,
+      153,
     ],
   );
 });

@@ -4122,6 +4122,97 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'window_cost_sticky_reserve_minor_units',
     'claude_session_window_start',
   ]),
+  ...columnGrants('saas_user_limit_defaults', 'SELECT', [
+    'id',
+    'version',
+    'requests_per_minute',
+    'max_concurrent_requests',
+    'daily_token_units',
+    'daily_charge_minor_units',
+    'charge_currency',
+  ]),
+  ...columnGrants('saas_user_limit_defaults', 'UPDATE', [
+    'requests_per_minute',
+    'max_concurrent_requests',
+    'daily_token_units',
+    'daily_charge_minor_units',
+    'charge_currency',
+    'updated_by_user_id',
+    'version',
+    'updated_at',
+  ]),
+  ...columnGrants('saas_user_limit_policies', 'SELECT', [
+    'user_id',
+    'version',
+    'requests_per_minute',
+    'max_concurrent_requests',
+    'daily_token_units',
+    'daily_charge_minor_units',
+    'charge_currency',
+  ]),
+  ...columnGrants('saas_user_limit_policies', 'INSERT', [
+    'user_id',
+    'requests_per_minute',
+    'max_concurrent_requests',
+    'daily_token_units',
+    'daily_charge_minor_units',
+    'charge_currency',
+    'updated_by_user_id',
+    'created_at',
+    'updated_at',
+  ]),
+  ...columnGrants('saas_user_limit_policies', 'UPDATE', [
+    'requests_per_minute',
+    'max_concurrent_requests',
+    'daily_token_units',
+    'daily_charge_minor_units',
+    'charge_currency',
+    'updated_by_user_id',
+    'version',
+    'updated_at',
+  ]),
+  // M3-G user abuse controls: the detector batch reads observations and
+  // writes detections plus escalation markers on the control-plane role
+  // (the gateway role gets INSERT-only observation access of its own).
+  ...columnGrants('saas_user_risk_observations', 'SELECT', [
+    'id',
+    'user_id',
+    'tenant_id',
+    'api_key_id',
+    'client_address_digest',
+    'public_model',
+    'protocol',
+    'occurred_at',
+  ]),
+  ...columnGrants('saas_user_anomaly_detections', 'SELECT', [
+    'id',
+    'user_id',
+    'tenant_id',
+    'api_key_id',
+    'kind',
+    'window_start',
+    'observed_at',
+  ]),
+  // Detector-batch inserts; id is identity-generated and never set.
+  ...columnGrants('saas_user_anomaly_detections', 'INSERT', [
+    'user_id',
+    'tenant_id',
+    'api_key_id',
+    'kind',
+    'window_start',
+    'observed_at',
+    'facts',
+  ]),
+  // Staged risk-escalation marker upsert (detector batch). Un-ban DELETE
+  // rides the control-plane table grants above.
+  ...columnGrants('saas_user_risk_markers', 'INSERT', [
+    'user_id',
+    'stage',
+    'requests_per_minute',
+    'revision',
+    'updated_at',
+  ]),
+  ...columnGrants('saas_user_risk_markers', 'UPDATE', ['stage', 'requests_per_minute', 'revision', 'updated_at']),
 ] as const;
 
 /** Table-level DELETE is the narrowest PostgreSQL privilege for these SQL statements. */
@@ -4169,6 +4260,9 @@ export const SAAS_CONTROL_PLANE_RUNTIME_TABLE_GRANTS: readonly SaasControlPlaneT
   // upsertInstallation/replaceBindings.
   ['saas_plugin_installations', 'DELETE'],
   ['saas_plugin_bindings', 'DELETE'],
+  // M3-G user abuse controls: un-banning a user retires the staged risk
+  // escalation markers; revoked keys deliberately stay revoked.
+  ['saas_user_risk_markers', 'DELETE'],
 ];
 
 /** Control-plane IDs are application-generated; the provider lease sequence is gateway-only. */
@@ -4657,6 +4751,13 @@ export const SAAS_GATEWAY_RUNTIME_READ_TABLES = [
   // (owner scope, account, model) key with its cooled-until bound; no
   // sensitive column exists on the table.
   'saas_provider_account_model_cooldowns',
+  // M3-G user abuse controls: per-user limit resolution and staged risk
+  // markers feed the fast snapshot and admission paths. The tables carry
+  // policy and markers only; usage accounting stays in the reservation
+  // ledger.
+  'saas_user_limit_defaults',
+  'saas_user_limit_policies',
+  'saas_user_risk_markers',
 ] as const;
 
 export type SaasGatewayColumnGrant = readonly [
@@ -5683,6 +5784,17 @@ export const SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS: readonly SaasGatewayColumnGrant
   ).map((column) => ['saas_provider_account_model_cooldowns', column, 'INSERT'] as const),
   ['saas_provider_account_model_cooldowns', 'cooled_until', 'UPDATE'],
   ['saas_provider_account_model_cooldowns', 'updated_at', 'UPDATE'],
+  // M3-G user abuse controls: the admission-path observation recorder —
+  // one append-only insert per accepted request inside the admission
+  // transaction. Detection reads and enforcement never run on the gateway
+  // role.
+  ['saas_user_risk_observations', 'user_id', 'INSERT'],
+  ['saas_user_risk_observations', 'tenant_id', 'INSERT'],
+  ['saas_user_risk_observations', 'api_key_id', 'INSERT'],
+  ['saas_user_risk_observations', 'client_address_digest', 'INSERT'],
+  ['saas_user_risk_observations', 'public_model', 'INSERT'],
+  ['saas_user_risk_observations', 'protocol', 'INSERT'],
+  ['saas_user_risk_observations', 'occurred_at', 'INSERT'],
 ] as const;
 
 const GATEWAY_COLUMN_GRANTS = SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS;

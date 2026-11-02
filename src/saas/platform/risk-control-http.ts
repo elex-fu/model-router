@@ -8,6 +8,7 @@ import {
   serializeRiskControlConfig,
 } from '../risk/moderation.js';
 import type { ContentModerationLogPage, PostgresRiskControlAdminStore } from '../risk/postgres-store.js';
+import type { UserLimitAdminService, UserLimitAdminView } from '../risk/user-limit-admin-service.js';
 import { hasPlatformRole } from './access/authorization.js';
 import type { PlatformAdminAccessService, PlatformAdminActor } from './access/types.js';
 import {
@@ -16,6 +17,7 @@ import {
   PLATFORM_ADMIN_SESSION_COOKIE,
   type PlatformAdminAuthHttpService,
 } from './auth/http.js';
+import { PlatformGovernanceError } from './governance/errors.js';
 
 /**
  * Roadmap batch 5 §5.4 (task #19) — the risk-control operator surface behind
@@ -40,7 +42,19 @@ import {
  * `{ data, meta: { requestId } }` / `{ error: ... }` envelopes.
  */
 const ROUTE_PREFIX = '/admin/api/v1/risk-control/';
-const ROUTES = new Set(['get-config', 'update-config', 'logs', 'unban', 'delete-hash', 'clear-hashes', 'run-cleanup']);
+const ROUTES = new Set([
+  'get-config',
+  'update-config',
+  'logs',
+  'unban',
+  'delete-hash',
+  'clear-hashes',
+  'run-cleanup',
+  'get-default-limits',
+  'update-default-limits',
+  'get-user-limits',
+  'update-user-limits',
+]);
 
 export interface RiskControlHttpOptions {
   readonly access: Pick<PlatformAdminAccessService, 'authenticate'>;
@@ -58,6 +72,10 @@ export interface RiskControlHttpOptions {
     | 'userHoldsPlatformRole'
   >;
   readonly audit?: RiskControlAuditWriter;
+  readonly userLimits?: Pick<
+    UserLimitAdminService,
+    'getDefaults' | 'getUserLimits' | 'updateDefaults' | 'updateUserLimits'
+  >;
   readonly publicOrigin: string;
 }
 
@@ -276,6 +294,17 @@ function logView(page: ContentModerationLogPage): Record<string, unknown> {
   };
 }
 
+function limitView(view: UserLimitAdminView): Record<string, unknown> {
+  const serialize = (policy: UserLimitAdminView['stored']): Record<string, string | null> => ({
+    requestsPerMinute: policy.requestsPerMinute?.toString(10) ?? null,
+    maxConcurrentRequests: policy.maxConcurrentRequests?.toString(10) ?? null,
+    dailyTokenUnits: policy.dailyTokenUnits?.toString(10) ?? null,
+    dailyChargeMinorUnits: policy.dailyChargeMinorUnits?.toString(10) ?? null,
+    chargeCurrency: policy.chargeCurrency,
+  });
+  return { version: view.version, stored: serialize(view.stored), effective: serialize(view.effective) };
+}
+
 export function createRiskControlHttpHandler(options: RiskControlHttpOptions): RiskControlHttpHandler {
   if (!options.access || !options.authService || !options.store) {
     throw new Error('risk-control http handler requires access, authService and store');
@@ -418,6 +447,50 @@ export function createRiskControlHttpHandler(options: RiskControlHttpOptions): R
           });
           return true;
         }
+        case 'get-default-limits': {
+          await readJson(req);
+          if (!options.userLimits)
+            throw new HttpError(503, 'RISK_CONTROL_UNAVAILABLE', 'Risk control is not available');
+          sendJson(res, 200, requestId, { limits: limitView(await options.userLimits.getDefaults(actor)) });
+          return true;
+        }
+        case 'update-default-limits': {
+          const body = await readJson(req);
+          requireExactKeys(body, ['expectedVersion', 'limits']);
+          if (!options.userLimits)
+            throw new HttpError(503, 'RISK_CONTROL_UNAVAILABLE', 'Risk control is not available');
+          const limits = await options.userLimits.updateDefaults(actor, {
+            expectedVersion: bodyIdentifier(body, 'expectedVersion', 32),
+            limits: body.limits,
+          });
+          sendJson(res, 200, requestId, { limits: limitView(limits) });
+          return true;
+        }
+        case 'get-user-limits': {
+          const body = await readJson(req);
+          requireExactKeys(body, ['userId']);
+          if (!options.userLimits)
+            throw new HttpError(503, 'RISK_CONTROL_UNAVAILABLE', 'Risk control is not available');
+          const userId = bodyIdentifier(body, 'userId', 128);
+          sendJson(res, 200, requestId, {
+            userId,
+            limits: limitView(await options.userLimits.getUserLimits(actor, userId)),
+          });
+          return true;
+        }
+        case 'update-user-limits': {
+          const body = await readJson(req);
+          requireExactKeys(body, ['userId', 'expectedVersion', 'limits']);
+          if (!options.userLimits)
+            throw new HttpError(503, 'RISK_CONTROL_UNAVAILABLE', 'Risk control is not available');
+          const userId = bodyIdentifier(body, 'userId', 128);
+          const limits = await options.userLimits.updateUserLimits(actor, userId, {
+            expectedVersion: bodyIdentifier(body, 'expectedVersion', 32),
+            limits: body.limits,
+          });
+          sendJson(res, 200, requestId, { userId, limits: limitView(limits) });
+          return true;
+        }
         default:
           sendError(res, 404, requestId, 'NOT_FOUND', 'Unknown risk-control action');
           return true;
@@ -431,6 +504,10 @@ export function createRiskControlHttpHandler(options: RiskControlHttpOptions): R
       if (res.destroyed || res.writableEnded) return true;
       if (error instanceof HttpError) {
         sendError(res, error.status, requestId, error.code, error.safeMessage);
+        return true;
+      }
+      if (error instanceof PlatformGovernanceError) {
+        sendError(res, error.status, requestId, error.code, error.message);
         return true;
       }
       if (error instanceof RiskControlConfigError) {

@@ -725,6 +725,14 @@ test('migration 008 defines bounded append-only catalog tables and registry vers
     148,
     // Fast-ledger retention: flag-gated DELETEs plus tenant/time sweep indexes.
     149,
+    // Operator bulk account-import jobs and per-item outcomes.
+    150,
+    // Provider account cost tracking.
+    151,
+    // Account ban ledger.
+    152,
+    // User risk controls.
+    153,
   ]);
   assert.equal(SAAS_MIGRATIONS[7], PROVIDER_CATALOG_AND_RIGHTS_SAAS_MIGRATION);
   assert.match(PROVIDER_CATALOG_AND_RIGHTS_SAAS_MIGRATION.sql, /CREATE TABLE saas_provider_capabilities/);

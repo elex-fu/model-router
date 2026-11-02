@@ -53,6 +53,9 @@ interface CapacityAuthority extends Row {
   key_requests_per_minute: unknown;
   key_tokens_per_minute: unknown;
   key_max_concurrent_requests: unknown;
+  user_id: unknown;
+  user_requests_per_minute: unknown;
+  user_max_concurrent_requests: unknown;
 }
 
 interface ReservationRow extends Row {
@@ -322,11 +325,30 @@ async function takeScopeLock(executor: SqlExecutor, tenantId: string): Promise<v
   ]);
 }
 
-function authorityLimits(authority: CapacityAuthority): {
+/**
+ * A member user's keys can span tenants, so a tenant fence alone cannot
+ * serialize the user-wide counters. The user fence is always acquired after
+ * the tenant fence; project-service keys have no user scope and skip it.
+ */
+async function takeUserScopeLock(executor: SqlExecutor, userId: string): Promise<void> {
+  await executor.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, [
+    `model-router:request-capacity:user:${userId}`,
+  ]);
+}
+
+interface CapacityLimits {
   tenant: { rpm: bigint; tpm: bigint; concurrency: bigint };
   project: { rpm: bigint; tpm: bigint; concurrency: bigint };
   key: { rpm: bigint; tpm: bigint; concurrency: bigint };
-} | null {
+  user: { userId: string; rpm: bigint | null; concurrency: bigint | null } | null;
+}
+
+function optionalLimit(value: unknown): bigint | null | undefined {
+  if (value === null || value === undefined) return null;
+  return exactInteger(value);
+}
+
+function authorityLimits(authority: CapacityAuthority): CapacityLimits | null {
   const values = [
     positiveLimit(authority.tenant_requests_per_minute),
     positiveLimit(authority.tenant_tokens_per_minute),
@@ -350,10 +372,19 @@ function authorityLimits(authority: CapacityAuthority): {
     keyTpm,
     keyConcurrency,
   ] = values as bigint[];
+  let user: CapacityLimits['user'] = null;
+  if (authority.user_id !== null && authority.user_id !== undefined) {
+    if (!text(authority.user_id)) return null;
+    const rpm = optionalLimit(authority.user_requests_per_minute);
+    const concurrency = optionalLimit(authority.user_max_concurrent_requests);
+    if (rpm === undefined || concurrency === undefined) return null;
+    user = { userId: authority.user_id, rpm, concurrency };
+  }
   return {
     tenant: { rpm: tenantRpm, tpm: tenantTpm, concurrency: tenantConcurrency },
     project: { rpm: projectRpm, tpm: projectTpm, concurrency: projectConcurrency },
     key: { rpm: keyRpm, tpm: keyTpm, concurrency: keyConcurrency },
+    user,
   };
 }
 
@@ -497,7 +528,16 @@ export class PostgresPreparationCapacityAdapter implements PostgresPreparationCa
                 k.expires_at AS key_expires_at,
                 k.requests_per_minute AS key_requests_per_minute,
                 k.tokens_per_minute AS key_tokens_per_minute,
-                k.max_concurrent_requests AS key_max_concurrent_requests
+                k.max_concurrent_requests AS key_max_concurrent_requests,
+                k.principal_user_id AS user_id,
+                CASE WHEN k.principal_user_id IS NOT NULL THEN
+                  CASE WHEN risk.stage = 'rate_limited' THEN
+                    LEAST(risk.requests_per_minute, COALESCE(up.requests_per_minute, d.requests_per_minute))
+                  ELSE COALESCE(up.requests_per_minute, d.requests_per_minute) END
+                END AS user_requests_per_minute,
+                CASE WHEN k.principal_user_id IS NOT NULL
+                  THEN COALESCE(up.max_concurrent_requests, d.max_concurrent_requests)
+                END AS user_max_concurrent_requests
            FROM saas_tenants t
            JOIN saas_projects p ON p.tenant_id = t.id
            JOIN saas_project_inference_policy_versions policy
@@ -508,7 +548,10 @@ export class PostgresPreparationCapacityAdapter implements PostgresPreparationCa
              ON k.tenant_id = p.tenant_id
             AND k.project_id = p.id
             AND k.id = $3
-          WHERE t.id = $1 AND p.id = $2
+           CROSS JOIN saas_user_limit_defaults d
+           LEFT JOIN saas_user_limit_policies up ON up.user_id = k.principal_user_id
+           LEFT JOIN saas_user_risk_markers risk ON risk.user_id = k.principal_user_id
+          WHERE t.id = $1 AND p.id = $2 AND d.id = 1
           LIMIT 2`,
         [input.tenantId, input.projectId, input.proxyKeyId],
       );
@@ -606,14 +649,21 @@ export class PostgresPreparationCapacityAdapter implements PostgresPreparationCa
         }
       }
 
-      if (this.redis)
+      // Redis has no user-scope counters. Governed member users therefore use
+      // the canonical PostgreSQL path; unlimited/project-service keys retain
+      // the existing Redis implementation.
+      const canonicalUserCapacity =
+        limits.user !== null && (limits.user.rpm !== null || limits.user.concurrency !== null);
+      if (this.redis && !canonicalUserCapacity) {
         return this.redis.reserve(executor, input, limits, policyVersion, keyAuthzVersion, groupRateTerms, tokenUnits);
+      }
 
       /* R9 P4/P16: the exclusive tenant-scope fence starts HERE. Everything
          above is per-request or protected by the caller's shared authz
          fences; everything below reads or writes shared capacity state and
          must stay inside the fence until COMMIT. */
       await takeScopeLock(executor, input.tenantId);
+      if (canonicalUserCapacity && limits.user) await takeUserScopeLock(executor, limits.user.userId);
 
       const countRows = await queryRows<Row>(
         executor,
@@ -623,9 +673,10 @@ export class PostgresPreparationCapacityAdapter implements PostgresPreparationCa
               upstream (the provider transport timeout ceiling has long passed),
               so they stop blocking admission while the recovery worker
               reconciles them; see CONCURRENCY_INFLIGHT_HORIZON_SECONDS. */
-           SELECT q.tenant_id, q.project_id, q.proxy_key_id, q.id
+           SELECT q.tenant_id, q.project_id, q.proxy_key_id, q.id,
+                  CASE WHEN q.principal_kind = 'member' THEN q.principal_id END AS user_id
              FROM saas_requests q
-            WHERE q.tenant_id = $1
+            WHERE (q.tenant_id = $1 OR (q.principal_kind = 'member' AND q.principal_id = $5))
               AND q.id <> $4
               AND q.execution_state IN ('pending', 'unknown')
               AND q.updated_at > clock_timestamp() - INTERVAL '${CONCURRENCY_INFLIGHT_HORIZON_SECONDS} seconds'
@@ -644,9 +695,11 @@ export class PostgresPreparationCapacityAdapter implements PostgresPreparationCa
               )
          ), rate_window AS (
            /* RPM/TPM expire by database admission time, separately from activity. */
-           SELECT r.tenant_id, r.project_id, r.proxy_key_id, r.token_units
+           SELECT r.tenant_id, r.project_id, r.proxy_key_id, r.token_units,
+                  CASE WHEN rq.principal_kind = 'member' THEN rq.principal_id END AS user_id
              FROM saas_gateway_capacity_reservations r
-            WHERE r.tenant_id = $1
+             JOIN saas_requests rq ON rq.tenant_id = r.tenant_id AND rq.id = r.request_id
+            WHERE (r.tenant_id = $1 OR (rq.principal_kind = 'member' AND rq.principal_id = $5))
               AND r.request_id <> $4
               AND r.state IN ('reserved', 'retained_for_reconciliation')
               AND r.reserved_at > clock_timestamp() - INTERVAL '60 seconds'
@@ -660,8 +713,10 @@ export class PostgresPreparationCapacityAdapter implements PostgresPreparationCa
            (SELECT COALESCE(SUM(token_units), 0) FROM rate_window WHERE project_id = $2)::text AS project_token_units,
            (SELECT COUNT(*) FROM rate_window WHERE project_id = $2 AND proxy_key_id = $3)::text AS key_rate_count,
            (SELECT COUNT(*) FROM existing WHERE project_id = $2 AND proxy_key_id = $3)::text AS key_concurrent_count,
-           (SELECT COALESCE(SUM(token_units), 0) FROM rate_window WHERE project_id = $2 AND proxy_key_id = $3)::text AS key_token_units`,
-        [input.tenantId, input.projectId, input.proxyKeyId, input.requestId],
+           (SELECT COALESCE(SUM(token_units), 0) FROM rate_window WHERE project_id = $2 AND proxy_key_id = $3)::text AS key_token_units,
+           (SELECT COUNT(*) FROM rate_window WHERE user_id = $5)::text AS user_rate_count,
+           (SELECT COUNT(*) FROM existing WHERE user_id = $5)::text AS user_concurrent_count`,
+        [input.tenantId, input.projectId, input.proxyKeyId, input.requestId, limits.user?.userId ?? null],
       );
       const counts = oneRow(countRows);
       if (!counts) return blockRequestPreparation('storage_failure', SAFE_CAPACITY_FAILURE);
@@ -676,6 +731,8 @@ export class PostgresPreparationCapacityAdapter implements PostgresPreparationCa
       const keyRate = count('key_rate_count');
       const keyConcurrency = count('key_concurrent_count');
       const keyTokens = count('key_token_units');
+      const userRate = count('user_rate_count');
+      const userConcurrency = count('user_concurrent_count');
       if (
         tenantRate === null ||
         tenantConcurrency === null ||
@@ -685,7 +742,9 @@ export class PostgresPreparationCapacityAdapter implements PostgresPreparationCa
         projectTokens === null ||
         keyRate === null ||
         keyConcurrency === null ||
-        keyTokens === null
+        keyTokens === null ||
+        userRate === null ||
+        userConcurrency === null
       ) {
         return blockRequestPreparation('storage_failure', SAFE_CAPACITY_FAILURE);
       }
@@ -700,14 +759,16 @@ export class PostgresPreparationCapacityAdapter implements PostgresPreparationCa
       if (
         tenantRate + 1n > limits.tenant.rpm ||
         projectRate + 1n > limits.project.rpm ||
-        keyRate + 1n > limits.key.rpm
+        keyRate + 1n > limits.key.rpm ||
+        (limits.user !== null && limits.user.rpm !== null && userRate + 1n > limits.user.rpm)
       ) {
         return rejectRequestPreparation('rate_limited', 'The request exceeds an authoritative request rate limit.');
       }
       if (
         tenantConcurrency + 1n > limits.tenant.concurrency ||
         projectConcurrency + 1n > limits.project.concurrency ||
-        keyConcurrency + 1n > limits.key.concurrency
+        keyConcurrency + 1n > limits.key.concurrency ||
+        (limits.user !== null && limits.user.concurrency !== null && userConcurrency + 1n > limits.user.concurrency)
       ) {
         return rejectRequestPreparation('rate_limited', 'The request exceeds an authoritative concurrency limit.');
       }
@@ -837,31 +898,34 @@ export class PostgresPreparationCapacityAdapter implements PostgresPreparationCa
       const attempt = oneRow(attemptRows);
       if (this.redis) {
         const reservation = await this.redis.find(input.requestId);
-        if (
-          !reservation ||
-          reservation.tenant_id !== input.tenantId ||
-          reservation.project_id !== input.projectId ||
-          reservation.quota_reservation_id !== input.quotaReservation.reference ||
-          reservation.rate_reservation_id !== input.rateReservation.reference
-        )
-          return retained;
-        if (reservation.state === 'released') return { quotaReservation: 'released', rateReservation: 'released' };
-        if (
-          !attempt ||
-          attempt.project_id !== input.projectId ||
-          attempt.proxy_key_id !== reservation.proxy_key_id ||
-          attempt.dispatch_state !== 'not_sent' ||
-          attempt.result_state !== 'pending' ||
-          attempt.response_started !== false ||
-          attempt.execution_state !== 'pending' ||
-          attempt.reconciliation_state !== 'none' ||
-          attempt.any_attempt_dispatched !== false
-        )
-          return retained;
-        // PG cancellation must commit before the Redis reservation is freed.
-        // The HTTP completion hook/recovery worker observes that terminal row;
-        // rolling this transaction back therefore cannot release live capacity.
-        return { quotaReservation: 'released', rateReservation: 'released' };
+        if (reservation) {
+          if (
+            reservation.tenant_id !== input.tenantId ||
+            reservation.project_id !== input.projectId ||
+            reservation.quota_reservation_id !== input.quotaReservation.reference ||
+            reservation.rate_reservation_id !== input.rateReservation.reference
+          )
+            return retained;
+          if (reservation.state === 'released') return { quotaReservation: 'released', rateReservation: 'released' };
+          if (
+            !attempt ||
+            attempt.project_id !== input.projectId ||
+            attempt.proxy_key_id !== reservation.proxy_key_id ||
+            attempt.dispatch_state !== 'not_sent' ||
+            attempt.result_state !== 'pending' ||
+            attempt.response_started !== false ||
+            attempt.execution_state !== 'pending' ||
+            attempt.reconciliation_state !== 'none' ||
+            attempt.any_attempt_dispatched !== false
+          )
+            return retained;
+          // PG cancellation must commit before the Redis reservation is freed.
+          // The HTTP completion hook/recovery worker observes that terminal row;
+          // rolling this transaction back therefore cannot release live capacity.
+          return { quotaReservation: 'released', rateReservation: 'released' };
+        }
+        // A governed user reservation deliberately bypassed Redis. Absence in
+        // Redis is therefore not proof of retention: continue to canonical PG.
       }
       const reservationRows = await queryRows<ReservationRow>(
         executor,

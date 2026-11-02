@@ -20,7 +20,7 @@ type Row = Record<string, unknown>;
 const NOW = Date.parse('2026-10-26T12:00:00Z');
 const iso = (delta = 0) => new Date(NOW + delta).toISOString();
 
-function fixture(mode: 'byok' | 'platform' = 'byok') {
+function fixture(mode: 'byok' | 'platform' = 'byok', userRiskObservationsEnabled = false) {
   const tenant = randomUUID();
   const project = randomUUID();
   const key = randomUUID();
@@ -212,6 +212,7 @@ function fixture(mode: 'byok' | 'platform' = 'byok') {
   };
   const policy: Row = {
     spending_frozen: false,
+    user_controls: false,
     tenant_status: 'active',
     project_status: 'active',
     policy_status: 'active',
@@ -262,6 +263,9 @@ function fixture(mode: 'byok' | 'platform' = 'byok') {
     updated_at: iso(),
     disabled_at: null,
     revoked_at: null,
+    banned_at: null,
+    ban_reason: null,
+    ban_last_error: null,
     quota_state: null,
     rpm_limit: 80,
     tpm_limit: 50_000,
@@ -363,7 +367,8 @@ function fixture(mode: 'byok' | 'platform' = 'byok') {
             now: iso(),
           },
         ];
-      else if (sql.includes('fast-snapshot:policy')) rows = [policy];
+      else if (sql.includes('fast-snapshot:policy'))
+        rows = [{ ...policy, user_controls: policy.user_controls === true || values[3] === true }];
       else if (sql.includes('fixture:authority-expiries')) rows = [expiryRow];
       else if (sql.includes('fast-snapshot:account-runtime'))
         rows = [{ account, health: hasHealth ? health : null, model_cooling: false }];
@@ -418,6 +423,7 @@ function fixture(mode: 'byok' | 'platform' = 'byok') {
     },
     maxBodyBytes: 1024,
     accountMaxConcurrency: 8,
+    userRiskObservationsEnabled,
     monotonicNow: () => {
       monotonic += clockStep;
       return monotonic;
@@ -601,6 +607,18 @@ test('unsupported diagnostics are fixed safe labels, never data or key material'
   f.policy.token_daily = '0';
   assert.equal(await f.loader.resolve(f.input), null);
   assert.deepEqual(f.unsupportedReasons, ['key_budget']);
+});
+
+test('configured user controls and observation capture force canonical admission', async () => {
+  const controlled = fixture();
+  controlled.policy.user_controls = true;
+  assert.equal(await controlled.loader.resolve(controlled.input), null);
+  assert.deepEqual(controlled.unsupportedReasons, ['user_limits']);
+
+  const observed = fixture('byok', true);
+  assert.equal(await observed.loader.resolve(observed.input), null);
+  assert.deepEqual(observed.unsupportedReasons, ['user_limits']);
+  assert.equal(observed.statements.find(({ sql }) => sql.includes('fast-snapshot:policy'))?.values[3], true);
 });
 
 test('tenant-wide spending freeze denies platform cold authority but not BYOK', async () => {
