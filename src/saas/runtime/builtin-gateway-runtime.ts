@@ -31,6 +31,7 @@ import { createBuiltinProviderEvidenceTransportFactory } from './builtin-provide
 import { BUILTIN_PAYLOAD_COMPILER_VERSION } from './builtin-payload-compiler-version.js';
 import { createBuiltinUsageUpperBoundEstimator } from './builtin-usage-bounds.js';
 import { collectCodexWorkflowFinancialReadiness, declaredCodexFinancialWorkflows } from './codex-workflow-financial-readiness.js';
+import { createDbCodexTrustedBoundProfileResolver } from './codex-bound-db-resolver.js';
 import type { GatewayCapabilityReadiness, GatewayCapabilityVerificationLevel } from './gateway-capability-readiness.js';
 import { assertGatewayCapabilityAssembly, projectGatewayCapabilityReadiness } from './gateway-capability-readiness.js';
 import type {
@@ -522,6 +523,20 @@ export async function createBuiltinManagedSaasGatewayRuntime(
     if (maxInputTokens < 8192) return invalid();
     const maxOutputTokens = positive(limits.maxOutputTokens, 131_072, 1_048_576);
     const defaultOutputTokens = Math.min(4096, maxOutputTokens);
+    // 方案1 (M1-C): with the Codex bundle enabled and no reviewed-evidence
+    // resolver injected, the ops-approved ledger (migration 155) supplies the
+    // admitted profiles through a TTL-cached DB resolver. The expiry margin is
+    // the request timeout, so a request admitted now can always finish inside
+    // the profile's validity window.
+    const codexDbResolver = extensions.providerBundles.some(
+      (bundle) => bundle.bundle === 'openai-codex' && bundle.enabled,
+    )
+      ? await createDbCodexTrustedBoundProfileResolver({
+          database: options.database,
+          expiryMarginMs: timeoutMs,
+        })
+      : undefined;
+    const codexProfileResolver = options.codexProfileResolver ?? codexDbResolver;
     const enabled = extensions.providerBundles
       .filter((bundle) => bundle.enabled)
       .map((bundle) => providerBundleManifest(bundle.bundle));
@@ -538,7 +553,7 @@ export async function createBuiltinManagedSaasGatewayRuntime(
       providerBundles: extensions.providerBundles,
       fetch,
       timeoutMs,
-      ...(options.codexProfileResolver ? { codexProfileResolver: options.codexProfileResolver } : {}),
+      ...(codexProfileResolver ? { codexProfileResolver } : {}),
     });
     const target = createBuiltinProviderTargetResolver(extensions.providerBundles);
     const compactModels = new Set<string>();
@@ -610,7 +625,7 @@ export async function createBuiltinManagedSaasGatewayRuntime(
         estimator: createBuiltinUsageUpperBoundEstimator({
           maxInputTokens,
           maxOutputTokens,
-          ...(options.codexProfileResolver ? { codexProfileResolver: options.codexProfileResolver } : {}),
+          ...(codexProfileResolver ? { codexProfileResolver } : {}),
         }),
         modelCompatibility: async (input) => {
           const manifest = enabled.find(
@@ -728,6 +743,7 @@ export async function createBuiltinManagedSaasGatewayRuntime(
       if (closed) throw new Error('Built-in gateway runtime is closed');
       await refreshCompactModels();
       await refreshVerification();
+      await codexDbResolver?.refresh();
       if (tlsFingerprintResolution) {
         try {
           await checkSidecar(tlsFingerprintResolution.sidecarSocketPath);
@@ -740,7 +756,7 @@ export async function createBuiltinManagedSaasGatewayRuntime(
       const financial = collectCodexWorkflowFinancialReadiness(
         facts.bundles.codexFinancialCatalogScopes,
         undefined,
-        options.codexProfileResolver,
+        codexProfileResolver,
       );
       const unavailable = (facts.unavailableUsageBoundProviderIds ?? []).filter((providerId) => providerId !== 'openai-codex');
       if (enabled.some((entry) => entry?.providerId === 'openai-codex') &&

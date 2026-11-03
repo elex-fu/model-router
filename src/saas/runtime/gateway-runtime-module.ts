@@ -80,9 +80,12 @@ export interface ManagedSaasGatewayRuntimeModuleOptions {
     registerCloseHook(hook: () => ProviderAwaitable<void>): void;
   }>;
   /**
-   * Reviewed Codex trusted-bound admission seam; omitted keeps the frozen empty
-   * production registry (fail-closed TRUSTED_USAGE_BOUNDS_UNAVAILABLE). Only a
-   * composition layer that itself verified the reviewed evidence may inject one.
+   * Reviewed Codex trusted-bound admission seam. Omitted with the Codex bundle
+   * enabled falls back to the ops-approved ledger resolver (migration 155,
+   * TTL-cached, digest-verified); with the bundle disabled the frozen empty
+   * production registry keeps admission fail-closed
+   * (TRUSTED_USAGE_BOUNDS_UNAVAILABLE). Only a composition layer that itself
+   * verified the reviewed evidence may inject one.
    */
   readonly codexProfileResolver?: CodexTrustedBoundProfileResolver;
 }
