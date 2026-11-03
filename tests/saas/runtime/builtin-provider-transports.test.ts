@@ -2,8 +2,15 @@ import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';
 import { test } from 'node:test';
 import type { SaasDatabase } from '../../../src/saas/db/types.js';
+import { CODEX_RESPONSES_ENDPOINT } from '../../../src/saas/gateway/codex/transport.js';
 import type { PreparedEvidenceTransportRequest } from '../../../src/saas/gateway/prepared-evidence-dispatch-service.js';
+import { BUILTIN_PAYLOAD_COMPILER_VERSION } from '../../../src/saas/runtime/builtin-payload-compiler-version.js';
 import { createBuiltinProviderEvidenceTransportFactory } from '../../../src/saas/runtime/builtin-provider-transports.js';
+import {
+  type CodexTrustedBoundProfile,
+  codexBoundCompilerVersion,
+  createCodexTrustedBoundProfileResolver,
+} from '../../../src/saas/runtime/codex-trusted-bound-profiles.js';
 import type { ProviderCredentialDispatchProof } from '../../../src/saas/supply/types.js';
 
 function fixture(kind: 'claude' | 'codex' = 'claude') {
@@ -135,7 +142,11 @@ function fixture(kind: 'claude' | 'codex' = 'claude') {
     },
   } as unknown as ProviderCredentialDispatchProof;
   const body = Buffer.from(
-    JSON.stringify(kind === 'codex' ? { model: 'model-a', input: [], instructions: 'Test instructions', stream: true, store: false } : { model: 'model-a', messages: [{ role: 'user', content: 'Test' }], max_tokens: 1, stream: true }),
+    JSON.stringify(
+      kind === 'codex'
+        ? { model: 'model-a', input: [], instructions: 'Test instructions', stream: true, store: false }
+        : { model: 'model-a', messages: [{ role: 'user', content: 'Test' }], max_tokens: 1, stream: true },
+    ),
   );
   const request = {
     tenantId: 'tenant-a',
@@ -316,17 +327,220 @@ test('Codex missing reviewed trusted-bound evidence is rejected before credentia
   const f = fixture('codex');
   let unsealed = 0;
   let sent = 0;
-  const factory = createBuiltinProviderEvidenceTransportFactory({ database: f.database, providerBundles: [{ bundle: 'openai-codex', enabled: true }], timeoutMs: 1000, fetch: async () => { sent++; return new Response(); } });
+  const factory = createBuiltinProviderEvidenceTransportFactory({
+    database: f.database,
+    providerBundles: [{ bundle: 'openai-codex', enabled: true }],
+    timeoutMs: 1000,
+    fetch: async () => {
+      sent++;
+      return new Response();
+    },
+  });
   const transport = factory.factory({
-    genericTransport: { async send() { throw new Error('wrong fallback'); } },
-    proofReader: { async readDispatchProof() { return structuredClone(f.proof); } },
-    unsealer: { async withCredential(_input, use) { unsealed++; await use(Buffer.from(f.plaintext)); } },
-    resolveEgressProfile: async () => { throw new Error('must not resolve egress without financial evidence'); },
+    genericTransport: {
+      async send() {
+        throw new Error('wrong fallback');
+      },
+    },
+    proofReader: {
+      async readDispatchProof() {
+        return structuredClone(f.proof);
+      },
+    },
+    unsealer: {
+      async withCredential(_input, use) {
+        unsealed++;
+        await use(Buffer.from(f.plaintext));
+      },
+    },
+    resolveEgressProfile: async () => {
+      throw new Error('must not resolve egress without financial evidence');
+    },
   }).codexEvidenceTransport;
   try {
     assert.ok(transport);
     await assert.rejects(transport.send(f.request));
     assert.equal(unsealed, 0);
     assert.equal(sent, 0);
-  } finally { factory.close(); f.plaintext.fill(0); }
+  } finally {
+    factory.close();
+    f.plaintext.fill(0);
+  }
+});
+
+/*
+ * 方案1 (M1-D / R8) — send-time re-validation: the dispatch may only egress
+ * after the codex send-profile re-validates the compiler version signed over
+ * the reviewed bounds against the exact dispatch scope. The registry stays
+ * frozen empty in production; these tests inject the reviewed profile the
+ * same way the DB ledger resolver (M1-C) serves approved rows.
+ */
+
+function codexReviewedProfile(): CodexTrustedBoundProfile {
+  const nowMs = Date.now();
+  return {
+    scope: {
+      endpoint: CODEX_RESPONSES_ENDPOINT,
+      productId: 'codex-chatgpt',
+      model: 'model-a',
+      operation: 'responses',
+      transport: 'http',
+      continuationMode: 'full',
+    },
+    backendRevision: 'backend-rev-1',
+    evidenceVersion: 'proof-v1',
+    evidenceReference: 'ops-live-evidence-checklist-entry',
+    validFromMs: nowMs - 60_000,
+    expiresAtMs: nowMs + 600_000,
+    bounds: {
+      inputTotalUpperBound: '100',
+      inputUncachedUpperBound: '100',
+      cacheReadUpperBound: '100',
+      cacheWriteUpperBound: '0',
+      cacheWrite5mUpperBound: '0',
+      cacheWrite1hUpperBound: '0',
+      outputTotalUpperBound: '20',
+      reasoningOutputUpperBound: '20',
+      feasibleInputBuckets: ['input'],
+      perUnitUnitsUpperBound: null,
+      sizeTier: null,
+    },
+  };
+}
+
+const CODEX_SSE =
+  'event: response.created\ndata: {"type":"response.created"}\n\n' +
+  'event: response.completed\ndata: {"type":"response.completed","response":{"usage":{"input_tokens":3,' +
+  '"input_tokens_details":{"cached_tokens":1},"output_tokens":2,"output_tokens_details":{"reasoning_tokens":1}}}}\n\n';
+
+test('a codex dispatch egresses only after the signed reviewed send-profile re-validates', async () => {
+  const f = fixture('codex');
+  const reviewed = codexReviewedProfile();
+  const version = codexBoundCompilerVersion(BUILTIN_PAYLOAD_COMPILER_VERSION, reviewed);
+  const evidence = f.request.evidence as { payloadCompilerVersion?: string; providerId?: string; productId?: string };
+  evidence.payloadCompilerVersion = version;
+  evidence.providerId = 'openai-codex';
+  evidence.productId = 'codex-chatgpt';
+  const database = {
+    query: async () => ({ rows: [{ proxy_key_id: 'key-a', payload_compiler_version: version }], rowCount: 1 }),
+    transaction: async () => undefined,
+  } as unknown as SaasDatabase;
+  let unsealed = 0;
+  let sent = 0;
+  const factory = createBuiltinProviderEvidenceTransportFactory({
+    database,
+    providerBundles: [{ bundle: 'openai-codex', enabled: true }],
+    timeoutMs: 1000,
+    codexProfileResolver: createCodexTrustedBoundProfileResolver([reviewed]),
+    fetch: async (url, init) => {
+      sent += 1;
+      assert.equal(url, CODEX_RESPONSES_ENDPOINT);
+      const headers = init.headers as Record<string, string>;
+      assert.equal(headers.authorization, `Bearer ${f.accessToken}`);
+      assert.equal(headers['chatgpt-account-id'], 'upstream-account-a');
+      return new Response(CODEX_SSE, { headers: { 'content-type': 'text/event-stream' } });
+    },
+  });
+  const transport = factory.factory({
+    genericTransport: {
+      async send() {
+        throw new Error('wrong fallback');
+      },
+    },
+    proofReader: {
+      async readDispatchProof() {
+        return structuredClone(f.proof);
+      },
+    },
+    unsealer: {
+      async withCredential(_input, use) {
+        unsealed += 1;
+        await use(Buffer.from(f.plaintext));
+      },
+    },
+    resolveEgressProfile: async () => ({}),
+    resolveAddresses: async () => [{ address: '93.184.216.34', family: 4 }],
+    createConnector: () => ({
+      dispatcher: {} as never,
+      async close() {},
+      async destroy() {},
+    }),
+  }).codexEvidenceTransport;
+  try {
+    assert.ok(transport);
+    const response = await transport.send(f.request);
+    assert.ok(response.body);
+    const reader = response.body.getReader();
+    while (!(await reader.read()).done) {}
+    assert.equal(unsealed, 1);
+    assert.equal(sent, 1);
+  } finally {
+    factory.close();
+    f.plaintext.fill(0);
+  }
+});
+
+test('a codex dispatch with a retired profile or tampered compiler version never unseals or egresses', async () => {
+  for (const fault of ['retired-profile', 'tampered-version'] as const) {
+    const f = fixture('codex');
+    const reviewed = codexReviewedProfile();
+    const version = codexBoundCompilerVersion(BUILTIN_PAYLOAD_COMPILER_VERSION, reviewed);
+    // A tampered evidence version is self-consistent with the evidence row
+    // (so the generic row check passes) but is not the version signed over
+    // the reviewed bounds — only the codex send re-validation catches it.
+    const tampered = codexBoundCompilerVersion(BUILTIN_PAYLOAD_COMPILER_VERSION, {
+      ...reviewed,
+      bounds: { ...reviewed.bounds, outputTotalUpperBound: '999' },
+    });
+    const carried = fault === 'retired-profile' ? version : tampered;
+    const evidence = f.request.evidence as { payloadCompilerVersion?: string; providerId?: string; productId?: string };
+    evidence.payloadCompilerVersion = carried;
+    evidence.providerId = 'openai-codex';
+    evidence.productId = 'codex-chatgpt';
+    const database = {
+      query: async () => ({ rows: [{ proxy_key_id: 'key-a', payload_compiler_version: carried }], rowCount: 1 }),
+      transaction: async () => undefined,
+    } as unknown as SaasDatabase;
+    let unsealed = 0;
+    let sent = 0;
+    const factory = createBuiltinProviderEvidenceTransportFactory({
+      database,
+      providerBundles: [{ bundle: 'openai-codex', enabled: true }],
+      timeoutMs: 1000,
+      codexProfileResolver: createCodexTrustedBoundProfileResolver(fault === 'retired-profile' ? [] : [reviewed]),
+      fetch: async () => {
+        sent += 1;
+        return new Response();
+      },
+    });
+    const transport = factory.factory({
+      genericTransport: {
+        async send() {
+          throw new Error('wrong fallback');
+        },
+      },
+      proofReader: {
+        async readDispatchProof() {
+          return structuredClone(f.proof);
+        },
+      },
+      unsealer: {
+        async withCredential(_input, use) {
+          unsealed += 1;
+          await use(Buffer.from(f.plaintext));
+        },
+      },
+      resolveEgressProfile: async () => {
+        throw new Error('must not resolve egress without send-profile re-validation');
+      },
+    }).codexEvidenceTransport;
+    try {
+      await assert.rejects(transport.send(f.request));
+      assert.equal(unsealed, 0);
+      assert.equal(sent, 0);
+    } finally {
+      factory.close();
+      f.plaintext.fill(0);
+    }
+  }
 });
