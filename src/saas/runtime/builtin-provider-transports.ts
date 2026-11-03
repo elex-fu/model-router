@@ -48,7 +48,7 @@ import {
 import type { ProviderCredentialDispatchProofReader } from '../supply/types.js';
 import { BUILTIN_PAYLOAD_COMPILER_VERSION } from './builtin-payload-compiler-version.js';
 import { consumeBuiltinProviderSecret } from './builtin-provider-secret-callback.js';
-import { resolveCodexBoundSendProfile } from './codex-trusted-bound-profiles.js';
+import { resolveCodexBoundSendProfile, type CodexTrustedBoundProfileResolver } from './codex-trusted-bound-profiles.js';
 import type { GatewayProviderCredentialUnsealer } from './gateway-provider-credential-unsealer.js';
 import type { ProviderBundleConfiguration } from './gateway-runtime-module.js';
 import { providerBundleManifest } from './provider-bundles.js';
@@ -121,7 +121,10 @@ export function createBuiltinProviderEvidenceTransportFactory(options: {
   readonly providerBundles: readonly ProviderBundleConfiguration[];
   readonly fetch: ProviderHttpFetch;
   readonly timeoutMs: number;
+  /** Reviewed-profile send re-validation seam; omitted keeps the frozen empty production registry. */
+  readonly codexProfileResolver?: CodexTrustedBoundProfileResolver;
 }): { readonly factory: GatewayProviderEvidenceTransportFactory; readonly assembled: boolean; close(): void } {
+  const resolveCodexSendProfile = options.codexProfileResolver?.sendProfile ?? resolveCodexBoundSendProfile;
   const requests = new AsyncLocalStorage<
     PreparedEvidenceTransportRequest & {
       readonly proxyKeyId: string;
@@ -253,7 +256,7 @@ export function createBuiltinProviderEvidenceTransportFactory(options: {
               return unavailable();
             const native = input.codexNativeWsSession !== undefined;
             const compact = operation === 'responses.compact';
-            const profile = resolveCodexBoundSendProfile(
+            const profile = resolveCodexSendProfile(
               evidence.payloadCompilerVersion ?? '',
               BUILTIN_PAYLOAD_COMPILER_VERSION,
               {

@@ -1,5 +1,5 @@
 import { CODEX_RESPONSES_ENDPOINT } from '../gateway/codex/transport.js';
-import { resolveCodexTrustedBoundProfile } from './codex-trusted-bound-profiles.js';
+import { resolveCodexTrustedBoundProfile, type CodexTrustedBoundProfileResolver } from './codex-trusted-bound-profiles.js';
 import type { ProviderUsageUpperBoundEstimator } from '../gateway/provider-payload-compiler.js';
 
 const FRAMING_TOKEN_ALLOWANCE = 4096;
@@ -149,7 +149,10 @@ function assertLocalTextContext(body: unknown): void {
 export function createBuiltinUsageUpperBoundEstimator(options: {
   readonly maxInputTokens: number;
   readonly maxOutputTokens: number;
+  /** Reviewed-profile admission seam; omitted keeps the frozen empty production registry. */
+  readonly codexProfileResolver?: CodexTrustedBoundProfileResolver;
 }): ProviderUsageUpperBoundEstimator {
+  const resolveCodexProfile = options.codexProfileResolver?.resolve ?? resolveCodexTrustedBoundProfile;
   return {
     version: 'builtin-local-text-byte-bound/v2',
     estimate({ normalizedRequest, compiledPayloadBytes }) {
@@ -164,7 +167,7 @@ export function createBuiltinUsageUpperBoundEstimator(options: {
       if (normalizedRequest.providerId === 'openai-codex') {
         // Only this exact backend contract may admit Codex; SIWC/API limits do not apply here.
         const compact = normalizedRequest.providerOperation === 'responses.compact';
-        const trusted = resolveCodexTrustedBoundProfile({
+        const trusted = resolveCodexProfile({
           endpoint: compact ? `${CODEX_RESPONSES_ENDPOINT}/compact` : normalizedRequest.upstreamTransport === 'websocket' ? CODEX_RESPONSES_ENDPOINT.replace('https:', 'wss:') : CODEX_RESPONSES_ENDPOINT,
           productId: normalizedRequest.productId,
           model: normalizedRequest.resolvedModel,

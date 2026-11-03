@@ -1,6 +1,6 @@
 import { CODEX_NATIVE_WS_ENDPOINT } from '../gateway/codex/native-ws-connector.js';
 import { CODEX_RESPONSES_ENDPOINT } from '../gateway/codex/transport.js';
-import { resolveCodexTrustedBoundProfile } from './codex-trusted-bound-profiles.js';
+import { resolveCodexTrustedBoundProfile, type CodexTrustedBoundProfileResolver } from './codex-trusted-bound-profiles.js';
 import type { CodexWorkflowReadiness } from './gateway-capability-readiness.js';
 
 export interface CodexFinancialCatalogScope {
@@ -24,7 +24,9 @@ export function declaredCodexFinancialWorkflows(nativeCompact: boolean): readonl
 export function collectCodexWorkflowFinancialReadiness(
   candidates: readonly (CodexFinancialCatalogScope | null)[] | undefined,
   nowMs = Date.now(),
+  resolver?: CodexTrustedBoundProfileResolver,
 ): CodexWorkflowFinancialReadiness {
+  const resolveCodexProfile = resolver?.resolve ?? resolveCodexTrustedBoundProfile;
   const unavailable: CodexWorkflowFinancialReadiness = Object.freeze({
     'responses-http-full': false,
     'responses-ws-full': false,
@@ -41,7 +43,7 @@ export function collectCodexWorkflowFinancialReadiness(
   }
   const covered = (endpoint: string, operation: string, transport: 'http' | 'websocket',
     continuationMode: 'full' | 'canonical-replay' | 'remote-history' | 'compact'): boolean =>
-    candidates.every((candidate) => candidate !== null && resolveCodexTrustedBoundProfile({
+    candidates.every((candidate) => candidate !== null && resolveCodexProfile({
       endpoint, productId: candidate.productId, model: candidate.resolvedModel,
       operation, transport, continuationMode,
     }, nowMs) !== null);

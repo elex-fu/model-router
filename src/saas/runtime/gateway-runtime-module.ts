@@ -23,6 +23,7 @@ import {
 import type { PostgresProviderAccountAffinityHmacKey } from '../gateway/postgres-provider-account-affinity.js';
 import { isProviderHttpTestAddressCapability } from '../gateway/provider-http-address.js';
 import type { RequestPreparationEntitlementPort } from '../gateway/request-preparation-service.js';
+import type { CodexTrustedBoundProfileResolver } from './codex-trusted-bound-profiles.js';
 import type { GatewayCapabilityReadiness } from './gateway-capability-readiness.js';
 import type { GatewayCapabilityDeploymentFacts } from './provider-bundle-readiness-facts.js';
 import type { ProviderAwaitable, ProviderEnvironment, ProviderModuleImporter } from './providers.js';
@@ -78,6 +79,12 @@ export interface ManagedSaasGatewayRuntimeModuleOptions {
   readonly lifecycle: Readonly<{
     registerCloseHook(hook: () => ProviderAwaitable<void>): void;
   }>;
+  /**
+   * Reviewed Codex trusted-bound admission seam; omitted keeps the frozen empty
+   * production registry (fail-closed TRUSTED_USAGE_BOUNDS_UNAVAILABLE). Only a
+   * composition layer that itself verified the reviewed evidence may inject one.
+   */
+  readonly codexProfileResolver?: CodexTrustedBoundProfileResolver;
 }
 
 export interface ManagedSaasGatewayRuntimeModuleHandle {

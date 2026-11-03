@@ -538,6 +538,7 @@ export async function createBuiltinManagedSaasGatewayRuntime(
       providerBundles: extensions.providerBundles,
       fetch,
       timeoutMs,
+      ...(options.codexProfileResolver ? { codexProfileResolver: options.codexProfileResolver } : {}),
     });
     const target = createBuiltinProviderTargetResolver(extensions.providerBundles);
     const compactModels = new Set<string>();
@@ -606,7 +607,11 @@ export async function createBuiltinManagedSaasGatewayRuntime(
         return native;
       },
       providerPayload: {
-        estimator: createBuiltinUsageUpperBoundEstimator({ maxInputTokens, maxOutputTokens }),
+        estimator: createBuiltinUsageUpperBoundEstimator({
+          maxInputTokens,
+          maxOutputTokens,
+          ...(options.codexProfileResolver ? { codexProfileResolver: options.codexProfileResolver } : {}),
+        }),
         modelCompatibility: async (input) => {
           const manifest = enabled.find(
             (entry) => entry?.providerId === input.providerId && entry.productIds.includes(input.productId),
@@ -732,7 +737,11 @@ export async function createBuiltinManagedSaasGatewayRuntime(
         }
       }
       const facts = await collectGatewayCapabilityFacts(options.database, deploymentFacts);
-      const financial = collectCodexWorkflowFinancialReadiness(facts.bundles.codexFinancialCatalogScopes);
+      const financial = collectCodexWorkflowFinancialReadiness(
+        facts.bundles.codexFinancialCatalogScopes,
+        undefined,
+        options.codexProfileResolver,
+      );
       const unavailable = (facts.unavailableUsageBoundProviderIds ?? []).filter((providerId) => providerId !== 'openai-codex');
       if (enabled.some((entry) => entry?.providerId === 'openai-codex') &&
         !(codexDeclaredWorkflows.length > 0 && codexDeclaredWorkflows.every((workflow) => financial[workflow] === true))) {
