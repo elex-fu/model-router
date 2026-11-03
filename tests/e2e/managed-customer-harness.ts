@@ -456,6 +456,16 @@ export async function startManagedCustomerConsole(): Promise<ManagedCustomerCons
         await serveMountedStatic(request, response, url.pathname, '/console', webDist, brandReader);
         return;
       }
+      // The console HTML bundle references its assets under the /admin build
+      // base path (the production admin server serves both mounts).
+      if (url.pathname === '/admin' || url.pathname.startsWith('/admin/')) {
+        await serveMountedStatic(request, response, url.pathname, '/admin', webDist, brandReader);
+        return;
+      }
+      if (url.pathname === '/' || url.pathname === '/favicon.svg') {
+        await serveMountedStatic(request, response, '/admin/', '/admin', webDist, brandReader);
+        return;
+      }
       response.writeHead(404, { 'content-type': 'application/json' });
       response.end('{"error":"not found"}');
     };
