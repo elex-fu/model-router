@@ -4,9 +4,10 @@ import { startManagedCustomerConsole } from './managed-customer-harness';
 /**
  * R8 minimal proof — the generic (non-codex) `/v1/responses` protocol bills
  * end-to-end on the real stack: bounded admission, exact settlement, and
- * upstream usage accounting through the responses JSON usage observer.
- * Non-streaming on purpose: the generic SSE usage observer does not support
- * providerProtocol 'responses', so a streaming call would never settle usage.
+ * upstream usage accounting. One non-streaming call (JSON body observer) and
+ * one streaming call (SSE event observer): both settle the identical 12
+ * minor units because the two observers share the responses counter
+ * contract.
  */
 test('R8: a /v1/responses call admits, bills, and settles exactly', async ({ page }) => {
   test.skip(
@@ -121,6 +122,52 @@ test('R8: a /v1/responses call admits, bills, and settles exactly', async ({ pag
         [tenantId],
       );
       expect(request.rows[0]).toMatchObject({ execution_state: 'succeeded', financial_status: 'settled' });
+    });
+
+    await test.step('one streaming /v1/responses call settles the identical amount', async () => {
+      const response = await page.evaluate(
+        async ({ secret, model }: { secret: string; model: string }) => {
+          const result = await fetch('/v1/responses', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', authorization: `Bearer ${secret}` },
+            body: JSON.stringify({ model, input: '请回复 OK', max_output_tokens: 8, stream: true }),
+          });
+          return {
+            status: result.status,
+            contentType: result.headers.get('content-type') ?? '',
+            text: await result.text(),
+          };
+        },
+        { secret: keySecret, model: app.responsesModel },
+      );
+      expect(response.status).toBe(200);
+      expect(response.contentType).toContain('text/event-stream');
+      // The SSE bytes pass through untouched, terminal event included.
+      expect(response.text).toContain('event: response.completed');
+
+      await app.waitForSettlement(tenantId, 2);
+      const wallet = await app.sql<{ posted: string }>(
+        'SELECT posted_balance_minor_units::text AS posted FROM saas_wallets WHERE tenant_id = $1 AND currency = $2',
+        [tenantId, 'USD'],
+      );
+      // Streaming and non-streaming settle the identical 12 minor units.
+      expect(wallet.rows[0]?.posted).toBe('1176');
+      const settled = await app.sql<{ count: string; total: string }>(
+        `SELECT count(*)::text AS count, sum(settlement_amount_minor_units)::text AS total
+           FROM saas_billing_reservations WHERE tenant_id = $1 AND state = 'settled'`,
+        [tenantId],
+      );
+      expect(settled.rows[0]).toMatchObject({ count: '2', total: '24' });
+      const usage = await app.sql<{ count: string; inputs: string; outputs: string }>(
+        `SELECT count(*)::text AS count,
+                min(input_total)::text AS inputs, max(input_total)::text AS inputs_max,
+                min(output_total)::text AS outputs, max(output_total)::text AS outputs_max
+           FROM saas_usage_events WHERE tenant_id = $1 AND status = 'reported' AND source = 'upstream'`,
+        [tenantId],
+      );
+      expect(usage.rows[0]?.count).toBe('2');
+      expect(usage.rows[0]?.inputs).toBe('3');
+      expect(usage.rows[0]?.outputs).toBe('2');
     });
   } finally {
     await app.close();

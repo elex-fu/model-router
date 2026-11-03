@@ -309,6 +309,181 @@ test('Anthropic missing cache counters are unknown instead of being treated as z
   });
 });
 
+const responsesEvidence: ProviderSseUsageEvidence = {
+  providerProtocol: 'responses',
+  providerOperation: 'responses',
+};
+
+function responsesUsage(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    input_tokens: 12,
+    output_tokens: 7,
+    total_tokens: 19,
+    input_tokens_details: { cached_tokens: 3 },
+    output_tokens_details: { reasoning_tokens: 2 },
+    ...overrides,
+  };
+}
+
+function responsesUsageStream(usage: Record<string, unknown> = responsesUsage()): Uint8Array[] {
+  const created = {
+    type: 'response.created',
+    response: { id: 'resp-local', object: 'response', status: 'in_progress', service_tier: 'default' },
+  };
+  const delta = { type: 'response.output_text.delta', output_index: 0, delta: '你好🙂' };
+  const completed = {
+    type: 'response.completed',
+    response: {
+      id: 'resp-local',
+      object: 'response',
+      status: 'completed',
+      service_tier: 'default',
+      output: [],
+      usage,
+    },
+  };
+  return [
+    encoder.encode(sse(JSON.stringify(created), 'response.created')),
+    encoder.encode(sse(JSON.stringify(delta), 'response.output_text.delta')),
+    encoder.encode(sse(JSON.stringify(completed), 'response.completed')),
+  ];
+}
+
+test('Responses usage rides the named response.completed event and the body stays byte transparent', async () => {
+  const input = responsesUsageStream();
+  const source = new Uint8Array(input.reduce((sum, chunk) => sum + chunk.byteLength, 0));
+  let offset = 0;
+  for (const chunk of input) {
+    source.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  const chunks = splitBytes(source, [1]);
+  const observed = observeProviderSseUsage(streamFromChunks(chunks), responsesEvidence);
+  const output = await drain(observed.body);
+  const result = await observed.observation;
+
+  assert.equal(result.state, 'reported');
+  if (result.state !== 'reported') return;
+  // The same counter contract the JSON body observer enforces: identical
+  // counters settle identically streaming and non-streaming.
+  assert.deepEqual(result.usage, {
+    inputTotal: 12,
+    inputUncached: 9,
+    cacheRead: 3,
+    cacheWrite: null,
+    cacheWrite5m: null,
+    cacheWrite1h: null,
+    outputTotal: 7,
+    reasoningOutput: 2,
+    billingMode: 'token',
+    units: null,
+    sizeTier: null,
+    status: 'reported',
+    source: 'upstream',
+    semanticsVersion: 'v1',
+  });
+  assert.equal(result.observedServiceTier, 'default');
+  assert.equal(result.observedServiceTierConflict, false);
+  assert.deepEqual(
+    output.map((chunk) => [...chunk]),
+    chunks.map((chunk) => [...chunk]),
+  );
+});
+
+test('Responses streams without a trusted terminal usage stay unknown on the reconciliation path', async (context) => {
+  await context.test('unnamed data events are malformed (the parser is named-events-only)', async () => {
+    assert.deepEqual(
+      await observeText(
+        sse(JSON.stringify({ type: 'response.completed', response: { usage: responsesUsage() } })) +
+          responsesUsageStream()
+            .slice(2)
+            .map((chunk) => new TextDecoder().decode(chunk))
+            .join(''),
+        responsesEvidence,
+      ),
+      {
+        state: 'unknown',
+        usage: null,
+        reason: 'malformed_event',
+        observedServiceTier: null,
+        observedServiceTierConflict: false,
+      },
+    );
+  });
+  await context.test('a stream cut before response.completed is a truncation', async () => {
+    const events = responsesUsageStream()
+      .slice(0, 2)
+      .map((chunk) => new TextDecoder().decode(chunk))
+      .join('');
+    assert.deepEqual(await observeText(events, responsesEvidence), {
+      state: 'unknown',
+      usage: null,
+      reason: 'truncated',
+      observedServiceTier: 'default',
+      observedServiceTierConflict: false,
+    });
+  });
+  await context.test('response.failed never yields a usage report', async () => {
+    const events = [
+      sse(
+        JSON.stringify({
+          type: 'response.failed',
+          response: { id: 'resp-local', status: 'failed', error: { code: 'server_error' } },
+        }),
+        'response.failed',
+      ),
+    ].join('');
+    assert.deepEqual(await observeText(events, responsesEvidence), {
+      state: 'unknown',
+      usage: null,
+      reason: 'invalid_usage',
+      observedServiceTier: null,
+      observedServiceTierConflict: false,
+    });
+  });
+  await context.test('response.completed without usage is no_usage', async () => {
+    const events = [
+      sse(
+        JSON.stringify({ type: 'response.created', response: { id: 'resp-local', status: 'in_progress' } }),
+        'response.created',
+      ),
+      sse(
+        JSON.stringify({ type: 'response.completed', response: { id: 'resp-local', status: 'completed', output: [] } }),
+        'response.completed',
+      ),
+    ].join('');
+    assert.deepEqual(await observeText(events, responsesEvidence), {
+      state: 'unknown',
+      usage: null,
+      reason: 'no_usage',
+      observedServiceTier: null,
+      observedServiceTierConflict: false,
+    });
+  });
+  await context.test('a non-responses named event is malformed', async () => {
+    const events = [sse(JSON.stringify({ type: 'message_stop' }), 'message_stop')].join('');
+    assert.deepEqual(await observeText(events, responsesEvidence), {
+      state: 'unknown',
+      usage: null,
+      reason: 'malformed_event',
+      observedServiceTier: null,
+      observedServiceTierConflict: false,
+    });
+  });
+  await context.test('inconsistent counters are invalid usage', async () => {
+    const events = responsesUsageStream(responsesUsage({ total_tokens: 18 }))
+      .map((chunk) => new TextDecoder().decode(chunk))
+      .join('');
+    assert.deepEqual(await observeText(events, responsesEvidence), {
+      state: 'unknown',
+      usage: null,
+      reason: 'invalid_usage',
+      observedServiceTier: 'default',
+      observedServiceTierConflict: false,
+    });
+  });
+});
+
 test('unsupported or client-side protocol evidence never selects a parser', async () => {
   assert.deepEqual(
     await observeText(

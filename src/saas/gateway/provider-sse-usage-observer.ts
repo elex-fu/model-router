@@ -5,6 +5,7 @@ import type {
   PreparedEvidenceTransportRequest,
   PreparedEvidenceTransportResponse,
 } from './prepared-evidence-dispatch-service.js';
+import { trustedResponsesUsage } from './provider-responses-usage.js';
 import {
   anthropicUsageDetailKeys,
   anthropicUsageMetadataKeys,
@@ -70,7 +71,7 @@ export interface ProviderSseObservedStream {
   getObservation(): ProviderSseUsageObservation | null;
 }
 
-type ParserKind = 'openai-chat-completions' | 'anthropic-messages';
+type ParserKind = 'openai-chat-completions' | 'anthropic-messages' | 'openai-responses';
 type UsageParserFailure = Exclude<
   ProviderSseUsageUnknownReason,
   'unsupported_protocol_operation' | 'cancelled' | 'stream_error'
@@ -175,6 +176,17 @@ function parseOpenAiUsage(value: unknown): NormalSuccessObservedUsage {
   if (reasoningOutput !== null && reasoningOutput > outputTotal) rejectUsage('invalid_usage');
 
   return completeUsage('openai', usage);
+}
+
+/**
+ * Responses usage rides the `response.completed` event's
+ * `data.response.usage`; the counters themselves are validated by the shared
+ * contract so a streaming and a non-streaming response settle identically.
+ */
+function parseResponsesUsage(value: unknown): NormalSuccessObservedUsage {
+  const usage = trustedResponsesUsage(value);
+  if (usage === null) rejectUsage('invalid_usage');
+  return usage;
 }
 
 interface AnthropicInputUsage {
@@ -334,6 +346,8 @@ class ProviderSseUsageParser {
   private anthropicDelta: { readonly input: AnthropicInputUsage; readonly outputTokens: number } | undefined;
   private anthropicStopped = false;
   private anthropicUsage: NormalSuccessObservedUsage | undefined;
+  private responsesCompleted = false;
+  private responsesUsage: NormalSuccessObservedUsage | undefined;
   /**
    * R3 §8.3 observed-tier state. undefined = not yet declared; null declared
    * absent. Disagreeing declarations set `tierConflict` without invalidating
@@ -350,7 +364,9 @@ class ProviderSseUsageParser {
         ? 'openai-chat-completions'
         : evidence.providerProtocol === 'anthropic' && evidence.providerOperation === 'messages'
           ? 'anthropic-messages'
-          : null;
+          : evidence.providerProtocol === 'responses' && evidence.providerOperation === 'responses'
+            ? 'openai-responses'
+            : null;
   }
 
   /** Merges one tier declaration by event semantics (repeats must agree). */
@@ -415,6 +431,14 @@ class ProviderSseUsageParser {
       if (!this.openAiDone) return { ...unknown('truncated'), ...tier };
       return this.openAiUsage
         ? { state: 'reported', usage: this.openAiUsage, ...tier }
+        : { ...unknown('no_usage'), ...tier };
+    }
+    if (this.kind === 'openai-responses') {
+      // A stream that never reached response.completed is a truncation — the
+      // hold stays on the reconciliation path, never zero-billed.
+      if (!this.responsesCompleted) return { ...unknown('truncated'), ...tier };
+      return this.responsesUsage
+        ? { state: 'reported', usage: this.responsesUsage, ...tier }
         : { ...unknown('no_usage'), ...tier };
     }
     if (this.anthropicStarted && !this.anthropicStopped) return { ...unknown('truncated'), ...tier };
@@ -493,6 +517,10 @@ class ProviderSseUsageParser {
       this.acceptOpenAiEvent(eventType, data);
       return;
     }
+    if (this.kind === 'openai-responses') {
+      this.acceptResponsesEvent(eventType, data);
+      return;
+    }
     this.acceptAnthropicEvent(eventType, data);
   }
 
@@ -524,6 +552,49 @@ class ProviderSseUsageParser {
       if (this.openAiUsage && !usageFieldsEqual(this.openAiUsage, usage)) rejectUsage('conflicting_usage');
       this.openAiUsage = usage;
     }
+  }
+
+  private acceptResponsesEvent(eventType: string | undefined, data: string): void {
+    // The Responses protocol is named-events-only — the mirror image of the
+    // chat-completions parser, which rejects named events.
+    if (eventType === undefined) rejectUsage('malformed_event');
+    if (this.responsesCompleted) rejectUsage('malformed_event');
+    if (eventType === 'error') rejectUsage('invalid_usage');
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(data);
+    } catch {
+      rejectUsage('malformed_event');
+    }
+    const event = record(parsed);
+    if (!event || event.type !== eventType) rejectUsage('malformed_event');
+
+    if (eventType === 'response.completed') {
+      const response = record(event.response);
+      if (response === null) rejectUsage('invalid_usage');
+      // §8.3: the completed response envelope declares the served tier.
+      this.observeTier(response.service_tier, Object.hasOwn(response, 'service_tier'));
+      if (!Object.hasOwn(response, 'usage') || response.usage === null) rejectUsage('no_usage');
+      this.responsesUsage = parseResponsesUsage(response.usage);
+      this.responsesCompleted = true;
+      return;
+    }
+    if (eventType === 'response.failed' || eventType === 'response.incomplete') {
+      // A failed or truncated terminal event never yields a trusted usage
+      // report — the hold stays on the reconciliation path.
+      rejectUsage('invalid_usage');
+    }
+    if (eventType.startsWith('response.')) {
+      // Intermediate lifecycle events (created/in_progress, output item,
+      // content part, deltas, …) carry no usage. The Responses event surface
+      // is versioned and additive, so unknown intermediate names are
+      // forwarded while the terminal events above stay exhaustive.
+      const response = record(event.response);
+      if (response !== null) this.observeTier(response.service_tier, Object.hasOwn(response, 'service_tier'));
+      return;
+    }
+    rejectUsage('malformed_event');
   }
 
   private acceptAnthropicEvent(eventType: string | undefined, data: string): void {
@@ -612,6 +683,9 @@ function parserSelection(evidence: ProviderSseUsageEvidence): ParserKind | null 
   }
   if (evidence.providerProtocol === 'anthropic' && evidence.providerOperation === 'messages') {
     return 'anthropic-messages';
+  }
+  if (evidence.providerProtocol === 'responses' && evidence.providerOperation === 'responses') {
+    return 'openai-responses';
   }
   return null;
 }

@@ -1,5 +1,6 @@
 import { type NormalizedUsage, normalizeUsage } from '../../telemetry/usage.js';
 import type { NormalSuccessObservedUsage } from './dispatch-usage-settlement.js';
+import { trustedResponsesUsage } from './provider-responses-usage.js';
 import {
   anthropicUsageDetailKeys,
   anthropicUsageMetadataKeys,
@@ -94,6 +95,9 @@ const counterShapes = {
     strings: ['speed'] as const,
   },
   responses: {
+    // Kept as the documented shape; the active validation lives in
+    // provider-responses-usage.ts so the SSE event observer enforces the
+    // identical contract (see trustedResponsesUsage).
     required: ['input_tokens', 'output_tokens'],
     optional: ['total_tokens', 'cached_tokens'],
     details: { input_tokens_details: ['cached_tokens'], output_tokens_details: ['reasoning_tokens'] },
@@ -323,6 +327,9 @@ function trustedUsage(
   const raw = record(value);
   if (!raw) return null;
   if (protocol === 'embeddings') return embeddingsTrustedUsage(raw);
+  // Responses counters are validated by the shared contract so the SSE event
+  // observer and this body observer accept the identical usage shape.
+  if (protocol === 'responses') return trustedResponsesUsage(raw);
   const shape: {
     required: readonly string[];
     optional: readonly string[];
@@ -382,7 +389,7 @@ function trustedUsage(
   const detailTotal = (usage.cacheWrite5m ?? 0) + (usage.cacheWrite1h ?? 0);
   if (!Number.isSafeInteger(detailTotal) || detailTotal > (usage.cacheWrite ?? 0)) return null;
   if (usage.cacheWrite5m !== null && usage.cacheWrite1h !== null && detailTotal !== usage.cacheWrite) return null;
-  const inputDetails = record(raw[protocol === 'responses' ? 'input_tokens_details' : 'prompt_tokens_details']);
+  const inputDetails = record(raw.prompt_tokens_details);
   if (
     inputDetails &&
     Object.hasOwn(inputDetails, 'cached_tokens') &&
