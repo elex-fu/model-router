@@ -5035,6 +5035,8 @@ export const SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS: readonly SaasGatewayColumnGrant
       'revision',
       'health_score',
       'half_open_probe_at',
+      'forbidden_failure_count',
+      'verification_wall_failure_count',
     ] as const
   ).map((column) => ['saas_provider_account_runtime_health', column, 'SELECT'] as const),
   ...(
@@ -5052,6 +5054,8 @@ export const SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS: readonly SaasGatewayColumnGrant
       'revision',
       'health_score',
       'half_open_probe_at',
+      'forbidden_failure_count',
+      'verification_wall_failure_count',
     ] as const
   ).map((column) => ['saas_provider_account_runtime_health', column, 'INSERT'] as const),
   ...(
@@ -5065,6 +5069,8 @@ export const SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS: readonly SaasGatewayColumnGrant
       'revision',
       'health_score',
       'half_open_probe_at',
+      'forbidden_failure_count',
+      'verification_wall_failure_count',
     ] as const
   ).map((column) => ['saas_provider_account_runtime_health', column, 'UPDATE'] as const),
   // R6: the admission chain upserts per-account per-second counters and the

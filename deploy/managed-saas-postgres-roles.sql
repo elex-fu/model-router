@@ -1603,6 +1603,10 @@ BEGIN
       ('saas_provider_account_runtime_health', 'revision', 'SELECT'),
       ('saas_provider_account_runtime_health', 'health_score', 'SELECT'),
       ('saas_provider_account_runtime_health', 'half_open_probe_at', 'SELECT'),
+      -- Migration 152 ban-streak columns: the DO UPDATE expressions read the
+      -- conflicting row values, so the fenced UPSERT also needs SELECT on them.
+      ('saas_provider_account_runtime_health', 'forbidden_failure_count', 'SELECT'),
+      ('saas_provider_account_runtime_health', 'verification_wall_failure_count', 'SELECT'),
       ('saas_provider_account_runtime_health', 'owner_scope_key', 'INSERT'),
       ('saas_provider_account_runtime_health', 'owner_kind', 'INSERT'),
       ('saas_provider_account_runtime_health', 'owner_tenant_id', 'INSERT'),
@@ -1616,6 +1620,12 @@ BEGIN
       ('saas_provider_account_runtime_health', 'revision', 'INSERT'),
       ('saas_provider_account_runtime_health', 'health_score', 'INSERT'),
       ('saas_provider_account_runtime_health', 'half_open_probe_at', 'INSERT'),
+      -- Migration 152 ban-streak columns: the fenced runtime-health UPSERT
+      -- inserts and updates them alongside failure_count, so the gateway needs
+      -- the matching write grants or every post-dispatch health write fails and
+      -- the H5b write-failure latch blocks all subsequent selections.
+      ('saas_provider_account_runtime_health', 'forbidden_failure_count', 'INSERT'),
+      ('saas_provider_account_runtime_health', 'verification_wall_failure_count', 'INSERT'),
       ('saas_provider_account_runtime_health', 'state', 'UPDATE'),
       ('saas_provider_account_runtime_health', 'failure_count', 'UPDATE'),
       ('saas_provider_account_runtime_health', 'observed_at', 'UPDATE'),
@@ -1625,6 +1635,8 @@ BEGIN
       ('saas_provider_account_runtime_health', 'revision', 'UPDATE'),
       ('saas_provider_account_runtime_health', 'health_score', 'UPDATE'),
       ('saas_provider_account_runtime_health', 'half_open_probe_at', 'UPDATE'),
+      ('saas_provider_account_runtime_health', 'forbidden_failure_count', 'UPDATE'),
+      ('saas_provider_account_runtime_health', 'verification_wall_failure_count', 'UPDATE'),
       -- R6: admission upsert + eligibility window read, PG-authoritative.
       ('saas_provider_account_rate_counters', 'account_scope', 'SELECT'),
       ('saas_provider_account_rate_counters', 'account_id', 'SELECT'),

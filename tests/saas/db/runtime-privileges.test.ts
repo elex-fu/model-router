@@ -1511,6 +1511,9 @@ test('gateway manifest permits encrypted-envelope reads but never grants control
     'account_id',
     'cooldown_until',
     'failure_count',
+    // Migration 152 ban-streak columns: the fenced UPSERT's DO UPDATE reads
+    // the conflicting row values, so the gateway needs SELECT on them too.
+    'forbidden_failure_count',
     // R7: continuous health score and half-open probe state ride the same
     // gateway-owned health relation (098).
     'half_open_probe_at',
@@ -1523,12 +1526,14 @@ test('gateway manifest permits encrypted-envelope reads but never grants control
     'revision',
     'source_fencing_token',
     'state',
+    'verification_wall_failure_count',
   ];
   assert.deepEqual(columnsFor('SELECT'), rowColumns);
   assert.deepEqual(columnsFor('INSERT'), rowColumns);
   assert.deepEqual(columnsFor('UPDATE'), [
     'cooldown_until',
     'failure_count',
+    'forbidden_failure_count',
     'half_open_probe_at',
     'health_score',
     'last_outcome',
@@ -1536,6 +1541,7 @@ test('gateway manifest permits encrypted-envelope reads but never grants control
     'revision',
     'source_fencing_token',
     'state',
+    'verification_wall_failure_count',
   ]);
 
   assert.equal(

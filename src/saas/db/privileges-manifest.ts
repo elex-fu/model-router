@@ -10117,6 +10117,8 @@ export const MANIFEST_GATEWAY_COLUMN_GROUPS: readonly SaasGatewayColumnTsGroup[]
       'revision',
       'health_score',
       'half_open_probe_at',
+      'forbidden_failure_count',
+      'verification_wall_failure_count',
     ],
     tsStyle: 'map-paren-multi',
   },
@@ -10137,6 +10139,8 @@ export const MANIFEST_GATEWAY_COLUMN_GROUPS: readonly SaasGatewayColumnTsGroup[]
       'revision',
       'health_score',
       'half_open_probe_at',
+      'forbidden_failure_count',
+      'verification_wall_failure_count',
     ],
     tsStyle: 'map-paren-multi',
   },
@@ -10153,6 +10157,8 @@ export const MANIFEST_GATEWAY_COLUMN_GROUPS: readonly SaasGatewayColumnTsGroup[]
       'revision',
       'health_score',
       'half_open_probe_at',
+      'forbidden_failure_count',
+      'verification_wall_failure_count',
     ],
     tsStyle: 'map-paren-multi',
   },
@@ -11775,6 +11781,20 @@ export const MANIFEST_GATEWAY_COLUMN_SQL_ENTRIES: readonly SaasGatewayColumnSqlE
     privilege: 'SELECT',
   },
   {
+    sqlComment: [
+      'Migration 152 ban-streak columns: the DO UPDATE expressions read the',
+      'conflicting row values, so the fenced UPSERT also needs SELECT on them.',
+    ],
+    table: 'saas_provider_account_runtime_health',
+    column: 'forbidden_failure_count',
+    privilege: 'SELECT',
+  },
+  {
+    table: 'saas_provider_account_runtime_health',
+    column: 'verification_wall_failure_count',
+    privilege: 'SELECT',
+  },
+  {
     table: 'saas_provider_account_runtime_health',
     column: 'owner_scope_key',
     privilege: 'INSERT',
@@ -11840,6 +11860,22 @@ export const MANIFEST_GATEWAY_COLUMN_SQL_ENTRIES: readonly SaasGatewayColumnSqlE
     privilege: 'INSERT',
   },
   {
+    sqlComment: [
+      'Migration 152 ban-streak columns: the fenced runtime-health UPSERT',
+      'inserts and updates them alongside failure_count, so the gateway needs',
+      'the matching write grants or every post-dispatch health write fails and',
+      'the H5b write-failure latch blocks all subsequent selections.',
+    ],
+    table: 'saas_provider_account_runtime_health',
+    column: 'forbidden_failure_count',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_provider_account_runtime_health',
+    column: 'verification_wall_failure_count',
+    privilege: 'INSERT',
+  },
+  {
     table: 'saas_provider_account_runtime_health',
     column: 'state',
     privilege: 'UPDATE',
@@ -11882,6 +11918,16 @@ export const MANIFEST_GATEWAY_COLUMN_SQL_ENTRIES: readonly SaasGatewayColumnSqlE
   {
     table: 'saas_provider_account_runtime_health',
     column: 'half_open_probe_at',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_provider_account_runtime_health',
+    column: 'forbidden_failure_count',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_provider_account_runtime_health',
+    column: 'verification_wall_failure_count',
     privilege: 'UPDATE',
   },
   {
