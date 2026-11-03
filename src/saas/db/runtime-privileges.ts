@@ -497,6 +497,7 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'updated_at',
   ]),
   ...columnGrants('saas_supply_profiles', 'INSERT', ['tenant_id', 'id', 'supply_mode', 'status', 'model_scopes']),
+  ...columnGrants('saas_supply_profiles', 'UPDATE', ['status', 'authz_version']),
   ...columnGrants('saas_payment_merchant_bindings', 'SELECT', [
     'id',
     'provider_key',

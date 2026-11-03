@@ -754,6 +754,7 @@ BEGIN
       ('saas_platform_inference_access_operations', 'INSERT', 'id tenant_id project_id operation_key request_hash request_payload profile_id entitlement_id actor_user_id phase receipts last_error_code runner_id runner_until created_at updated_at'),
       ('saas_platform_inference_access_operations', 'UPDATE', 'phase receipts last_error_code runner_id runner_until updated_at'),
       ('saas_supply_profiles', 'INSERT', 'tenant_id id supply_mode status model_scopes'),
+      ('saas_supply_profiles', 'UPDATE', 'status authz_version'),
       ('saas_payment_merchant_bindings', 'SELECT', 'id provider_key merchant_id seller_id currency descriptor_digest created_at'),
       ('saas_payment_merchant_bindings', 'INSERT', 'id provider_key merchant_id seller_id currency descriptor_digest created_at'),
       ('saas_payment_control', 'SELECT', 'singleton currency purpose mode active_binding_id revision updated_by_user_id updated_at'),
