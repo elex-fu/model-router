@@ -75,32 +75,47 @@ async function freePort() {
 }
 
 /** Real customer identity/key SQL and HTTP, with a disposable PostgreSQL cluster. */
-export async function startCustomerConsole() {
+export interface DisposablePostgres {
+  readonly directory: string;
+  readonly port: number;
+  readonly databaseName: string;
+  /** Connection URL for a managed role (or the cluster owner) on the disposable cluster. */
+  readonly url: (user: string) => string;
+  /** The migrator-role database; migrations already applied, roles.sql applied twice. */
+  readonly migrator: SaasDatabase;
+  /** The control-plane-role database, runtime privileges verified. */
+  readonly control: SaasDatabase;
+  close(): Promise<void>;
+}
+
+/**
+ * A fresh, fully migrated, role-restricted PostgreSQL cluster on a random
+ * loopback port. Never touches port 5432 or any developer database URL.
+ * close() stops the cluster and removes the data directory; callers close
+ * their own databases first (they are created from this fixture).
+ */
+export async function startDisposablePostgres(
+  databaseName = 'model_router_test_customer_e2e',
+): Promise<DisposablePostgres> {
   const directory = await mkdtemp(join(tmpdir(), 'model-router-customer-e2e-'));
   const data = join(directory, 'postgres');
   const socket = join(directory, 'socket');
   const port = await freePort();
-  const databaseName = 'model_router_test_customer_e2e';
   const url = (user: string) => `postgresql://${user}@127.0.0.1:${port}/${databaseName}`;
   let started = false;
-  let admin: ReturnType<typeof createAdminServer> | undefined;
   let migrator: ReturnType<typeof createSaasDatabase> | undefined;
   let control: ReturnType<typeof createSaasDatabase> | undefined;
   const clusterOwner = new Pool({ connectionString: `postgresql://e2e_owner@127.0.0.1:${port}/postgres`, max: 1 });
 
   async function close() {
     try {
-      await admin?.close();
+      await Promise.all([control?.close(), migrator?.close(), clusterOwner.end()]);
     } finally {
-      try {
-        await Promise.all([control?.close(), migrator?.close(), clusterOwner.end()]);
-      } finally {
-        if (started) {
-          await postgresCommand('pg_ctl', ['-D', data, '-w', '-t', '15', '-m', 'fast', 'stop']);
-          started = false;
-        }
-        await rm(directory, { recursive: true, force: true });
+      if (started) {
+        await postgresCommand('pg_ctl', ['-D', data, '-w', '-t', '15', '-m', 'fast', 'stop']);
+        started = false;
       }
+      await rm(directory, { recursive: true, force: true });
     }
   }
 
@@ -145,7 +160,29 @@ export async function startCustomerConsole() {
     await postgresCommand('psql', roleArgs);
     control = createSaasDatabase({ connectionString: url('model_router_saas_control_plane'), max: 3 });
     await verifySaasRuntimeDatabasePrivileges(control, 'control_plane');
+    return { directory, port, databaseName, url, migrator, control, close };
+  } catch (error) {
+    await close();
+    throw error;
+  }
+}
 
+/** Real customer identity/key SQL and HTTP, with a disposable PostgreSQL cluster. */
+export async function startCustomerConsole() {
+  const postgres = await startDisposablePostgres();
+  const migrator = postgres.migrator;
+  const control = postgres.control;
+  let admin: ReturnType<typeof createAdminServer> | undefined;
+
+  async function close() {
+    try {
+      await admin?.close();
+    } finally {
+      await postgres.close();
+    }
+  }
+
+  try {
     const seedIdentity = new SaasIdentityService(migrator);
     const bootstrap = await seedIdentity.issueBootstrapToken();
     const owner = await seedIdentity.bootstrapPlatformAdmin({
@@ -168,7 +205,6 @@ export async function startCustomerConsole() {
     const service = new SaasIdentityService(observedControl);
     const keys = new KeyService(observedControl, { resolver: new PostgresSupplyProfileResolver(observedControl) });
     async function provisionSupply(model: string) {
-      if (!migrator) throw new Error('Customer fixture migrator unavailable');
       await migrator.transaction(async (tx) => {
         await tx.query(
           `INSERT INTO saas_supply_profiles (tenant_id, id, supply_mode, model_scopes) VALUES ($1, $2, 'byok', $3)`,
@@ -235,7 +271,7 @@ export async function startCustomerConsole() {
     let origin = '';
     let handler: ReturnType<typeof createSaasIdentityHandler>;
     admin = createAdminServer({
-      configPath: join(directory, 'config.json'),
+      configPath: join(postgres.directory, 'config.json'),
       webDistPath: resolve('web/dist'),
       publicOrigin: () => origin,
       saasIdentityHandler: (request, response) => handler(request, response),
@@ -247,7 +283,18 @@ export async function startCustomerConsole() {
     origin = `http://127.0.0.1:${address.port}`;
     handler = createSaasIdentityHandler({ service, keyService: keys, publicOrigin: origin, sessionTtlSeconds: 900 });
 
-    return { origin, directory, tenant, owner, keys, service, migrator, control, provisionSupply, close };
+    return {
+      origin,
+      directory: postgres.directory,
+      tenant,
+      owner,
+      keys,
+      service,
+      migrator,
+      control,
+      provisionSupply,
+      close,
+    };
   } catch (error) {
     await close();
     throw error;
