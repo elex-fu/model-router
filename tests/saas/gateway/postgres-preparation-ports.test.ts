@@ -226,6 +226,7 @@ function setup(
   mode: Mode = 'platform',
   fixtureOptions: {
     insufficientFunds?: boolean;
+    walletNotFound?: boolean;
     keyBudget?: KeyBudgetAdmissionPort;
     prelockError?: unknown;
     entitlementExpiresAt?: Date;
@@ -490,6 +491,9 @@ function setup(
       executorEvents.push({ stage: 'billing', executor: tx });
       if (fixtureOptions.insufficientFunds) {
         throw Object.assign(new Error('balance unavailable'), { code: 'INSUFFICIENT_FUNDS' });
+      }
+      if (fixtureOptions.walletNotFound) {
+        throw Object.assign(new Error('wallet unavailable'), { code: 'WALLET_NOT_FOUND' });
       }
       const reservation = {
         id: 'hold-a',
@@ -1319,4 +1323,29 @@ test('factory binds its original guard even if configuration or its method is ch
   const result = await ports.admission.authorizeAndReserve(fixture.admissionInput() as never, { executor: fixture.executor });
   assert.equal(result.decision, 'allow');
   assert.equal(fixture.guardInputs.length, 1);
+});
+
+test('a missing wallet row denies the hold like an empty balance (M1 stable 402)', async () => {
+  // M1 余额不足稳定拒绝: a tenant that registered but never recharged has no
+  // saas_wallets row; the admission must reject with the same hold_denied
+  // code as a zero balance instead of a generic storage failure.
+  const fixture = setup('platform', { walletNotFound: true });
+  const capture: { value: Awaited<ReturnType<typeof authorize>> | null } = { value: null };
+  await assert.rejects(
+    fixture.database.transaction(async (executor) => {
+      const decision = await fixture.ports.admission.authorizeAndReserve(fixture.admissionInput() as never, {
+        executor,
+      });
+      capture.value = decision;
+      if (decision.decision !== 'allow') throw new Error('preparation transaction rollback');
+      return decision;
+    }),
+    /preparation transaction rollback/,
+  );
+  const decision = capture.value;
+  assert.equal(decision?.decision, 'reject');
+  if (decision?.decision === 'reject') assert.equal(decision.code, 'hold_denied');
+  assert.equal(fixture.calls.reserve, 1);
+  assert.equal(fixture.requests.size, 0);
+  assert.equal(fixture.attempts.size, 0);
 });

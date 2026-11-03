@@ -1217,10 +1217,11 @@ export function createPostgresPreparationPorts(options: PostgresPreparationPorts
         if (isSaasBillingGroupsError(error) && error.code.startsWith('GROUP_SPEND_')) {
           return blockRequestPreparation('storage_failure', SAFE_ADMISSION_FAILURE);
         }
-        if (
-          (error instanceof SaasBillingError && error.code === 'INSUFFICIENT_FUNDS') ||
-          safeErrorCode(error) === 'INSUFFICIENT_FUNDS'
-        ) {
+        // M1 余额不足稳定拒绝: a missing wallet row IS a zero balance for the
+        // customer — a tenant that registered but never recharged must get the
+        // stable 402 hold denial, not a generic storage failure.
+        const billingCode = error instanceof SaasBillingError ? error.code : safeErrorCode(error);
+        if (billingCode === 'INSUFFICIENT_FUNDS' || billingCode === 'WALLET_NOT_FOUND') {
           return {
             decision: 'reject',
             code: 'hold_denied',
