@@ -68,6 +68,7 @@ class RecordingDatabase implements SqlExecutor {
   detailRequest: Row | null = requestRow('request-a', '2026-09-28T01:00:00.000Z');
   attemptRows: Row[] = [];
   usageRows: Row[] = [];
+  metricsRows: Row[] = [];
   summaryRows: Row[] = [usageSummaryRow()];
   bucketRows: Row[] = [usageBucketRow()];
   fail = false;
@@ -83,6 +84,11 @@ class RecordingDatabase implements SqlExecutor {
     if (values[0] !== this.allowedUserId || values[1] !== this.allowedTenantId) return result<RowType>([]);
     if (statement.includes('saas_project_memberships') && !this.allowProjectMembership) {
       return result<RowType>([]);
+    }
+    // The metrics query embeds usage-event and attempt reads in correlated
+    // subqueries, so it must be recognized before those table dispatches.
+    if (statement.includes('unnest($3::uuid[])')) {
+      return result<RowType>(this.metricsRows as RowType[]);
     }
     if (statement.includes('FROM saas_attempts AS a')) return result<RowType>(this.attemptRows as RowType[]);
     if (statement.includes('FROM saas_usage_events AS e') && !statement.includes('GROUP BY')) {
@@ -167,7 +173,9 @@ test('uses bounded filters and a deterministic opaque request cursor', async () 
   database.requestRows = [];
   const secondPage = await queries.listRequests({ ...input, cursor: firstPage.nextCursor });
   assert.deepEqual(secondPage.items, []);
-  assert.match(database.calls[1]?.sql ?? '', /\(r\.created_at, r\.id\) < \(\$/);
+  // The first page enriched two visible requests; an empty second page issues none.
+  assert.match(database.calls[1]?.sql ?? '', /unnest\(\$3::uuid\[\]\)/);
+  assert.match(database.calls[2]?.sql ?? '', /\(r\.created_at, r\.id\) < \(\$/);
 
   await assert.rejects(queries.listRequests({ ...input, limit: 101 }), isConsoleError('CONSOLE_INVALID_INPUT'));
   await assert.rejects(
@@ -382,6 +390,86 @@ test('adding financial metadata does not expand cross-tenant or revoked-project 
   }
 });
 
+test('request list and detail expose per-request token, settlement and timing metrics', async () => {
+  const database = new RecordingDatabase();
+  const queries = service(database);
+  const scope = { userId: 'user-a', tenantId: 'tenant-a', projectId: 'project-a' };
+
+  database.requestRows = [requestRow('request-a', '2026-09-28T01:00:00.000Z')];
+  database.detailRequest = database.requestRows[0] ?? null;
+  database.metricsRows = [
+    {
+      request_id: 'request-a',
+      input_total: '900719925474099312345',
+      output_total: '55',
+      settlement_amount_minor_units: '1200',
+      duration_ms: '1500',
+    },
+  ];
+  const settledPage = await queries.listRequests(scope);
+  const settledDetail = await queries.getRequest({ ...scope, requestId: 'request-a' });
+  for (const projected of [settledPage.items[0], settledDetail]) {
+    assert.equal(projected?.inputTotal, '900719925474099312345');
+    assert.equal(projected?.outputTotal, '55');
+    assert.equal(projected?.settlementAmountMinorUnits, '1200');
+    assert.equal(projected?.durationMs, 1500);
+  }
+
+  // Settlement is gated on the persisted financial outcome, never inferred.
+  const gating = [
+    { financial_status: 'released', expected: '0' },
+    { financial_status: 'pending', expected: null },
+    { supply_mode: 'byok', financial_status: 'not_applicable', expected: null },
+  ];
+  for (const states of gating) {
+    const row = { ...requestRow('request-a', '2026-09-28T01:00:00.000Z'), ...states };
+    database.requestRows = [row];
+    database.detailRequest = row;
+    const page = await queries.listRequests(scope);
+    const detail = await queries.getRequest({ ...scope, requestId: 'request-a' });
+    assert.equal(page.items[0]?.settlementAmountMinorUnits, states.expected);
+    assert.equal(detail?.settlementAmountMinorUnits, states.expected);
+  }
+
+  // Fast-path requests fall back to the receipt snapshot columns.
+  database.requestRows = [requestRow('request-a', '2026-09-28T01:00:00.000Z')];
+  database.metricsRows = [
+    { request_id: 'request-a', fast_input_total: '3', fast_charge_minor_units: '7', fast_duration_ms: 42 },
+  ];
+  const fast = await queries.listRequests(scope);
+  assert.deepEqual(
+    fast.items[0] && {
+      input: fast.items[0]?.inputTotal,
+      settlement: fast.items[0]?.settlementAmountMinorUnits,
+      duration: fast.items[0]?.durationMs,
+    },
+    { input: '3', settlement: '7', duration: 42 },
+  );
+
+  // No metrics row means no evidence exists yet, never fabricated values.
+  database.metricsRows = [];
+  const none = await queries.listRequests(scope);
+  assert.deepEqual(
+    none.items[0] && {
+      input: none.items[0]?.inputTotal,
+      output: none.items[0]?.outputTotal,
+      settlement: none.items[0]?.settlementAmountMinorUnits,
+      duration: none.items[0]?.durationMs,
+    },
+    { input: null, output: null, settlement: null, duration: null },
+  );
+
+  // Malformed timing evidence fails closed.
+  database.metricsRows = [{ request_id: 'request-a', duration_ms: 'not-a-number' }];
+  await assert.rejects(queries.listRequests(scope), isConsoleError('CONSOLE_STORAGE_ERROR'));
+
+  const metricsCall = database.calls.find((call) => call.sql.includes('unnest($3::uuid[])'));
+  assert.ok(metricsCall);
+  assert.match(metricsCall.sql, /tenant_id = \$2/);
+  assert.match(metricsCall.sql, /br\.state = 'settled'/);
+  assert.doesNotMatch(metricsCall.sql, /SELECT\s+\*/i);
+});
+
 test('fast detail resolves the canonical request id without fabricating a legacy attempt graph', async () => {
   const database = new RecordingDatabase();
   database.detailRequest = {
@@ -395,9 +483,10 @@ test('fast detail resolves the canonical request id without fabricating a legacy
   });
   assert.equal(detail?.id, 'canonical-request');
   assert.deepEqual(detail?.attempts, []);
-  assert.equal(database.calls.length, 2);
+  assert.equal(database.calls.length, 3);
   assert.equal(database.calls[1]?.values[2], 'canonical-request');
   assert.match(database.calls[0]?.sql ?? '', /r\.id = \$3 OR r\.intent_id = \$3/);
+  assert.deepEqual(database.calls[2]?.values[2], ['canonical-request']);
   assert.equal(JSON.stringify(detail).includes('intent-alias'), false);
 });
 
@@ -430,7 +519,7 @@ test('request cursor preserves PostgreSQL microseconds and remains scoped to the
   const first = await queries.listRequests(scope);
   database.requestRows = [];
   await queries.listRequests({ ...scope, cursor: first.nextCursor });
-  assert.ok(database.calls[1]?.values.includes('2026-09-28T01:00:00.000123Z'));
+  assert.ok(database.calls[2]?.values.includes('2026-09-28T01:00:00.000123Z'));
   await assert.rejects(
     queries.listRequests({ ...scope, model: 'different', cursor: first.nextCursor }),
     isConsoleError('CONSOLE_INVALID_INPUT'),

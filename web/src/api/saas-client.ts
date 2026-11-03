@@ -442,6 +442,14 @@ export interface ConsoleRequest {
   /** Absent only for older API responses; never inferred from execution/HTTP. */
   financialStatus?: ConsoleFinancialStatus;
   reconciliationState?: ConsoleReconciliationState;
+  /** Upstream input tokens for the request; absent for older API responses. */
+  inputTotal?: string | null;
+  /** Upstream output tokens for the request; absent for older API responses. */
+  outputTotal?: string | null;
+  /** Final wallet deduction in minor units; null while the outcome is not final. */
+  settlementAmountMinorUnits?: string | null;
+  /** Wall-clock duration in milliseconds; null when no timing evidence exists. */
+  durationMs?: number | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -1739,6 +1747,15 @@ function consoleRequestStatesFromResponse<Item extends ConsoleRequest>(value: It
     (value.financialStatus !== undefined &&
       ((value.supplyMode === 'byok') !== (value.financialStatus === 'not_applicable'))) ||
     (value.status === 'unknown' && value.reconciliationState !== undefined && value.reconciliationState !== 'pending')
+  ) invalidConsoleRequestResponse();
+  if (
+    (value.inputTotal !== undefined && value.inputTotal !== null && typeof value.inputTotal !== 'string') ||
+    (value.outputTotal !== undefined && value.outputTotal !== null && typeof value.outputTotal !== 'string') ||
+    (value.settlementAmountMinorUnits !== undefined &&
+      value.settlementAmountMinorUnits !== null && typeof value.settlementAmountMinorUnits !== 'string') ||
+    (value.durationMs !== undefined &&
+      value.durationMs !== null &&
+      (typeof value.durationMs !== 'number' || !Number.isSafeInteger(value.durationMs) || value.durationMs < 0))
   ) invalidConsoleRequestResponse();
   return value;
 }

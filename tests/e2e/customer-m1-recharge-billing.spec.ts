@@ -193,6 +193,19 @@ test('M1: register, recharge, create a default key, make a real call, and settle
       // Wallet: the balance and both ledger rows.
       await page.goto(`${app.origin}/console/wallet`);
       await expect(page.getByText('USD 1,188').first()).toBeVisible({ timeout: 10_000 });
+      // Requests: per-request token counts, settled deduction and duration.
+      const requestId = (
+        await app.sql<{ id: string }>('SELECT id::text AS id FROM saas_requests WHERE tenant_id = $1', [tenantId])
+      ).rows[0]?.id;
+      expect(requestId).toBeTruthy();
+      await page.goto(`${app.origin}/console/requests`);
+      await expect(page.getByText('3 / 2', { exact: true }).first()).toBeVisible({ timeout: 10_000 });
+      await expect(page.getByText('12', { exact: true }).first()).toBeVisible();
+      await expect(page.getByText(/^\d+(?:\.\d+)? (?:ms|s)$/).first()).toBeVisible();
+      await page.goto(`${app.origin}/console/requests/${requestId}?tenantId=${tenantId}`);
+      await expect(page.getByText('Token 入/出')).toBeVisible({ timeout: 10_000 });
+      await expect(page.getByText('3 / 2', { exact: true }).first()).toBeVisible();
+      await expect(page.getByText('12', { exact: true }).first()).toBeVisible();
     });
   } finally {
     await app.close();

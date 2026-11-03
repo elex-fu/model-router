@@ -105,8 +105,8 @@ export interface ConsolePage<Item> {
   readonly hasMore: boolean;
 }
 
-/** Only normalized request metadata safe for a customer-facing console. */
-export interface ConsoleRequest {
+/** Persisted request axes safe for a customer-facing console, before enrichment. */
+interface ConsoleRequestRecord {
   readonly id: string;
   readonly projectId: string;
   readonly model: string;
@@ -119,6 +119,26 @@ export interface ConsoleRequest {
   readonly reconciliationState: ConsoleReconciliationState;
   readonly createdAt: string;
   readonly updatedAt: string;
+}
+
+/** Only normalized request metadata safe for a customer-facing console. */
+export interface ConsoleRequest extends ConsoleRequestRecord {
+  /** Upstream input tokens summed over the request's usage events; null when none observed. */
+  readonly inputTotal: string | null;
+  /** Upstream output tokens summed over the request's usage events; null when none observed. */
+  readonly outputTotal: string | null;
+  /**
+   * Final wallet deduction in minor units: the sum of settled reservations
+   * (or the fast-path charge) once financialStatus is settled, '0' when
+   * released, and null while the financial outcome is not final.
+   */
+  readonly settlementAmountMinorUnits: string | null;
+  /**
+   * Wall-clock duration in milliseconds: from request creation to the last
+   * attempt outcome (journal path) or the response receipt (fast path);
+   * null when no timing evidence exists.
+   */
+  readonly durationMs: number | null;
 }
 
 /** Provider-internal routing identifiers are intentionally absent. */
@@ -630,11 +650,118 @@ function nullableDecimalString(value: unknown): string | null {
   return value === null || value === undefined ? null : decimalString(value);
 }
 
+/**
+ * Per-request customer metrics. Computed for an already-authorized page of
+ * request rows so the cost stays bounded by the page size, never the tenant.
+ */
+interface ConsoleRequestMetrics {
+  readonly inputTotal: string | null;
+  readonly outputTotal: string | null;
+  readonly settlementAmountMinorUnits: string | null;
+  readonly durationMs: number | null;
+}
+
+/**
+ * Token, settlement and timing metrics for a bounded set of request ids.
+ * Journal-backend requests read the append-only usage events, settled
+ * reservations and attempt timeline; fast-path requests have no journal
+ * graph, so their metrics come from the receipt/resolution snapshot. For any
+ * given request only one backend produced rows; the other branch stays null.
+ * The active tenant-membership guard both scopes the read to the caller and
+ * binds $1, which PostgreSQL otherwise cannot type when a parameter never
+ * appears in the statement text.
+ */
+function requestMetricsSql(): string {
+  return `
+    SELECT
+      requested.request_id AS request_id,
+      (SELECT sum(e.input_total) FROM saas_usage_events AS e
+         WHERE e.tenant_id = $2 AND e.request_id = requested.request_id) AS input_total,
+      (SELECT sum(e.output_total) FROM saas_usage_events AS e
+         WHERE e.tenant_id = $2 AND e.request_id = requested.request_id) AS output_total,
+      (SELECT sum(br.settlement_amount_minor_units) FROM saas_billing_reservations AS br
+         WHERE br.tenant_id = $2 AND br.request_id = requested.request_id::text
+           AND br.state = 'settled') AS settlement_amount_minor_units,
+      (SELECT (extract(epoch FROM (max(ta.updated_at) - max(lr.created_at))) * 1000)::bigint
+         FROM saas_attempts AS ta
+         JOIN saas_requests AS lr ON lr.tenant_id = ta.tenant_id AND lr.id = ta.request_id
+        WHERE ta.tenant_id = $2 AND ta.request_id = requested.request_id) AS duration_ms,
+      fast_metrics.input_total AS fast_input_total,
+      fast_metrics.output_total AS fast_output_total,
+      fast_metrics.charge_minor_units AS fast_charge_minor_units,
+      fast_metrics.duration_ms AS fast_duration_ms
+    FROM (SELECT unnest($3::uuid[]) AS request_id) AS requested
+    LEFT JOIN LATERAL (
+      SELECT
+        CASE WHEN (chosen.usage ->> 'inputTotal') ~ '^[0-9]{1,19}$'
+          THEN (chosen.usage ->> 'inputTotal')::numeric ELSE NULL END AS input_total,
+        CASE WHEN (chosen.usage ->> 'outputTotal') ~ '^[0-9]{1,19}$'
+          THEN (chosen.usage ->> 'outputTotal')::numeric ELSE NULL END AS output_total,
+        COALESCE(fx.charge_minor_units, fr.charge_minor_units) AS charge_minor_units,
+        CASE WHEN fr.created_at IS NOT NULL
+          THEN (extract(epoch FROM (fr.created_at - fi.created_at)) * 1000)::bigint
+          ELSE NULL END AS duration_ms
+      FROM saas_fast_gateway_intents AS fi
+      LEFT JOIN saas_fast_gateway_receipts AS fr
+        ON fr.tenant_id = fi.tenant_id AND fr.intent_id = fi.id
+      LEFT JOIN saas_fast_gateway_resolutions AS fx
+        ON fx.tenant_id = fi.tenant_id AND fx.intent_id = fi.id
+      CROSS JOIN LATERAL (
+        SELECT CASE WHEN fx.id IS NOT NULL THEN fx.usage ELSE fr.usage END AS usage
+      ) AS chosen
+      WHERE fi.tenant_id = $2 AND fi.request_id = requested.request_id
+      LIMIT 1
+    ) AS fast_metrics ON true
+    WHERE EXISTS (
+      SELECT 1
+      FROM saas_memberships AS tm
+      WHERE tm.tenant_id = $2
+        AND tm.user_id = $1
+        AND tm.status = 'active'
+    )`;
+}
+
+function metricsDurationMs(value: unknown): number | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) return value;
+  if (typeof value === 'bigint' && value >= 0n && value <= BigInt(Number.MAX_SAFE_INTEGER)) {
+    return Number(value);
+  }
+  if (typeof value === 'string' && /^\d+$/.test(value)) {
+    const parsed = BigInt(value);
+    if (parsed <= BigInt(Number.MAX_SAFE_INTEGER)) return Number(parsed);
+  }
+  storage();
+}
+
+function mapRequestMetrics(row: Row, request: ConsoleRequestRecord): ConsoleRequestMetrics {
+  const settlementAmountMinorUnits =
+    request.financialStatus === 'released'
+      ? '0'
+      : request.financialStatus === 'settled'
+        ? nullableDecimalString(row.settlement_amount_minor_units ?? row.fast_charge_minor_units)
+        : null;
+  return {
+    inputTotal: nullableDecimalString(row.input_total ?? row.fast_input_total),
+    outputTotal: nullableDecimalString(row.output_total ?? row.fast_output_total),
+    settlementAmountMinorUnits,
+    durationMs: metricsDurationMs(row.duration_ms ?? row.fast_duration_ms),
+  };
+}
+
+function withRequestMetrics(request: ConsoleRequestRecord, metrics: ConsoleRequestMetrics | undefined): ConsoleRequest {
+  if (metrics === undefined) {
+    // No metrics row means no usage, settlement or timing evidence exists yet.
+    return { ...request, inputTotal: null, outputTotal: null, settlementAmountMinorUnits: null, durationMs: null };
+  }
+  return { ...request, ...metrics };
+}
+
 function protocol(value: unknown): ConsoleProtocol {
   return enumStorage(value, PROTOCOLS);
 }
 
-function mapRequest(row: Row): ConsoleRequest {
+function mapRequest(row: Row): ConsoleRequestRecord {
   if (row.source_conflict === true) storage();
   const supplyMode = enumStorage(row.supply_mode, SUPPLY_MODES);
   const status = enumStorage(row.status, REQUEST_STATUSES);
@@ -790,6 +917,30 @@ export class SaasConsoleUsageQueryService {
     }
   }
 
+  /**
+   * Per-request metrics for an already-authorized page. The id array is
+   * bounded by the page size (or 1 for detail), so the correlated subqueries
+   * never scale with tenant volume. A missing row simply means no metrics
+   * evidence exists for that request yet.
+   */
+  private async requestMetrics(
+    userId: string,
+    tenantId: string,
+    requests: readonly ConsoleRequestRecord[],
+  ): Promise<Map<string, ConsoleRequestMetrics>> {
+    const metrics = new Map<string, ConsoleRequestMetrics>();
+    if (requests.length === 0) return metrics;
+    const rows = await this.rows(requestMetricsSql(), [userId, tenantId, requests.map((request) => request.id)]);
+    const byRequestId = new Map<string, Row>();
+    for (const row of rows) {
+      byRequestId.set(storageText(row.request_id), row);
+    }
+    for (const request of requests) {
+      metrics.set(request.id, mapRequestMetrics(byRequestId.get(request.id) ?? {}, request));
+    }
+    return metrics;
+  }
+
   async listRequests(input: ConsoleRequestListQuery): Promise<ConsolePage<ConsoleRequest>>;
   async listRequests(
     userId: string,
@@ -836,7 +987,12 @@ export class SaasConsoleUsageQueryService {
             id: last.id,
           })
         : null;
-    return page(mapped, normalized.limit, nextCursor);
+    const result = page(mapped, normalized.limit, nextCursor);
+    const metrics = await this.requestMetrics(normalized.userId, normalized.tenantId, result.items);
+    return {
+      ...result,
+      items: result.items.map((request) => withRequestMetrics(request, metrics.get(request.id))),
+    };
   }
 
   async getRequest(input: ConsoleRequestDetailQuery): Promise<ConsoleRequestDetail | null>;
@@ -928,8 +1084,10 @@ export class SaasConsoleUsageQueryService {
        ORDER BY e.created_at ASC, e.id ASC`,
       childParams,
     );
+    const baseRequest = mapRequest(baseRow);
+    const metrics = await this.requestMetrics(normalized.userId, normalized.tenantId, [baseRequest]);
     return {
-      ...mapRequest(baseRow),
+      ...withRequestMetrics(baseRequest, metrics.get(baseRequest.id)),
       attempts: attempts.map(mapAttempt),
       usageEvents: usageEvents.map(mapUsageEvent),
     };

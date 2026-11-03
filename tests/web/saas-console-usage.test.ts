@@ -4,6 +4,7 @@ import * as React from 'react';
 import type { ConsoleRequest, ConsoleRequestDetail, Project } from '../../web/src/api/saas-client.ts';
 import { SaasApiError, saasClient } from '../../web/src/api/saas-client.ts';
 import {
+  formatDurationMs,
   formatExactDecimal,
   RequestFinancialStatus,
   RequestReconciliationStatus,
@@ -132,6 +133,15 @@ test('token presentation keeps large decimal strings exact', () => {
   assert.equal(formatExactDecimal('not-a-decimal'), '—');
 });
 
+test('duration presentation stays bounded and readable', () => {
+  assert.equal(formatDurationMs(null), '—');
+  assert.equal(formatDurationMs(undefined), '—');
+  assert.equal(formatDurationMs(42), '42 ms');
+  assert.equal(formatDurationMs(1500), '1.5 s');
+  assert.equal(formatDurationMs(59_940), '59.9 s');
+  assert.equal(formatDurationMs(90_000), '1 分 30 秒');
+});
+
 function stateRequest(): ConsoleRequestDetail {
   return {
     id: 'request-pending',
@@ -142,6 +152,11 @@ function stateRequest(): ConsoleRequestDetail {
     status: 'succeeded',
     financialStatus: 'reconciliation_pending',
     reconciliationState: 'resolved',
+    inputTotal: '3',
+    outputTotal: '2',
+    // The financial outcome is not final yet, so no settlement amount exists.
+    settlementAmountMinorUnits: null,
+    durationMs: 1500,
     createdAt: '2026-09-28T00:00:00.000Z',
     updatedAt: '2026-09-28T00:00:01.000Z',
     attempts: [],
@@ -177,10 +192,16 @@ test('older API responses leave new axes absent, while malformed or mode-conflic
   const legacy = stateRequest();
   delete legacy.financialStatus;
   delete legacy.reconciliationState;
+  delete legacy.inputTotal;
+  delete legacy.outputTotal;
+  delete legacy.settlementAmountMinorUnits;
+  delete legacy.durationMs;
   respondWith(legacy);
   const detail = await saasClient.getRequestDetail('tenant-one', legacy.id);
   assert.equal(Object.hasOwn(detail, 'financialStatus'), false);
   assert.equal(Object.hasOwn(detail, 'reconciliationState'), false);
+  assert.equal(Object.hasOwn(detail, 'inputTotal'), false);
+  assert.equal(Object.hasOwn(detail, 'durationMs'), false);
   const malformed = [
     { financialStatus: null },
     { financialStatus: 'future-state' },
@@ -190,6 +211,10 @@ test('older API responses leave new axes absent, while malformed or mode-conflic
     { supplyMode: 'platform', financialStatus: 'not_applicable' },
     { status: 'unknown', reconciliationState: 'resolved' },
     { status: 'unknown', reconciliationState: 'none' },
+    { inputTotal: 123 },
+    { settlementAmountMinorUnits: true },
+    { durationMs: '1500' },
+    { durationMs: -5 },
   ];
   for (const invalid of malformed) {
     const value = { ...stateRequest(), ...invalid };
@@ -350,6 +375,12 @@ test('actual customer list and detail render separate axes with safe explanation
       assert.match(html, /执行对账已完成/);
       assert.match(html, /执行成功或重放 HTTP 200 不代表平台 Token 费用已结算/);
       assert.doesNotMatch(html, />已结算</);
+      // Per-request metrics: token counts, pending settlement ('—') and duration.
+      assert.match(html, /Token 入\/出/);
+      assert.match(html, /3 \/ 2/);
+      assert.match(html, /1\.5 s/);
+      assert.match(html, /扣费（最小单位）/);
+      assert.match(html, /耗时/);
       if (page === 'list') {
         assert.match(html, /BYOK 无平台 Token 扣费/);
         assert.match(html, /查看/);

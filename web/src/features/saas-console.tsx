@@ -410,6 +410,14 @@ export function formatExactDecimal(value: string | null | undefined): string {
   return `${negative ? '-' : ''}${digits.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`;
 }
 
+export function formatDurationMs(value: number | null | undefined): string {
+  if (value === null || value === undefined) return '—';
+  if (value < 1000) return `${value} ms`;
+  if (value < 60_000) return `${(value / 1000).toFixed(1)} s`;
+  const minutes = Math.floor(value / 60_000);
+  return `${minutes} 分 ${((value % 60_000) / 1000).toFixed(0)} 秒`;
+}
+
 function fixedFeeLabel(plan: ServicePlanCatalogItem): string {
   return `${plan.currency} ${plan.fixedFeeMinorUnits}（最小货币单位）`;
 }
@@ -5169,6 +5177,9 @@ export function RequestsPage({ onLogout }: { onLogout: () => Promise<void> }) {
                         <th>模型</th>
                         <th>项目</th>
                         <th>供给模式</th>
+                        <th>Token 入/出</th>
+                        <th>扣费（最小单位）</th>
+                        <th>耗时</th>
                         <th>执行状态</th>
                         <th>财务状态</th>
                         <th>执行对账</th>
@@ -5190,6 +5201,11 @@ export function RequestsPage({ onLogout }: { onLogout: () => Promise<void> }) {
                               {supplyModeLabel(request.supplyMode)}
                             </Badge>
                           </td>
+                          <td>
+                            {formatExactDecimal(request.inputTotal)} / {formatExactDecimal(request.outputTotal)}
+                          </td>
+                          <td>{formatExactDecimal(request.settlementAmountMinorUnits)}</td>
+                          <td>{formatDurationMs(request.durationMs)}</td>
                           <td>
                             <Badge
                               tone={
@@ -5435,6 +5451,20 @@ export function RequestDetailPage({ onLogout }: { onLogout: () => Promise<void> 
                       <Badge tone={requestModeTone(detail.data.supplyMode)}>
                         {supplyModeLabel(detail.data.supplyMode)}
                       </Badge>
+                    </div>
+                    <div>
+                      <span>Token 入/出</span>
+                      <strong>
+                        {formatExactDecimal(detail.data.inputTotal)} / {formatExactDecimal(detail.data.outputTotal)}
+                      </strong>
+                    </div>
+                    <div>
+                      <span>扣费（最小单位）</span>
+                      <strong>{formatExactDecimal(detail.data.settlementAmountMinorUnits)}</strong>
+                    </div>
+                    <div>
+                      <span>耗时</span>
+                      <strong>{formatDurationMs(detail.data.durationMs)}</strong>
                     </div>
                     <div>
                       <span>执行状态</span>
