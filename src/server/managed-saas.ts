@@ -296,6 +296,11 @@ import { PlatformOperationsSummaryService } from '../saas/platform/operations/in
 import { createPaymentsControlHttpHandler } from '../saas/platform/payments-control-http.js';
 import { createPluginsHttpHandler, type PluginsHttpHandler } from '../saas/platform/plugins-http.js';
 import {
+  createCodexBoundAdminHttpHandler,
+  type CodexBoundAdminHttpHandler,
+} from '../saas/platform/codex-bound-admin-http.js';
+import { CodexBoundAdmissionService } from '../saas/supply/codex-bound-admission-service.js';
+import {
   createPostgresRiskControlAuditWriter,
   createRiskControlHttpHandler,
   type RiskControlHttpHandler,
@@ -1137,6 +1142,7 @@ function createPlatformHandler(
   billingGroupsHandler: BillingGroupsHttpHandler | undefined,
   compositeModelRoutesHandler: CompositeModelRoutesHttpHandler | undefined,
   riskControlHandler: RiskControlHttpHandler | undefined,
+  codexBoundsHandler: CodexBoundAdminHttpHandler | undefined,
   pluginsHandler: PluginsHttpHandler | undefined,
   egressProxiesHandler: EgressProxiesHttpHandler | undefined,
   opencodeGoRulesHandler: OpencodeGoRulesHttpHandler | undefined,
@@ -1179,6 +1185,7 @@ function createPlatformHandler(
         if (billingGroupsHandler && (await billingGroupsHandler(req, res))) return;
         if (compositeModelRoutesHandler && (await compositeModelRoutesHandler(req, res))) return;
         if (riskControlHandler && (await riskControlHandler(req, res))) return;
+        if (codexBoundsHandler && (await codexBoundsHandler(req, res))) return;
         if (pluginsHandler && (await pluginsHandler(req, res))) return;
         if (egressProxiesHandler && (await egressProxiesHandler(req, res))) return;
         if (opencodeGoRulesHandler && (await opencodeGoRulesHandler(req, res))) return;
@@ -3400,6 +3407,14 @@ export async function startManagedSaasServer(
         ...(observationRetentionDays === undefined ? {} : { observationRetentionDays }),
         publicOrigin: deploymentListener(deployment, 'platform').origin,
       });
+      // 方案1 (M1-B): the Codex trusted-bound admission operator surface
+      // (submit/list/approve/reject/retire over migration 155's ledger).
+      const codexBoundsAdminHandler = createCodexBoundAdminHttpHandler({
+        access: platformAccessService,
+        authService: platformAuthService,
+        service: new CodexBoundAdmissionService(database),
+        publicOrigin: deploymentListener(deployment, 'platform').origin,
+      });
       // Batch-5 §5.1 plugin admin surface (install/enable/disable/config/
       // delete). The control plane verifies packages and writes the
       // authoritative DB state; the plugin-host workload converges to it —
@@ -3854,6 +3869,7 @@ export async function startManagedSaasServer(
         billingGroupsAdminHandler,
         compositeModelRoutesAdminHandler,
         riskControlAdminHandler,
+        codexBoundsAdminHandler,
         pluginsAdminHandler,
         egressProxiesAdminHandler,
         opencodeGoRulesAdminHandler,
