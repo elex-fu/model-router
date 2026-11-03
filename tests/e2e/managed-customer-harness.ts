@@ -61,6 +61,7 @@ import {
   M1_E2E_COMMERCIAL_POLICY_VERSION,
   M1_E2E_DEK,
   M1_E2E_ENDPOINT,
+  M1_E2E_RESPONSES_ENDPOINT,
   M1_E2E_ROUNDING_VERSION,
   type M1PlatformSupplySeed,
   type MockModelUpstream,
@@ -79,6 +80,8 @@ import {
 export interface ManagedCustomerConsole {
   readonly origin: string;
   readonly model: string;
+  /** The responses-protocol public model served by the same harness (R8). */
+  readonly responsesModel: string;
   readonly poolId: string;
   readonly psp: FakePspAdapter;
   /** Direct SQL on the migrator role (full privileges) for acceptance assertions. */
@@ -142,7 +145,7 @@ export async function startManagedCustomerConsole(): Promise<ManagedCustomerCons
     });
     const dispatchConfig = {
       poolId: seed.poolId,
-      modelScopes: [seed.publicModel],
+      modelScopes: [seed.publicModel, seed.responsesPublicModel],
       currency: 'USD',
       usageDimensions: ['input_total', 'output_total'] as const,
       tokenSource: 'upstream' as const,
@@ -164,7 +167,7 @@ export async function startManagedCustomerConsole(): Promise<ManagedCustomerCons
       sessionTtlSeconds: 900,
       defaultAccess: new RegistrationDefaultAccessService({
         database: control,
-        config: { poolId: seed.poolId, modelScopes: [seed.publicModel] },
+        config: { poolId: seed.poolId, modelScopes: [seed.publicModel, seed.responsesPublicModel] },
       }),
       dispatchCompletion: new RegistrationDispatchCompletionService({
         database: control,
@@ -257,7 +260,7 @@ export async function startManagedCustomerConsole(): Promise<ManagedCustomerCons
           reasonCodes: [],
           providerId: seed.providerId,
           productIds: [seed.productId],
-          endpointScopes: [M1_E2E_ENDPOINT],
+          endpointScopes: [M1_E2E_ENDPOINT, M1_E2E_RESPONSES_ENDPOINT],
           unavailableEndpointScopes: [],
         },
       ],
@@ -282,21 +285,40 @@ export async function startManagedCustomerConsole(): Promise<ManagedCustomerCons
       idempotencyHmacKey: new Uint8Array(32).fill(0x53),
       providerPreparationRoute: async (input) => {
         try {
-          const authority = input.authority as { modelResolution?: unknown } | undefined;
+          const authority = input.authority as
+            | {
+                modelResolution?: unknown;
+                route?: { protocol?: unknown; clientOperation?: unknown };
+              }
+            | undefined;
+          // The /v1/responses path carries client protocol 'responses' (the
+          // Codex CLI wire surface); everything else is the chat path.
+          const isResponses = authority?.route?.protocol === 'responses';
+          const fallbackResolution = isResponses
+            ? {
+                requestedModel: seed.responsesPublicModel,
+                mappedModel: seed.responsesPublicModel,
+                resolvedModel: seed.responsesProviderModel,
+                mappingSource: 'alias',
+                mappingVersion: 1,
+              }
+            : {
+                requestedModel: seed.publicModel,
+                mappedModel: seed.publicModel,
+                resolvedModel: seed.providerModel,
+                mappingSource: 'alias',
+                mappingVersion: 1,
+              };
+          const clientOperation = isResponses ? 'responses' : 'chat.completions';
           return {
-            clientProtocol: 'openai',
-            providerProtocol: 'openai',
-            clientOperation: 'chat.completions',
-            providerOperation: 'chat.completions',
-            modelResolution: (authority && typeof authority === 'object' && 'modelResolution' in authority
-              ? (authority as { modelResolution: unknown }).modelResolution
-              : undefined) ?? {
-              requestedModel: seed.publicModel,
-              mappedModel: seed.publicModel,
-              resolvedModel: seed.providerModel,
-              mappingSource: 'alias',
-              mappingVersion: 1,
-            },
+            clientProtocol: isResponses ? 'responses' : 'openai',
+            providerProtocol: isResponses ? 'responses' : 'openai',
+            clientOperation,
+            providerOperation: clientOperation,
+            modelResolution:
+              (authority && typeof authority === 'object' && 'modelResolution' in authority
+                ? (authority as { modelResolution: unknown }).modelResolution
+                : undefined) ?? fallbackResolution,
           };
         } catch (error) {
           console.error('m1_e2e provider preparation route failed', error);
@@ -311,9 +333,12 @@ export async function startManagedCustomerConsole(): Promise<ManagedCustomerCons
         modelCompatibility: async (input) =>
           input.providerId === seed.providerId &&
           input.productId === seed.productId &&
-          input.providerModel === seed.providerModel &&
-          input.providerProtocol === 'openai' &&
-          input.providerOperation === 'chat.completions',
+          ((input.providerModel === seed.providerModel &&
+            input.providerProtocol === 'openai' &&
+            input.providerOperation === 'chat.completions') ||
+            (input.providerModel === seed.responsesProviderModel &&
+              input.providerProtocol === 'responses' &&
+              input.providerOperation === 'responses')),
         maxPayloadBytes: 1024 * 1024,
         compilerVersion: 'm1-e2e-payload-v1',
       },
@@ -334,12 +359,25 @@ export async function startManagedCustomerConsole(): Promise<ManagedCustomerCons
             path: M1_E2E_ENDPOINT,
             method: 'POST',
           },
+          {
+            upstreamId: seed.poolId,
+            productId: seed.productId,
+            protocol: 'responses',
+            operation: 'responses',
+            baseUrl: `https://127.0.0.1:${upstream.port}`,
+            allowedHosts: ['127.0.0.1'],
+            allowedPorts: [upstream.port],
+            path: M1_E2E_RESPONSES_ENDPOINT,
+            method: 'POST',
+          },
         ],
         testAddressCapability,
       }),
       providerTargetRoute: async (input) =>
         input.upstreamId === seed.poolId
-          ? { productId: seed.productId, providerProtocol: 'openai', providerOperation: 'chat.completions' }
+          ? input.endpoint === M1_E2E_RESPONSES_ENDPOINT
+            ? { productId: seed.productId, providerProtocol: 'responses', providerOperation: 'responses' }
+            : { productId: seed.productId, providerProtocol: 'openai', providerOperation: 'chat.completions' }
           : null,
       resolveAuthenticationHeader: async () => 'authorization',
       fetch: undiciFetch as never,
@@ -492,6 +530,7 @@ export async function startManagedCustomerConsole(): Promise<ManagedCustomerCons
     return {
       origin,
       model: seed.publicModel,
+      responsesModel: seed.responsesPublicModel,
       poolId: seed.poolId,
       psp,
       sql,

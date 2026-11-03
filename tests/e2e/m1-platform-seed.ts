@@ -28,6 +28,8 @@ import type { SaasDatabase } from '../src/saas/db/types.js';
 
 const ENDPOINT = '/v1/chat/completions';
 export const M1_E2E_ENDPOINT = ENDPOINT;
+const RESPONSES_ENDPOINT = '/v1/responses';
+export const M1_E2E_RESPONSES_ENDPOINT = RESPONSES_ENDPOINT;
 export const M1_E2E_PLATFORM_SECRET = 'm1-e2e-platform-secret';
 export const M1_E2E_DEK = new Uint8Array(32).fill(0x37);
 const DEPLOYMENT_ID = 'm1-e2e-deployment';
@@ -85,13 +87,23 @@ export async function startMockModelUpstream(): Promise<MockModelUpstream> {
     'data: {"id":"chatcmpl-m1-e2e","object":"chat.completion.chunk","choices":[],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}\n\n',
     'data: [DONE]\n\n',
   ].join('');
+  // The responses-protocol SSE shape: usage rides the terminal
+  // response.completed event (never a bare usage frame), mirroring the
+  // upstream Responses API the Codex CLI talks to.
+  const responsesSse = [
+    'event: response.created\n',
+    'data: {"type":"response.created","response":{"id":"resp-m1-e2e","object":"response","status":"in_progress"}}\n\n',
+    'event: response.completed\n',
+    'data: {"type":"response.completed","response":{"id":"resp-m1-e2e","object":"response","status":"completed","output":[],"usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}}}\n\n',
+  ].join('');
   const server = createHttpsServer({ cert: certificatePem, key: privateKeyPem }, (request, response) => {
     upstreamCallCount += 1;
-    if (request.method !== 'POST' || request.url !== ENDPOINT) {
+    if (request.method !== 'POST' || (request.url !== ENDPOINT && request.url !== RESPONSES_ENDPOINT)) {
       response.writeHead(404, { 'content-type': 'application/json' });
       response.end('{"error":"unexpected local test request"}');
       return;
     }
+    const isResponses = request.url === RESPONSES_ENDPOINT;
     let body = '';
     request.setEncoding('utf8');
     request.on('data', (chunk: string) => {
@@ -109,18 +121,26 @@ export async function startMockModelUpstream(): Promise<MockModelUpstream> {
       }
       if (payload.stream === true) {
         response.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache' });
-        response.end(sseResponse);
+        response.end(isResponses ? responsesSse : sseResponse);
       } else {
         response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-cache' });
         response.end(
-          JSON.stringify({
-            id: 'chatcmpl-m1-e2e-json',
-            object: 'chat.completion',
-            created: 1,
-            model: 'm1-e2e-model',
-            choices: [{ index: 0, message: { role: 'assistant', content: 'm1-e2e-ok' }, finish_reason: 'stop' }],
-            usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 },
-          }),
+          isResponses
+            ? JSON.stringify({
+                id: 'resp-m1-e2e-json',
+                object: 'response',
+                status: 'completed',
+                output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'm1-e2e-ok' }] }],
+                usage: { input_tokens: 3, output_tokens: 2, total_tokens: 5 },
+              })
+            : JSON.stringify({
+                id: 'chatcmpl-m1-e2e-json',
+                object: 'chat.completion',
+                created: 1,
+                model: 'm1-e2e-model',
+                choices: [{ index: 0, message: { role: 'assistant', content: 'm1-e2e-ok' }, finish_reason: 'stop' }],
+                usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 },
+              }),
         );
       }
     });
@@ -148,6 +168,10 @@ export interface M1PlatformSupplySeed {
   readonly providerId: string;
   readonly productId: string;
   readonly providerModel: string;
+  /** The second, responses-protocol model on the same pool (R8 proof path). */
+  readonly responsesPublicModel: string;
+  readonly responsesPublicModelId: string;
+  readonly responsesProviderModel: string;
   /** Key id + private key of the e2e contract-attestation verifier. */
   readonly contractKeyId: string;
   readonly contractPrivateKey: ReturnType<typeof generateKeyPairSync>['privateKey'];
@@ -177,6 +201,9 @@ export async function seedM1PlatformSupply(migrator: SaasDatabase): Promise<M1Pl
   const publicModelId = `m1-e2e-public-model-${label}`;
   const publicModel = 'm1-e2e-model';
   const providerModel = `m1-e2e-provider-model-${label}`;
+  const responsesPublicModelId = `m1-e2e-public-responses-${label}`;
+  const responsesPublicModel = 'm1-e2e-responses-model';
+  const responsesProviderModel = `m1-e2e-provider-responses-${label}`;
   const poolId = `m1-e2e-pool-${label}`;
   const audit = { actorUserId, entryPoint: 'm1-e2e-seed', requestId: randomUUID() };
   const nowIso = new Date().toISOString();
@@ -193,6 +220,15 @@ export async function seedM1PlatformSupply(migrator: SaasDatabase): Promise<M1Pl
     model: providerModel,
     endpointScope: [ENDPOINT],
   });
+  await catalog.registerPublicModelAlias({
+    publicModelId: responsesPublicModelId,
+    alias: responsesPublicModel,
+    displayName: 'M1 E2E Public Responses Model',
+    providerId,
+    productId,
+    model: responsesProviderModel,
+    endpointScope: [RESPONSES_ENDPOINT],
+  });
   const capability = await catalog.registerProviderCapability({
     providerId,
     productId,
@@ -206,6 +242,19 @@ export async function seedM1PlatformSupply(migrator: SaasDatabase): Promise<M1Pl
     evidenceReference: `m1-e2e-capability-${label}`,
     evidenceSha256: 'a'.repeat(64),
   });
+  const responsesCapability = await catalog.registerProviderCapability({
+    providerId,
+    productId,
+    model: responsesProviderModel,
+    endpoint: RESPONSES_ENDPOINT,
+    protocol: 'responses',
+    supportLevel: 'supported',
+    validationState: 'verified',
+    evidenceVersion: 'm1-e2e-capability-v1',
+    discoverySource: 'manual',
+    evidenceReference: `m1-e2e-responses-capability-${label}`,
+    evidenceSha256: 'b'.repeat(64),
+  });
   const platformRights = await catalog.registerProviderRightsVersion({
     rightsId: `m1-e2e-platform-rights-${label}`,
     providerId,
@@ -214,8 +263,8 @@ export async function seedM1PlatformSupply(migrator: SaasDatabase): Promise<M1Pl
     supplyMode: 'platform',
     region: 'e2e-region',
     purpose: 'inference',
-    modelScope: [providerModel],
-    endpointScope: [ENDPOINT],
+    modelScope: [providerModel, responsesProviderModel],
+    endpointScope: [ENDPOINT, RESPONSES_ENDPOINT],
     effectiveAt,
     approvalReference: `m1-e2e-approval-${label}`,
     status: 'active',
@@ -249,6 +298,30 @@ export async function seedM1PlatformSupply(migrator: SaasDatabase): Promise<M1Pl
     effectiveAt,
     idempotencyKey: `m1-e2e-customer-price-${label}`,
   });
+  await pricing.appendCustomerPriceVersion({
+    publicModelId: responsesPublicModelId,
+    publicModelVersion: 1,
+    providerId,
+    productId,
+    protocol: 'responses',
+    endpoint: RESPONSES_ENDPOINT,
+    currency: 'USD',
+    commercialPolicyVersion: M1_E2E_COMMERCIAL_POLICY_VERSION,
+    calculatorVersion: 'm1-e2e-calculator-v1',
+    roundingVersion: M1_E2E_ROUNDING_VERSION,
+    roundingMode: 'half_up',
+    roundingBoundary: 'total',
+    rates: {
+      input: { numeratorMinorUnits: 2, denominatorUnits: 1 },
+      cache_read: { numeratorMinorUnits: 2, denominatorUnits: 1 },
+      cache_write: { numeratorMinorUnits: 2, denominatorUnits: 1 },
+      cache_write_5m: { numeratorMinorUnits: 2, denominatorUnits: 1 },
+      cache_write_1h: { numeratorMinorUnits: 2, denominatorUnits: 1 },
+      output: { numeratorMinorUnits: 3, denominatorUnits: 1 },
+    },
+    effectiveAt,
+    idempotencyKey: `m1-e2e-customer-price-responses-${label}`,
+  });
   await pricing.appendSupplierCostVersion({
     publicModelId,
     publicModelVersion: 1,
@@ -274,6 +347,31 @@ export async function seedM1PlatformSupply(migrator: SaasDatabase): Promise<M1Pl
     effectiveAt,
     idempotencyKey: `m1-e2e-supplier-cost-${label}`,
   });
+  await pricing.appendSupplierCostVersion({
+    publicModelId: responsesPublicModelId,
+    publicModelVersion: 1,
+    providerId,
+    productId,
+    resolvedModel: responsesProviderModel,
+    protocol: 'responses',
+    endpoint: RESPONSES_ENDPOINT,
+    currency: 'USD',
+    commercialPolicyVersion: M1_E2E_COMMERCIAL_POLICY_VERSION,
+    calculatorVersion: 'm1-e2e-calculator-v1',
+    roundingVersion: M1_E2E_ROUNDING_VERSION,
+    roundingMode: 'half_up',
+    roundingBoundary: 'total',
+    rates: {
+      input: { numeratorMinorUnits: 1, denominatorUnits: 1 },
+      cache_read: { numeratorMinorUnits: 1, denominatorUnits: 1 },
+      cache_write: { numeratorMinorUnits: 1, denominatorUnits: 1 },
+      cache_write_5m: { numeratorMinorUnits: 1, denominatorUnits: 1 },
+      cache_write_1h: { numeratorMinorUnits: 1, denominatorUnits: 1 },
+      output: { numeratorMinorUnits: 1, denominatorUnits: 1 },
+    },
+    effectiveAt,
+    idempotencyKey: `m1-e2e-supplier-cost-responses-${label}`,
+  });
 
   const platformSupply = new ProviderSupplyService(migrator, {
     deployment: DEPLOYMENT_ID,
@@ -286,6 +384,9 @@ export async function seedM1PlatformSupply(migrator: SaasDatabase): Promise<M1Pl
       }),
     },
   });
+  // Platform credential creation requires exactly one capability per account
+  // (the auto-validation job is queued per capability), so the chat and
+  // responses capabilities each get their own account in the same pool.
   const account = await platformSupply.createPlatformProviderAccount({
     id: `m1-e2e-account-${label}`,
     displayName: 'M1 E2E platform account',
@@ -299,27 +400,64 @@ export async function seedM1PlatformSupply(migrator: SaasDatabase): Promise<M1Pl
     capabilities: [{ model: providerModel, endpoint: ENDPOINT, version: capability.version }],
     audit,
   });
-  const verifiedAccount = await platformSupply.setProviderAccountValidation({
-    accountId: account.id,
-    validationState: 'verified',
-    expectedAuthzVersion: account.authzVersion,
-  });
-  const credential = await platformSupply.createPlatformProviderCredential({
-    accountId: verifiedAccount.id,
-    id: `m1-e2e-credential-${label}`,
-    secret: Buffer.from(M1_E2E_PLATFORM_SECRET, 'utf8'),
-    audit,
-  });
-  const activeCredential = await migrator.query<{ status: string; validation_state: string }>(
-    `UPDATE saas_platform_provider_credentials
-        SET validation_state = 'verified', validation_error_code = NULL,
-            last_validated_at = $1, status = 'active', updated_at = $1,
-            authz_version = authz_version + 1
-      WHERE id = $2 AND account_id = $3 AND authz_version = $4
-      RETURNING status, validation_state`,
-    [nowIso, credential.credential.id, verifiedAccount.id, credential.credential.authzVersion],
+  const activatePlatformCredential = async (accountId: string, authzVersion: number, credentialId: string) => {
+    const activated = await migrator.query<{ status: string; validation_state: string }>(
+      `UPDATE saas_platform_provider_credentials
+          SET validation_state = 'verified', validation_error_code = NULL,
+              last_validated_at = $1, status = 'active', updated_at = $1,
+              authz_version = authz_version + 1
+        WHERE id = $2 AND account_id = $3 AND authz_version = $4
+        RETURNING status, validation_state`,
+      [nowIso, credentialId, accountId, authzVersion],
+    );
+    if (activated.rows.length !== 1) throw new Error('M1 e2e platform credential activation failed');
+  };
+  const provisionPlatformAccount = async (
+    accountInput: Awaited<ReturnType<typeof platformSupply.createPlatformProviderAccount>>,
+  ) => {
+    const verified = await platformSupply.setProviderAccountValidation({
+      accountId: accountInput.id,
+      validationState: 'verified',
+      expectedAuthzVersion: accountInput.authzVersion,
+    });
+    const credential = await platformSupply.createPlatformProviderCredential({
+      accountId: verified.id,
+      secret: Buffer.from(M1_E2E_PLATFORM_SECRET, 'utf8'),
+      audit,
+    });
+    await activatePlatformCredential(verified.id, credential.credential.authzVersion, credential.credential.id);
+    // The scheduler's durable health authority fail-closes on accounts with no
+    // runtime health row ("runtime health is unknown"); production gets the
+    // initial row from the credential-validation probe. Seed the equivalent
+    // healthy probe outcome directly (owner scope 'platform', per migration 040).
+    await migrator.query(
+      `INSERT INTO saas_provider_account_runtime_health
+         (owner_scope_key, owner_kind, owner_tenant_id, account_id, state, failure_count,
+          observed_at, cooldown_until, last_outcome, source_fencing_token, revision)
+       VALUES ('platform', 'platform', NULL, $1, 'healthy', 0, $2, NULL,
+               'probe_success', 1, 1)`,
+      [verified.id, nowIso],
+    );
+    return verified;
+  };
+  const chatAccount = await provisionPlatformAccount(account);
+  const responsesAccount = await provisionPlatformAccount(
+    await platformSupply.createPlatformProviderAccount({
+      id: `m1-e2e-account-responses-${label}`,
+      displayName: 'M1 E2E responses platform account',
+      providerId,
+      productId,
+      credentialType: 'api-key',
+      region: 'e2e-region',
+      purpose: 'inference',
+      rightsId: platformRights.rightsId,
+      rightsVersion: platformRights.version,
+      capabilities: [
+        { model: responsesProviderModel, endpoint: RESPONSES_ENDPOINT, version: responsesCapability.version },
+      ],
+      audit,
+    }),
   );
-  if (activeCredential.rows.length !== 1) throw new Error('M1 e2e platform credential activation failed');
   const pool = await platformSupply.createPlatformProviderPool({
     id: poolId,
     displayName: 'M1 E2E platform pool',
@@ -330,27 +468,20 @@ export async function seedM1PlatformSupply(migrator: SaasDatabase): Promise<M1Pl
     purpose: 'inference',
     rightsId: platformRights.rightsId,
     rightsVersion: platformRights.version,
-    capabilities: [{ model: providerModel, endpoint: ENDPOINT, version: capability.version }],
+    capabilities: [
+      { model: providerModel, endpoint: ENDPOINT, version: capability.version },
+      { model: responsesProviderModel, endpoint: RESPONSES_ENDPOINT, version: responsesCapability.version },
+    ],
     status: 'active',
     validationState: 'verified',
   });
-  await platformSupply.addPlatformPoolMember({
-    poolId: pool.id,
-    accountId: verifiedAccount.id,
-    expectedAccountAuthzVersion: verifiedAccount.authzVersion,
-  });
-  // The scheduler's durable health authority fail-closes on accounts with no
-  // runtime health row ("runtime health is unknown"); production gets the
-  // initial row from the credential-validation probe. Seed the equivalent
-  // healthy probe outcome directly (owner scope 'platform', per migration 040).
-  await migrator.query(
-    `INSERT INTO saas_provider_account_runtime_health
-       (owner_scope_key, owner_kind, owner_tenant_id, account_id, state, failure_count,
-        observed_at, cooldown_until, last_outcome, source_fencing_token, revision)
-     VALUES ('platform', 'platform', NULL, $1, 'healthy', 0, $2, NULL,
-             'probe_success', 1, 1)`,
-    [verifiedAccount.id, nowIso],
-  );
+  for (const member of [chatAccount, responsesAccount]) {
+    await platformSupply.addPlatformPoolMember({
+      poolId: pool.id,
+      accountId: member.id,
+      expectedAccountAuthzVersion: member.authzVersion,
+    });
+  }
 
   const contractKeyPair = generateKeyPairSync('ed25519');
   const contractKeyId = `m1-e2e-contract-${label}`;
@@ -361,6 +492,9 @@ export async function seedM1PlatformSupply(migrator: SaasDatabase): Promise<M1Pl
     providerId,
     productId,
     providerModel,
+    responsesPublicModel,
+    responsesPublicModelId,
+    responsesProviderModel,
     contractKeyId,
     contractPrivateKey: contractKeyPair.privateKey,
     trustedVerifierPublicKeys: new Map([[contractKeyId, contractKeyPair.publicKey]]),
@@ -384,10 +518,12 @@ export function createM1ContractTestPort(seed: M1PlatformSupplySeed): Registrati
         testVectorDigest: TEST_VECTOR_DIGEST,
         providerPolicyId: input.providerPolicyId,
         providerPolicyVersion: '2',
-        publicModelId: seed.publicModelId,
-        publicModelVersion: '1',
-        protocol: 'openai',
-        endpoint: ENDPOINT,
+        // Sign over the definition the plan actually asks about, so every
+        // model scope (chat and responses) attests its own identity.
+        publicModelId: input.definition.publicModelId,
+        publicModelVersion: input.definition.publicModelVersion,
+        protocol: input.definition.protocol,
+        endpoint: input.definition.endpoint,
         supplyMode: 'platform',
         targetMode: 'platform_pool',
         usageDimensions: input.definition.usageDimensions,
