@@ -526,9 +526,14 @@ export class PostgresPreparationCapacityAdapter implements PostgresPreparationCa
                 k.authz_version AS key_authz_version,
                 k.supply_mode,
                 k.expires_at AS key_expires_at,
-                k.requests_per_minute AS key_requests_per_minute,
-                k.tokens_per_minute AS key_tokens_per_minute,
-                k.max_concurrent_requests AS key_max_concurrent_requests,
+                /* M1/S2: a key created without explicit limits inherits the
+                   project inference policy ceiling ("限额默认平台值") instead of
+                   failing admission closed. Explicit per-key limits (the platform
+                   capacity-policy write path) still take precedence; the key tier
+                   therefore never authorizes more than the project tier. */
+                COALESCE(k.requests_per_minute, policy.requests_per_minute) AS key_requests_per_minute,
+                COALESCE(k.tokens_per_minute, policy.tokens_per_minute) AS key_tokens_per_minute,
+                COALESCE(k.max_concurrent_requests, policy.max_concurrent_requests) AS key_max_concurrent_requests,
                 k.principal_user_id AS user_id,
                 CASE WHEN k.principal_user_id IS NOT NULL THEN
                   CASE WHEN risk.stage = 'rate_limited' THEN

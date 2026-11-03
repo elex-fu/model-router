@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { test } from 'node:test';
 import { Pool as PgPool, type PoolClient } from 'pg';
 import { SAAS_MIGRATIONS } from '../../../src/saas/db/migrations/001_initial_schema.js';
@@ -1354,5 +1356,21 @@ test('optional PostgreSQL fence proof: group RPM admits exactly the frozen ceili
   } finally {
     if (created) await pool.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
     await pool.end();
+  }
+});
+
+test('the authority SQL inherits project limits for keys without explicit limits', () => {
+  // M1/S2 "限额默认平台值": keys created through the default form carry NULL
+  // key-level limits; the admission authority must COALESCE them from the
+  // project inference policy instead of failing closed. Explicit key limits
+  // still win (COALESCE takes the key column first), and the key tier can
+  // never authorize more than the project tier.
+  const source = readFileSync(resolve(process.cwd(), 'src/saas/gateway/postgres-preparation-capacity.ts'), 'utf8');
+  const authoritySql = source.slice(source.indexOf('SELECT t.status AS tenant_status'));
+  for (const column of ['requests_per_minute', 'tokens_per_minute', 'max_concurrent_requests']) {
+    assert.ok(
+      authoritySql.includes(`COALESCE(k.${column}, policy.${column})`),
+      `key ${column} must COALESCE from the project policy`,
+    );
   }
 });
