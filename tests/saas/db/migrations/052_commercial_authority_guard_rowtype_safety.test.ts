@@ -121,6 +121,7 @@ test('migration 052 uses initialized scalar snapshots for optional commercial pr
       152,
       153,
       154,
+      155,
     ],
   );
   assert.equal(COMMERCIAL_AUTHORITY_GUARD_ROWTYPE_SAFETY_SAAS_MIGRATION.sql, expected);

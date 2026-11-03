@@ -4,7 +4,7 @@ import { SAAS_MIGRATIONS } from '../../../../src/saas/db/migrations/001_initial_
 import { BOUNDED_FAST_GATEWAY_BUDGET_LIMIT_SEARCH_PATH_SAAS_MIGRATION as migration } from '../../../../src/saas/db/migrations/148_bounded_fast_gateway_budget_limit_search_path.js';
 
 test('148 replaces only the deferred ceiling trigger function, binding it to a schema-qualified search_path', () => {
-  assert.equal(SAAS_MIGRATIONS.at(-7), migration);
+  assert.equal(SAAS_MIGRATIONS.at(-8), migration);
   assert.equal(migration.version, 148);
   assert.match(migration.sql, /CREATE OR REPLACE FUNCTION saas_fast_global_budget_limit\(\) RETURNS trigger/);
   assert.match(

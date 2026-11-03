@@ -37,8 +37,8 @@ test('061 is one isolated forward-only candidate, unregistered at stage1', () =>
   assert.deepEqual(Object.keys(migration).sort(), ['name', 'sql', 'version']);
   assert.equal(
     SAAS_MIGRATIONS.length,
-    135,
-    'Only 001-060, 063, 080-085 and 087-154 are registered; staged 061 and reserved 062/064-079/086 remain excluded',
+    136,
+    'Only 001-060, 063, 080-085 and 087-155 are registered; staged 061 and reserved 062/064-079/086 remain excluded',
   );
   assert.deepEqual(
     SAAS_MIGRATIONS.map(({ version }) => version),
@@ -131,6 +131,7 @@ test('061 is one isolated forward-only candidate, unregistered at stage1', () =>
       152,
       153,
       154,
+      155,
     ],
   );
   assert.equal(SAAS_MIGRATIONS[60], USAGE_CORRECTIONS_SAAS_MIGRATION);

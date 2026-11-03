@@ -7,19 +7,19 @@ import { MARKETING_ANNOUNCEMENT_FANOUT_SAAS_MIGRATION } from '../../../../src/sa
 const migration = MARKETING_ANNOUNCEMENT_FANOUT_SAAS_MIGRATION;
 const commands = migration.sql.replace(/\/\*[\s\S]*?\*\//g, '').replace(/--[^\n]*/g, '');
 
-test('095 registers after 094 with the documented gaps; 154 is the current head', () => {
+test('095 registers after 094 with the documented gaps; 155 is the current head', () => {
   assert.equal(migration.version, 95);
   assert.equal(migration.name, 'marketing_announcement_fanout_cursor');
   assert.deepEqual(Object.keys(migration).sort(), ['name', 'sql', 'version']);
   const registered = SAAS_MIGRATIONS.map(({ version }) => version);
-  assert.deepEqual(registered.slice(-12), [143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154]);
+  assert.deepEqual(registered.slice(-13), [143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155]);
   for (let skipped = 64; skipped <= 79; skipped += 1) {
     assert.equal(registered.includes(skipped), false);
   }
   // Later forwards retain their order through 143 journal, 144 audited
   // resolution, 147 bounded-budget, the 148 search-path forward and the
   // current 153 user-risk head.
-  assert.equal(registered.at(-1), 154);
+  assert.equal(registered.at(-1), 155);
   assert.equal(SAAS_MIGRATIONS[75], migration);
 });
 

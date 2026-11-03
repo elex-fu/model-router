@@ -113,6 +113,7 @@ import { PROVIDER_ACCOUNT_COST_SAAS_MIGRATION } from '../../../src/saas/db/migra
 import { ACCOUNT_BAN_LEDGER_SAAS_MIGRATION } from '../../../src/saas/db/migrations/152_account_ban_ledger.js';
 import { USER_RISK_CONTROLS_SAAS_MIGRATION } from '../../../src/saas/db/migrations/153_user_risk_controls.js';
 import { USER_KEY_SUSPENSION_SAAS_MIGRATION } from '../../../src/saas/db/migrations/154_user_key_suspension.js';
+import { CODEX_TRUSTED_BOUND_PROFILES_SAAS_MIGRATION } from '../../../src/saas/db/migrations/155_codex_trusted_bound_profiles.js';
 
 test('SaaS migration registry keeps a stable append order with only documented gaps', () => {
   assert.deepEqual(
@@ -263,12 +264,13 @@ test('SaaS migration registry keeps a stable append order with only documented g
       149,
       // Operator/ops forwards: 150 bulk account import, 151 provider account
       // cost, 152 account ban ledger, 153 user risk controls, 154 user key
-      // suspension.
+      // suspension, 155 codex trusted-bound profiles.
       150,
       151,
       152,
       153,
       154,
+      155,
     ],
   );
 });
@@ -332,7 +334,7 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
     TLS_FINGERPRINT_PROFILES_SAAS_MIGRATION,
   ];
 
-  assert.equal(SAAS_MIGRATIONS.length, 135);
+  assert.equal(SAAS_MIGRATIONS.length, 136);
   assert.deepEqual(
     SAAS_MIGRATIONS.slice(42).map(({ name }) => name),
     [
@@ -429,6 +431,7 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
       'account_ban_ledger',
       'user_risk_controls',
       'user_key_suspension',
+      'codex_trusted_bound_profiles',
     ],
   );
   assert.deepEqual(
@@ -544,16 +547,17 @@ test('migrations 043-060 append in order, followed by 063 usage_corrections, 080
       149,
       // Operator/ops forwards: 150 bulk account import, 151 provider account
       // cost, 152 account ban ledger, 153 user risk controls, 154 user key
-      // suspension.
+      // suspension, 155 codex trusted-bound profiles.
       150,
       151,
       152,
       153,
       154,
+      155,
     ],
   );
-  assert.equal(new Set(SAAS_MIGRATIONS.map(({ version }) => version)).size, 135);
-  assert.equal(new Set(SAAS_MIGRATIONS.map(({ name }) => name)).size, 135);
+  assert.equal(new Set(SAAS_MIGRATIONS.map(({ version }) => version)).size, 136);
+  assert.equal(new Set(SAAS_MIGRATIONS.map(({ name }) => name)).size, 136);
   appendedMigrations.forEach((migration, index) => {
     assert.equal(SAAS_MIGRATIONS[index + 42], migration);
   });
@@ -642,8 +646,8 @@ test('059 preserves its exact forward after frozen 001-058 without changing the 
   );
 });
 
-test('060 follows the complete frozen 001-059 prefix and 154 is the current head', () => {
-  assert.equal(SAAS_MIGRATIONS.length, 135);
+test('060 follows the complete frozen 001-059 prefix and 155 is the current head', () => {
+  assert.equal(SAAS_MIGRATIONS.length, 136);
   assert.deepEqual(
     SAAS_MIGRATIONS.slice(0, 59).map(({ version }) => version),
     Array.from({ length: 59 }, (_, index) => index + 1),
@@ -726,6 +730,7 @@ test('060 follows the complete frozen 001-059 prefix and 154 is the current head
     ACCOUNT_BAN_LEDGER_SAAS_MIGRATION,
     USER_RISK_CONTROLS_SAAS_MIGRATION,
     USER_KEY_SUSPENSION_SAAS_MIGRATION,
+    CODEX_TRUSTED_BOUND_PROFILES_SAAS_MIGRATION,
   ]);
   assert.equal(SAAS_MIGRATIONS[59]?.version, 60);
   assert.equal(SAAS_MIGRATIONS[59]?.name, 'prepared_evidence_claim_generated_account');
@@ -925,7 +930,7 @@ test('migrations 029-033 preserve append order without constraining later migrat
   assert.ok(SAAS_MIGRATIONS.slice(33).every(({ version }) => version > 33));
 });
 
-test('134-154 are the exact runtime, operations and P0 forwards after the frozen 133 tail', () => {
+test('134-155 are the exact runtime, operations and P0 forwards after the frozen 133 tail', () => {
   assert.deepEqual(SAAS_MIGRATIONS.slice(114), [
     RESPONSES_COMPACT_OPERATION_SAAS_MIGRATION,
     KIMI_CODING_QUOTA_SNAPSHOTS_SAAS_MIGRATION,
@@ -948,6 +953,7 @@ test('134-154 are the exact runtime, operations and P0 forwards after the frozen
     ACCOUNT_BAN_LEDGER_SAAS_MIGRATION,
     USER_RISK_CONTROLS_SAAS_MIGRATION,
     USER_KEY_SUSPENSION_SAAS_MIGRATION,
+    CODEX_TRUSTED_BOUND_PROFILES_SAAS_MIGRATION,
   ]);
   assert.deepEqual(
     SAAS_MIGRATIONS.slice(114).map(({ version, name }) => [version, name]),
@@ -973,6 +979,7 @@ test('134-154 are the exact runtime, operations and P0 forwards after the frozen
       [152, 'account_ban_ledger'],
       [153, 'user_risk_controls'],
       [154, 'user_key_suspension'],
+      [155, 'codex_trusted_bound_profiles'],
     ],
   );
   assert.equal(

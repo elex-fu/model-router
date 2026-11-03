@@ -1140,7 +1140,13 @@ BEGIN
       ('saas_user_anomaly_detections', 'INSERT', 'user_id tenant_id api_key_id kind window_start observed_at facts'),
       ('saas_user_risk_markers', 'SELECT', 'user_id stage requests_per_minute revision updated_at'),
       ('saas_user_risk_markers', 'INSERT', 'user_id stage requests_per_minute revision updated_at'),
-      ('saas_user_risk_markers', 'UPDATE', 'stage requests_per_minute revision updated_at')
+      ('saas_user_risk_markers', 'UPDATE', 'stage requests_per_minute revision updated_at'),
+      -- 155 Codex trusted-bound admission: the control plane owns the whole
+      -- submission/approval lifecycle; approval is the only path to resolver
+      -- visibility (the gateway reads the approved-scope partial index).
+      ('saas_codex_trusted_bound_profiles', 'SELECT', 'id digest endpoint product_id model operation transport continuation_mode bounds backend_revision evidence_version evidence_reference valid_from_ms expires_at_ms state submitted_by_user_id approved_by_user_id approved_at created_at updated_at'),
+      ('saas_codex_trusted_bound_profiles', 'INSERT', 'digest endpoint product_id model operation transport continuation_mode bounds backend_revision evidence_version evidence_reference valid_from_ms expires_at_ms state submitted_by_user_id'),
+      ('saas_codex_trusted_bound_profiles', 'UPDATE', 'state approved_by_user_id approved_at updated_at')
     ) AS manifest(table_name, privilege_type, column_names)
   LOOP
     SELECT pg_catalog.string_agg(pg_catalog.format('%I', attribute.attname), ', ' ORDER BY attribute.attnum)
@@ -2153,7 +2159,26 @@ BEGIN
       ('saas_user_risk_observations', 'api_key_id', 'INSERT'),
       ('saas_user_risk_observations', 'client_address_digest', 'INSERT'),
       ('saas_user_risk_observations', 'public_model', 'INSERT'),
-      ('saas_user_risk_observations', 'protocol', 'INSERT'), ('saas_user_risk_observations', 'occurred_at', 'INSERT')
+      ('saas_user_risk_observations', 'protocol', 'INSERT'), ('saas_user_risk_observations', 'occurred_at', 'INSERT'),
+      -- 155 Codex trusted-bound admission: the gateway resolver refresh reads
+      -- only approved rows via the approved-scope partial index. Admission
+      -- content and evidence identity only — no lineage columns
+      -- (submitted_by/approved_by/approved_at), which stay control-plane
+      -- audit surface.
+      ('saas_codex_trusted_bound_profiles', 'digest', 'SELECT'),
+      ('saas_codex_trusted_bound_profiles', 'endpoint', 'SELECT'),
+      ('saas_codex_trusted_bound_profiles', 'product_id', 'SELECT'),
+      ('saas_codex_trusted_bound_profiles', 'model', 'SELECT'),
+      ('saas_codex_trusted_bound_profiles', 'operation', 'SELECT'),
+      ('saas_codex_trusted_bound_profiles', 'transport', 'SELECT'),
+      ('saas_codex_trusted_bound_profiles', 'continuation_mode', 'SELECT'),
+      ('saas_codex_trusted_bound_profiles', 'bounds', 'SELECT'),
+      ('saas_codex_trusted_bound_profiles', 'backend_revision', 'SELECT'),
+      ('saas_codex_trusted_bound_profiles', 'evidence_version', 'SELECT'),
+      ('saas_codex_trusted_bound_profiles', 'evidence_reference', 'SELECT'),
+      ('saas_codex_trusted_bound_profiles', 'valid_from_ms', 'SELECT'),
+      ('saas_codex_trusted_bound_profiles', 'expires_at_ms', 'SELECT'),
+      ('saas_codex_trusted_bound_profiles', 'state', 'SELECT')
     ) AS manifest(table_name, column_name, privilege_type)
     GROUP BY manifest.table_name, manifest.privilege_type
   LOOP

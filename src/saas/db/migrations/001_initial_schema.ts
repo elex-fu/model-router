@@ -132,6 +132,7 @@ import { PROVIDER_ACCOUNT_COST_SAAS_MIGRATION } from './151_provider_account_cos
 import { ACCOUNT_BAN_LEDGER_SAAS_MIGRATION } from './152_account_ban_ledger.js';
 import { USER_RISK_CONTROLS_SAAS_MIGRATION } from './153_user_risk_controls.js';
 import { USER_KEY_SUSPENSION_SAAS_MIGRATION } from './154_user_key_suspension.js';
+import { CODEX_TRUSTED_BOUND_PROFILES_SAAS_MIGRATION } from './155_codex_trusted_bound_profiles.js';
 
 export interface SaasMigration {
   version: number;
@@ -835,4 +836,8 @@ export const SAAS_MIGRATIONS: readonly SaasMigration[] = [
   // Reversible key pause: the anomaly ladder's second rung suspends instead
   // of revoking; revocation stays terminal.
   USER_KEY_SUSPENSION_SAAS_MIGRATION,
+  // Codex subscription supply admission: the operator-side trusted-bound
+  // profile ledger behind the resolver seam. The frozen in-code registry
+  // stays empty; only control-plane approval admits a row.
+  CODEX_TRUSTED_BOUND_PROFILES_SAAS_MIGRATION,
 ];

@@ -4228,6 +4228,58 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'updated_at',
   ]),
   ...columnGrants('saas_user_risk_markers', 'UPDATE', ['stage', 'requests_per_minute', 'revision', 'updated_at']),
+  // 155 Codex trusted-bound admission: the control plane owns the whole
+  // submission/approval lifecycle; the digest is recomputed server-side from
+  // stored content. Approval is the only path to resolver visibility.
+  ...columnGrants('saas_codex_trusted_bound_profiles', 'SELECT', [
+    'id',
+    'digest',
+    'endpoint',
+    'product_id',
+    'model',
+    'operation',
+    'transport',
+    'continuation_mode',
+    'bounds',
+    'backend_revision',
+    'evidence_version',
+    'evidence_reference',
+    'valid_from_ms',
+    'expires_at_ms',
+    'state',
+    'submitted_by_user_id',
+    'approved_by_user_id',
+    'approved_at',
+    'created_at',
+    'updated_at',
+  ]),
+  // Submission insert (state is always set explicitly; id and the timestamps
+  // ride their column defaults).
+  ...columnGrants('saas_codex_trusted_bound_profiles', 'INSERT', [
+    'digest',
+    'endpoint',
+    'product_id',
+    'model',
+    'operation',
+    'transport',
+    'continuation_mode',
+    'bounds',
+    'backend_revision',
+    'evidence_version',
+    'evidence_reference',
+    'valid_from_ms',
+    'expires_at_ms',
+    'state',
+    'submitted_by_user_id',
+  ]),
+  // Approval / rejection / retirement transitions only — the admission
+  // content itself is immutable after submission.
+  ...columnGrants('saas_codex_trusted_bound_profiles', 'UPDATE', [
+    'state',
+    'approved_by_user_id',
+    'approved_at',
+    'updated_at',
+  ]),
 ] as const;
 
 /** Table-level DELETE is the narrowest PostgreSQL privilege for these SQL statements. */
@@ -5819,6 +5871,28 @@ export const SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS: readonly SaasGatewayColumnGrant
   ['saas_user_risk_observations', 'public_model', 'INSERT'],
   ['saas_user_risk_observations', 'protocol', 'INSERT'],
   ['saas_user_risk_observations', 'occurred_at', 'INSERT'],
+  // 155 Codex trusted-bound admission: the gateway resolver refresh reads
+  // only approved rows via the approved-scope partial index. Admission
+  // content and evidence identity only — lineage columns stay
+  // control-plane audit surface.
+  ...(
+    [
+      'digest',
+      'endpoint',
+      'product_id',
+      'model',
+      'operation',
+      'transport',
+      'continuation_mode',
+      'bounds',
+      'backend_revision',
+      'evidence_version',
+      'evidence_reference',
+      'valid_from_ms',
+      'expires_at_ms',
+      'state',
+    ] as const
+  ).map((column) => ['saas_codex_trusted_bound_profiles', column, 'SELECT'] as const),
 ] as const;
 
 const GATEWAY_COLUMN_GRANTS = SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS;
@@ -5828,7 +5902,12 @@ const GATEWAY_FULL_INSERT_TABLES = ['saas_prepared_request_evidence'] as const;
 // §4.2 async image tasks + (124) batch-4 §4.3 async video tasks: the gateway
 // owns the task rows' expiry purge (Postgres*TaskStore.purgeExpired) alongside
 // the spending-freeze DELETE.
-export const GATEWAY_DELETE_TABLES = ['saas_billing_spending_freezes', 'saas_image_tasks', 'saas_video_tasks', 'saas_responses_continuation_contexts'] as const;
+export const GATEWAY_DELETE_TABLES = [
+  'saas_billing_spending_freezes',
+  'saas_image_tasks',
+  'saas_video_tasks',
+  'saas_responses_continuation_contexts',
+] as const;
 const GATEWAY_SEQUENCE = 'saas_provider_account_lease_fencing_seq' as const;
 
 function sqlText(value: string): string {
