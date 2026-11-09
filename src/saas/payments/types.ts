@@ -324,8 +324,13 @@ export interface ServicePlanPaymentOrderRecord extends ServicePlanOrderRecord {
 
 /** The payment domain may only fulfill through this narrow existing plan-domain seam. */
 export interface ServicePlanPaymentService {
-  createOrder(context: TenantContext, input: CreateServicePlanOrderInput,
-    paymentAdmission?: (executor: SqlExecutor, input: { readonly orderId: string; readonly currency: string }) => Promise<{ readonly bindingId: string; readonly providerKey: string; readonly merchantId: string }>,
+  createOrder(
+    context: TenantContext,
+    input: CreateServicePlanOrderInput,
+    paymentAdmission?: (
+      executor: SqlExecutor,
+      input: { readonly orderId: string; readonly currency: string },
+    ) => Promise<{ readonly bindingId: string; readonly providerKey: string; readonly merchantId: string }>,
   ): Promise<ServicePlanOrderRecord>;
   getOrder(context: TenantContext, orderId: string): Promise<ServicePlanOrderRecord | null>;
   fulfillVerified(input: VerifiedServicePlanFulfillmentInput): Promise<FulfilledServicePlanResult>;

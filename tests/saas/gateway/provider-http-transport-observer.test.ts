@@ -73,8 +73,8 @@ function options(overrides: Partial<ProviderHttpTransportOptions> = {}): Provide
     endpointPolicy: { allowedHosts: ['provider.example'], allowedPorts: [443] },
     resolveDispatchProfile: async () => ({ url: 'https://provider.example/v1/dispatch' }),
     resolveAddresses: async () => [{ address: '8.8.8.8', family: 4 }],
-    resolveCredential: async (_input, useCredential) =>
-      useCredential({ headerName: 'authorization', value: 'transient-observer-credential' }),
+    resolveCredential: async (_input, withHeader) =>
+      withHeader({ headerName: 'authorization', value: 'transient-observer-credential' }),
     createConnector: () => ({ dispatcher, close: async () => {}, destroy: async () => {} }),
     ...overrides,
   };
@@ -152,10 +152,10 @@ test('seven phases preserve serial ordering and stop credential preparation befo
         egressProxy: { url: 'http://proxy.example:8080' },
       }),
       resolveFixedRequestHeaders: async () => ({ 'anthropic-version': '2023-06-01' }),
-      resolveCredential: async (_input, useCredential) => {
-        let result: Awaited<ReturnType<typeof useCredential>>;
+      resolveCredential: async (_input, withHeader) => {
+        let result: Awaited<ReturnType<typeof withHeader>>;
         try {
-          result = await useCredential({ headerName: 'authorization', value: credential });
+          result = await withHeader({ headerName: 'authorization', value: credential });
         } finally {
           credential.fill(0);
         }
@@ -290,8 +290,8 @@ test('a failing phase emits one bounded error without starting later phases', as
       stage: 'transport-credential-prepare',
       code: 'CREDENTIAL_INVALID',
       overrides: {
-        resolveCredential: async (_input, useCredential) =>
-          useCredential({ headerName: 'authorization', value: 'invalid\ncredential' }),
+        resolveCredential: async (_input, withHeader) =>
+          withHeader({ headerName: 'authorization', value: 'invalid\ncredential' }),
       },
     },
     {
@@ -333,8 +333,8 @@ test('resolver cleanup failure cannot reopen an already completed credential pha
     new ProviderHttpTransport(
       options({
         observe: (value) => observations.push(value),
-        resolveCredential: async (_input, useCredential) => {
-          await useCredential({ headerName: 'authorization', value: 'transient-observer-credential' });
+        resolveCredential: async (_input, withHeader) => {
+          await withHeader({ headerName: 'authorization', value: 'transient-observer-credential' });
           throw new Error('resolver cleanup failure');
         },
       }),

@@ -52,12 +52,21 @@ let ownedNativePoolBudget: { readonly maximum: number; readonly applicationName:
 
 /** Private supervisor startup capability. No default-mode policy or per-query interception. */
 export function configureSaasNativePoolBudget(maximum: number, applicationName: string): void {
-  if (!Number.isSafeInteger(maximum) || maximum < 1 || !/^[a-zA-Z0-9:_-]{1,63}$/.test(applicationName) ||
-    ownedNativePoolBudget || ownedNativePools.size) throw new Error('BOUNDED_GATEWAY_NATIVE_POOL_BUDGET_CONFLICT');
+  if (
+    !Number.isSafeInteger(maximum) ||
+    maximum < 1 ||
+    !/^[a-zA-Z0-9:_-]{1,63}$/.test(applicationName) ||
+    ownedNativePoolBudget ||
+    ownedNativePools.size
+  )
+    throw new Error('BOUNDED_GATEWAY_NATIVE_POOL_BUDGET_CONFLICT');
   ownedNativePoolBudget = Object.freeze({ maximum, applicationName });
 }
 
-export function ownedSaasNativePoolSnapshot(): readonly { readonly maximum: number; readonly applicationName: string }[] {
+export function ownedSaasNativePoolSnapshot(): readonly {
+  readonly maximum: number;
+  readonly applicationName: string;
+}[] {
   return [...ownedNativePools].map((entry) => Object.freeze({ ...entry }));
 }
 
@@ -257,8 +266,12 @@ class NodePostgresPool implements SaasDatabasePool {
 
   constructor(config: PoolConfig) {
     this.budgetEntry = Object.freeze({ maximum: config.max ?? 10, applicationName: config.application_name ?? '' });
-    if (ownedNativePoolBudget && (this.budgetEntry.applicationName !== ownedNativePoolBudget.applicationName ||
-      [...ownedNativePools].reduce((sum, entry) => sum + entry.maximum, this.budgetEntry.maximum) > ownedNativePoolBudget.maximum)) {
+    if (
+      ownedNativePoolBudget &&
+      (this.budgetEntry.applicationName !== ownedNativePoolBudget.applicationName ||
+        [...ownedNativePools].reduce((sum, entry) => sum + entry.maximum, this.budgetEntry.maximum) >
+          ownedNativePoolBudget.maximum)
+    ) {
       throw new Error('BOUNDED_GATEWAY_NATIVE_POOL_BUDGET_EXHAUSTED');
     }
     this.pool = new Pool(config);

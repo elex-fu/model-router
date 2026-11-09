@@ -212,7 +212,9 @@ class CapacityPolicyDatabase implements SaasDatabase {
           'U cannot be acquired after K',
         );
         const priorUsers = preceding.filter(
-          (entry) => entry.sql === EXCLUSIVE_FENCE && (entry.values[0] === saasAdvisoryKey.user(USER_ID) || entry.values[0] === saasAdvisoryKey.user(MEMBER_ID)),
+          (entry) =>
+            entry.sql === EXCLUSIVE_FENCE &&
+            (entry.values[0] === saasAdvisoryKey.user(USER_ID) || entry.values[0] === saasAdvisoryKey.user(MEMBER_ID)),
         );
         assert.equal(
           priorUsers.some((entry) => entry.values[0] === key),
@@ -245,7 +247,10 @@ class CapacityPolicyDatabase implements SaasDatabase {
         );
       } else {
         assert.equal(
-          preceding.some((entry) => entry.values[0] === saasAdvisoryKey.user(USER_ID) || entry.values[0] === saasAdvisoryKey.user(MEMBER_ID)),
+          preceding.some(
+            (entry) =>
+              entry.values[0] === saasAdvisoryKey.user(USER_ID) || entry.values[0] === saasAdvisoryKey.user(MEMBER_ID),
+          ),
           false,
           'hint precedes the user layer',
         );

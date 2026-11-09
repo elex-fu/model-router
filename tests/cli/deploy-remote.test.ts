@@ -1,6 +1,15 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { test } from 'node:test';
@@ -19,8 +28,21 @@ function fixture() {
   writeFileSync(join(root, '.gitignore'), '/deploy/remote-server*.env\n');
   execFileSync('git', ['init', '-q', root]);
   execFileSync('git', ['-C', root, 'add', '.']);
-  execFileSync('git', ['-C', root, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test',
-    '-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgSign=false', 'commit', '-qm', 'fixture']);
+  execFileSync('git', [
+    '-C',
+    root,
+    '-c',
+    'user.name=Fixture',
+    '-c',
+    'user.email=fixture@example.test',
+    '-c',
+    'core.hooksPath=/dev/null',
+    '-c',
+    'commit.gpgSign=false',
+    'commit',
+    '-qm',
+    'fixture',
+  ]);
 
   const mock = String.raw`#!/usr/bin/env node
 const fs = require('node:fs');
@@ -64,21 +86,41 @@ process.exit(2);
 `;
   for (const command of ['ssh', 'sshpass', 'rsync', 'docker']) writeFileSync(join(bin, command), mock, { mode: 0o755 });
   const config = join(root, 'deploy/remote-server.local.env');
-  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, F_EVENTS: events, F_MANIFEST: join(root, 'manifest') };
+  const env = {
+    ...process.env,
+    PATH: `${bin}:${process.env.PATH}`,
+    F_EVENTS: events,
+    F_MANIFEST: join(root, 'manifest'),
+  };
   return {
-    root, remote, config,
+    root,
+    remote,
+    config,
     configure(extra = '', kind = 'self-hosted') {
-      writeFileSync(config, `SERVER_IP=fixture.invalid\nSERVER_PORT=0022\nSERVER_USERNAME=fixture\nSERVER_DEPLOY_DIR=${remote}\nDEPLOYMENT_KIND=${kind}\n${extra}`);
+      writeFileSync(
+        config,
+        `SERVER_IP=fixture.invalid\nSERVER_PORT=0022\nSERVER_USERNAME=fixture\nSERVER_DEPLOY_DIR=${remote}\nDEPLOYMENT_KIND=${kind}\n${extra}`,
+      );
     },
     run(args: string[], overrides: Record<string, string> = {}) {
       return spawnSync('/bin/bash', [join(root, 'scripts/deploy-remote.sh'), ...args], {
-        cwd: root, env: { ...env, ...overrides }, encoding: 'utf8', timeout: 15_000,
+        cwd: root,
+        env: { ...env, ...overrides },
+        encoding: 'utf8',
+        timeout: 15_000,
       });
     },
     events(): { tool: string; args: string[] }[] {
-      return existsSync(events) ? readFileSync(events, 'utf8').trim().split('\n').map(line => JSON.parse(line)) : [];
+      return existsSync(events)
+        ? readFileSync(events, 'utf8')
+            .trim()
+            .split('\n')
+            .map((line) => JSON.parse(line))
+        : [];
     },
-    cleanup() { rmSync(root, { recursive: true, force: true }); },
+    cleanup() {
+      rmSync(root, { recursive: true, force: true });
+    },
   };
 }
 
@@ -92,7 +134,9 @@ test('remote config init is private, does not overwrite, and rejects blank param
     assert.equal(readFileSync(f.config, 'utf8'), original);
     assert.notEqual(f.run(['--check']).status, 0);
     assert.deepEqual(f.events(), []);
-  } finally { f.cleanup(); }
+  } finally {
+    f.cleanup();
+  }
 });
 
 test('password is literal, supplied via a descriptor, and absent from output and command arguments', () => {
@@ -106,9 +150,11 @@ test('password is literal, supplied via a descriptor, and absent from output and
     assert.match(result.stdout, /SSH authentication: OK/);
     assert.equal(existsSync(marker), false);
     assert.equal((result.stdout + result.stderr + JSON.stringify(f.events())).includes(secret), false);
-    assert.ok(f.events().some(event => event.tool === 'sshpass' && event.args[0] === '-d'));
+    assert.ok(f.events().some((event) => event.tool === 'sshpass' && event.args[0] === '-d'));
     assert.equal(statSync(f.config).mode & 0o777, 0o600);
-  } finally { f.cleanup(); }
+  } finally {
+    f.cleanup();
+  }
 });
 
 test('private key with spaces takes priority over password and does not use sshpass', () => {
@@ -119,11 +165,16 @@ test('private key with spaces takes priority over password and does not use sshp
     f.configure(`SERVER_SSH_KEY=${key}\nSERVER_PASSWORD=fixture-secret-unused\n`);
     const result = f.run(['--check']);
     assert.equal(result.status, 0, result.stderr);
-    assert.equal(f.events().some(event => event.tool === 'sshpass'), false);
-    const master = f.events().find(event => event.tool === 'ssh' && event.args.includes('-M'))!;
+    assert.equal(
+      f.events().some((event) => event.tool === 'sshpass'),
+      false,
+    );
+    const master = f.events().find((event) => event.tool === 'ssh' && event.args.includes('-M'))!;
     assert.equal(master.args[master.args.indexOf('-i') + 1], key);
     assert.ok(master.args.includes('StrictHostKeyChecking=ask'));
-  } finally { f.cleanup(); }
+  } finally {
+    f.cleanup();
+  }
 });
 
 test('upload excludes even tracked secrets, preserves remote settings and removes previously deployed stale source', () => {
@@ -135,7 +186,15 @@ test('upload excludes even tracked secrets, preserves remote settings and remove
     writeFileSync(join(f.root, 'source.js'), 'current');
     writeFileSync(join(f.root, 'deploy/accidental.env'), 'fixture-secret-private');
     writeFileSync(join(f.root, 'deploy/recovery.pem'), 'fixture-key');
-    execFileSync('git', ['-C', f.root, 'add', 'source.js', 'deploy/accidental.env', 'deploy/recovery.pem', 'arbitrary-private-key-name']);
+    execFileSync('git', [
+      '-C',
+      f.root,
+      'add',
+      'source.js',
+      'deploy/accidental.env',
+      'deploy/recovery.pem',
+      'arbitrary-private-key-name',
+    ]);
     writeFileSync(join(f.remote, 'old.js'), 'stale');
     writeFileSync(join(f.remote, 'settings.env'), 'remote-settings');
     writeFileSync(join(f.remote, '.model-router-deploy-files'), 'old.js\0settings.env\0');
@@ -144,14 +203,24 @@ test('upload excludes even tracked secrets, preserves remote settings and remove
     const uploaded = readFileSync(join(f.root, 'manifest'), 'utf8').split('\0');
     assert.ok(uploaded.includes('source.js'));
     assert.ok(uploaded.includes('deploy/remote-server.env.example'));
-    for (const file of ['deploy/remote-server.local.env', 'deploy/accidental.env', 'deploy/recovery.pem', 'arbitrary-private-key-name']) {
+    for (const file of [
+      'deploy/remote-server.local.env',
+      'deploy/accidental.env',
+      'deploy/recovery.pem',
+      'arbitrary-private-key-name',
+    ]) {
       assert.equal(uploaded.includes(file), false, file);
       assert.equal(existsSync(join(f.remote, file)), false, file);
     }
     assert.equal(existsSync(join(f.remote, 'old.js')), false);
     assert.equal(readFileSync(join(f.remote, 'settings.env'), 'utf8'), 'remote-settings');
-    assert.equal(f.events().some(event => event.tool === 'docker'), false);
-  } finally { f.cleanup(); }
+    assert.equal(
+      f.events().some((event) => event.tool === 'docker'),
+      false,
+    );
+  } finally {
+    f.cleanup();
+  }
 });
 
 test('verification is read-only and fails for missing, unhealthy, or HTTP-unready services', () => {
@@ -165,10 +234,24 @@ test('verification is read-only and fails for missing, unhealthy, or HTTP-unread
     assert.notEqual(f.run(['--verify'], { F_MISSING: 'yes' }).status, 0);
     assert.notEqual(f.run(['--verify'], { F_HTTP_EXIT: '1' }).status, 0);
     const events = f.events();
-    assert.equal(events.some(event => event.tool === 'rsync'), false);
-    assert.equal(events.some(event => event.tool === 'docker' && event.args.some(arg => ['build', 'up', 'down', 'run'].includes(arg))), false);
-    assert.ok(events.some(event => event.tool === 'docker' && event.args[0] === 'exec' && event.args.at(-1)!.includes('/readyz')));
-  } finally { f.cleanup(); }
+    assert.equal(
+      events.some((event) => event.tool === 'rsync'),
+      false,
+    );
+    assert.equal(
+      events.some(
+        (event) => event.tool === 'docker' && event.args.some((arg) => ['build', 'up', 'down', 'run'].includes(arg)),
+      ),
+      false,
+    );
+    assert.ok(
+      events.some(
+        (event) => event.tool === 'docker' && event.args[0] === 'exec' && event.args.at(-1)!.includes('/readyz'),
+      ),
+    );
+  } finally {
+    f.cleanup();
+  }
 });
 
 test('deploy builds and starts, then propagates readiness failure', () => {
@@ -178,9 +261,11 @@ test('deploy builds and starts, then propagates readiness failure', () => {
     const result = f.run(['--deploy', '--yes'], { F_HTTP_EXIT: '1' });
     assert.notEqual(result.status, 0);
     assert.doesNotMatch(result.stdout, /HTTP readiness: PASS|Server action completed/);
-    const docker = f.events().filter(event => event.tool === 'docker');
-    assert.ok(docker.some(event => event.args.includes('build')));
-    assert.ok(docker.some(event => event.args.includes('up') && event.args.includes('--wait')));
-    assert.ok(docker.some(event => event.args[0] === 'exec'));
-  } finally { f.cleanup(); }
+    const docker = f.events().filter((event) => event.tool === 'docker');
+    assert.ok(docker.some((event) => event.args.includes('build')));
+    assert.ok(docker.some((event) => event.args.includes('up') && event.args.includes('--wait')));
+    assert.ok(docker.some((event) => event.args[0] === 'exec'));
+  } finally {
+    f.cleanup();
+  }
 });

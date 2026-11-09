@@ -8,7 +8,7 @@ import { saasAdvisoryKey, WALLET_FENCE_SQL } from '../../../../src/saas/db/advis
 import { createSaasDatabase } from '../../../../src/saas/db/index.js';
 import { runSaasMigrations, verifySaasMigrations } from '../../../../src/saas/db/migrate.js';
 import { SAAS_MIGRATIONS } from '../../../../src/saas/db/migrations/001_initial_schema.js';
-import type { SaasDatabasePool, SqlExecutor, SqlResult } from '../../../../src/saas/db/types.js';
+import type { SaasDatabase, SaasDatabasePool, SqlExecutor, SqlResult } from '../../../../src/saas/db/types.js';
 import {
   type FastIntent,
   type FastReceiptInput,
@@ -210,6 +210,14 @@ test('populated schema145 upgrades through the real migrator without rewriting m
   assert.equal(
     (
       await migrator.query<{ marker: string | null }>(
+        "SELECT to_regclass('saas_fast_gateway_credit_budgets') AS marker",
+      )
+    ).rows[0]?.marker,
+    null,
+  );
+  assert.equal(
+    (
+      await migrator.query<{ marker: string | null }>(
         "SELECT to_regclass('saas_fast_receipt_liability_releases') AS marker",
       )
     ).rows[0].marker,
@@ -244,7 +252,29 @@ test('populated schema145 upgrades through the real migrator without rewriting m
       idempotencyKey: randomUUID(),
     }),
   );
-  const journal = new PostgresFastGatewayJournal(gateway, {
+  let schema145 = true;
+  const journalDatabase: SaasDatabase = {
+    ...gateway,
+    transaction: (work) =>
+      gateway.transaction((tx) =>
+        work({
+          ...tx,
+          query: <Row>(sql: string, values?: readonly unknown[]) => {
+            // The legacy journal had no global budget lookup. Keep all legacy
+            // money and intent writes on real PostgreSQL with its guards active.
+            if (
+              schema145 &&
+              sql.trim() ===
+                'SELECT credit_cap_minor_units::text,allocated_minor_units::text FROM saas_fast_gateway_credit_budgets\n     WHERE tenant_id=$1 AND currency=$2'
+            ) {
+              return Promise.resolve<SqlResult<Row>>({ rows: [], rowCount: 0 });
+            }
+            return tx.query<Row>(sql, values);
+          },
+        }),
+      ),
+  };
+  const journal = new PostgresFastGatewayJournal(journalDatabase, {
     allocationOwner: owner,
     allocationTrancheMinorUnits: '500',
     allocationStripes: 1,
@@ -365,15 +395,18 @@ test('populated schema145 upgrades through the real migrator without rewriting m
   assert.equal(unknownJob.state, 'blocked');
   assert.equal(await job(missing.intent.id), undefined);
 
-  await runSaasMigrations(pool); // Actual checksum/advisory-lock/transactional runner appends146 and147.
+  await runSaasMigrations(pool);
   await verifySaasMigrations(pool);
+  schema145 = false;
   const afterHistory = await history();
   assert.deepEqual(
     afterHistory.filter(({ version }) => version <= 145),
     beforeHistory,
   );
-  assert.equal(afterHistory.length, 128);
-  assert.equal(afterHistory.at(-1)?.version, 147);
+  assert.deepEqual(
+    afterHistory.map(({ version, name }) => ({ version, name })),
+    SAAS_MIGRATIONS.map(({ version, name }) => ({ version, name })),
+  );
   assert.deepEqual(await dataSnapshot(), beforeData, 'upgrade changes no existing business row');
   assert.equal((await migrator.query('SELECT * FROM saas_fast_receipt_liability_releases')).rowCount, 0);
   await runSaasMigrations(pool); // Re-running the real migration path is a no-op.

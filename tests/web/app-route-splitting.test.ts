@@ -165,11 +165,7 @@ test('a pending page presents only an accessible loading state, never auth/permi
   withSsrReact(() => {
     const pending = lazy(() => new Promise<{ default: () => ReactNode }>(() => {}));
     const html = renderToStaticMarkup(
-      createElement(RoutePageBoundary, {
-        resetKey: '/routes',
-        pageKey: 'routes',
-        children: createElement(pending),
-      }),
+      createElement(RoutePageBoundary, { resetKey: '/routes', pageKey: 'routes' }, createElement(pending)),
     );
     const loading = renderToStaticMarkup(createElement(RouteLoading));
     for (const markup of [html, loading]) {

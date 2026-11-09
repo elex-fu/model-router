@@ -244,8 +244,7 @@ test('the manual env pin suppresses writes at or below the pin', async () => {
       await handle.close();
     }
     const handleAbovePin = startCodexVersionSyncWorker({
-      fetchImpl: () =>
-        Promise.resolve(jsonResponse({ tag_name: 'rust-v0.161.0', prerelease: false, draft: false })),
+      fetchImpl: () => Promise.resolve(jsonResponse({ tag_name: 'rust-v0.161.0', prerelease: false, draft: false })),
     });
     try {
       // Above the pin: runOnce JOINS the start round (singleflight) and the
@@ -376,14 +375,13 @@ test('close() is idempotent and stops the loop', async () => {
 test('the synced slot feeds buildCanonicalIdentity once written by the worker', async () => {
   resetSyncedCodexVersionForTests();
   const handle = startCodexVersionSyncWorker({
-    fetchImpl: () =>
-      Promise.resolve(jsonResponse({ tag_name: 'rust-v0.160.0', prerelease: false, draft: false })),
+    fetchImpl: () => Promise.resolve(jsonResponse({ tag_name: 'rust-v0.170.0', prerelease: false, draft: false })),
   });
   try {
     // runOnce joins the start round (singleflight): the write is visible.
     assert.equal(await handle.runOnce(), true);
     const identity = buildCanonicalIdentity();
-    assert.equal(identity.version, '0.160.0');
+    assert.equal(identity.version, '0.170.0');
     // The manual override still wins over the synced slot.
     const pinned = buildCanonicalIdentity('0.158.0');
     assert.equal(pinned.version, '0.158.0');

@@ -31,6 +31,7 @@ import type {
 } from './provider-account-scheduler.js';
 import type { GatewayRequestCanonicalCompilation, GatewayRequestIdempotencyClaimed } from './request-idempotency.js';
 import type { CustomerSaleBillingIdentity, ResolvedSupplyBillingIdentity } from './resolved-supply-billing-identity.js';
+import { validatePreparedRequestUsageEnvelope } from './usage-envelope-validation.js';
 
 /** Exact integers are kept at the orchestration boundary; no floating point is accepted. */
 export type RequestPreparationExactInteger = bigint | number | string;
@@ -721,7 +722,6 @@ export interface RequestPreparationPreparedResult {
 export type RequestPreparationResult = RequestPreparationFailureResult | RequestPreparationPreparedResult;
 
 const SUPPORTED_PROTOCOLS = new Set<GatewayProtocol>(['anthropic', 'openai', 'gemini', 'responses']);
-const INPUT_BUCKETS = new Set(['input', 'cache_read', 'cache_write', 'cache_write_5m', 'cache_write_1h']);
 const MAX_POSTGRES_BIGINT = 9_223_372_036_854_775_807n;
 const DIGEST = /^[0-9a-f]{64}$/i;
 const BASE64 = /^[A-Za-z0-9+/]+={0,2}$/;
@@ -1549,62 +1549,8 @@ function validatePayload(
   if (!sameModelResolution(payloadResolution, expected.modelResolution)) {
     return issue('binding_mismatch', 'compiled payload model resolution does not match server authority');
   }
-  const usage = payload.usage;
-  if (!isRecord(usage)) return issue('payload_bounds_unavailable', 'server-owned payload usage bounds are required');
-  const fields = [
-    'inputTotalUpperBound',
-    'inputUncachedUpperBound',
-    'cacheReadUpperBound',
-    'cacheWriteUpperBound',
-    'cacheWrite5mUpperBound',
-    'cacheWrite1hUpperBound',
-    'outputTotalUpperBound',
-    'reasoningOutputUpperBound',
-  ] as const;
-  const normalized = new Map<string, bigint>();
-  for (const field of fields) {
-    const value = exactInteger(usage[field], field);
-    if (value === null) return issue('payload_bounds_unavailable', `payload bound ${field} is invalid`);
-    normalized.set(field, BigInt(value));
-  }
-  const inputTotal = normalized.get('inputTotalUpperBound');
-  const outputTotal = normalized.get('outputTotalUpperBound');
-  const inputUncached = normalized.get('inputUncachedUpperBound');
-  const cacheRead = normalized.get('cacheReadUpperBound');
-  const cacheWrite = normalized.get('cacheWriteUpperBound');
-  const cacheWrite5m = normalized.get('cacheWrite5mUpperBound');
-  const cacheWrite1h = normalized.get('cacheWrite1hUpperBound');
-  const reasoningOutput = normalized.get('reasoningOutputUpperBound');
-  if (
-    inputTotal === undefined ||
-    outputTotal === undefined ||
-    inputUncached === undefined ||
-    cacheRead === undefined ||
-    cacheWrite === undefined ||
-    cacheWrite5m === undefined ||
-    cacheWrite1h === undefined ||
-    reasoningOutput === undefined
-  ) {
-    return issue('payload_bounds_unavailable', 'payload bounds are incomplete');
-  }
-  if (
-    inputUncached > inputTotal ||
-    cacheRead > inputTotal ||
-    cacheWrite > inputTotal ||
-    cacheWrite5m > inputTotal ||
-    cacheWrite1h > inputTotal ||
-    reasoningOutput > outputTotal
-  ) {
-    return issue('payload_bounds_unavailable', 'payload bounds exceed their signed totals');
-  }
-  if (
-    !Array.isArray(usage.feasibleInputBuckets) ||
-    usage.feasibleInputBuckets.length === 0 ||
-    new Set(usage.feasibleInputBuckets).size !== usage.feasibleInputBuckets.length ||
-    usage.feasibleInputBuckets.some((bucket) => typeof bucket !== 'string' || !INPUT_BUCKETS.has(bucket))
-  ) {
-    return issue('payload_bounds_unavailable', 'payload feasible input buckets are invalid');
-  }
+  const usage = validatePreparedRequestUsageEnvelope(payload.usage);
+  if (!usage.ok) return issue('payload_bounds_unavailable', `payload bound ${usage.path} is invalid`);
   return null;
 }
 

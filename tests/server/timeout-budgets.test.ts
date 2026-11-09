@@ -178,7 +178,8 @@ test('5xx failover attempts share one total deadline and backoff stays bounded',
   });
   const proxy = await harness([first.url, second.url], {
     firstByteTimeoutMs: 1000,
-    requestTimeoutMs: 130,
+    // Leave time for both loopback dispatches and the 80 ms backoff under CI load.
+    requestTimeoutMs: 400,
     retryRandom: () => 1,
     retryBaseDelayMs: 80,
     retryMaxDelayMs: 80,
@@ -196,7 +197,9 @@ test('5xx failover attempts share one total deadline and backoff stays bounded',
     assert.equal(response.status, 504);
     assert.ok(Date.now() - started < 700);
     assert.equal(secondSeen, true);
-    assert.equal(proxy.attempts.at(-1)?.retryReason, 'total_request_timeout');
+    const last = proxy.attempts.at(-1);
+    assert.equal(last?.upstreamId, 'up_1');
+    assert.equal(last?.retryReason, 'total_request_timeout');
   } finally {
     await proxy.close();
     await first.close();

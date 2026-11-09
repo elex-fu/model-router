@@ -91,13 +91,20 @@ const zeroBudget: Budget = { maxTransportErrors: 0, maxUnexpected5xx: 0 };
 
 test('cap profile requires frozen diagnostic runs and only unset versus eight', () => {
   const api = helpers<{ validateCapProfile(options: Record<string, boolean>, cap: number | null): void }>(
-    supervisorFile, ['validateCapProfile'], { assert },
+    supervisorFile,
+    ['validateCapProfile'],
+    { assert },
   );
   const options = { capProfile: true, diagnostic: true, noBuild: true, serialProfile: false, requestSamples: false };
   api.validateCapProfile(options, null);
   api.validateCapProfile(options, 8);
   for (const cap of [0, 4, 16]) assert.throws(() => api.validateCapProfile(options, cap));
-  for (const changed of [{ diagnostic: false }, { noBuild: false }, { serialProfile: true }, { requestSamples: true }]) {
+  for (const changed of [
+    { diagnostic: false },
+    { noBuild: false },
+    { serialProfile: true },
+    { requestSamples: true },
+  ]) {
     assert.throws(() => api.validateCapProfile({ ...options, ...changed }, 8));
   }
   api.validateCapProfile({}, 16);
@@ -107,16 +114,30 @@ test('cap profile requires frozen diagnostic runs and only unset versus eight', 
 
 test('cap evidence separates accepted throughput and rejection without declaring a capacity answer', () => {
   interface CapEvidence {
-    performanceAcceptance: boolean; configurationUnchanged: boolean; successfulRequests: number;
-    rejected429: number; rejected429Ratio: number; unexpected5xx: number; transportErrors: number;
-    successfulSampleSufficiency: { sufficient: boolean }; capacityRecommendation: null;
+    performanceAcceptance: boolean;
+    configurationUnchanged: boolean;
+    successfulRequests: number;
+    rejected429: number;
+    rejected429Ratio: number;
+    unexpected5xx: number;
+    transportErrors: number;
+    successfulSampleSufficiency: { sufficient: boolean };
+    capacityRecommendation: null;
   }
   const api = helpers<{ capProfileEvidence(report: unknown): CapEvidence }>(supervisorFile, ['capProfileEvidence']);
   const configuration = { inflight: 200, concurrencySeconds: 60, p99OverheadMs: 30, ttfbOverheadMs: 10, noFail: false };
-  const result = api.capProfileEvidence({ config: configuration, scenarios: { concurrency: {
-    statuses: { '200': 100, '429': 890, '502': 5 }, transportErrors: 5, throughputRps: 1.6,
-    latency: { n: 100 }, acceptedLatency: { n: 100 },
-  } } });
+  const result = api.capProfileEvidence({
+    config: configuration,
+    scenarios: {
+      concurrency: {
+        statuses: { '200': 100, '429': 890, '502': 5 },
+        transportErrors: 5,
+        throughputRps: 1.6,
+        latency: { n: 100 },
+        acceptedLatency: { n: 100 },
+      },
+    },
+  });
   assert.equal(result.configurationUnchanged, true);
   assert.equal(result.performanceAcceptance, false);
   assert.equal(result.successfulRequests, 100);
@@ -125,9 +146,16 @@ test('cap evidence separates accepted throughput and rejection without declaring
   assert.equal(result.transportErrors, 5);
   assert.equal(result.successfulSampleSufficiency.sufficient, true);
   assert.equal(result.capacityRecommendation, null);
-  const rejected = api.capProfileEvidence({ config: configuration, scenarios: { concurrency: {
-    statuses: { '429': 1000 }, transportErrors: 0, throughputRps: 0,
-  } } });
+  const rejected = api.capProfileEvidence({
+    config: configuration,
+    scenarios: {
+      concurrency: {
+        statuses: { '429': 1000 },
+        transportErrors: 0,
+        throughputRps: 0,
+      },
+    },
+  });
   assert.equal(rejected.successfulSampleSufficiency.sufficient, false);
   assert.equal(rejected.successfulRequests, 0);
   assert.equal(rejected.rejected429Ratio, 1);
@@ -136,14 +164,23 @@ test('cap evidence separates accepted throughput and rejection without declaring
 test('cap resource sampling is bounded and makes the unobserved process IO boundary explicit', () => {
   let tick: (() => void) | undefined;
   let cleared = false;
-  const api = helpers<{ startCapProfileResources(): { stop(): { samples: unknown[]; droppedSamples: number; processCpuAndIoObserved: boolean } } }>(
-    supervisorFile, ['startCapProfileResources'], {
-      cpus: () => [{ times: { user: 1, nice: 0, sys: 1, idle: 10, irq: 0 } }],
-      loadavg: () => [1, 1, 1], freemem: () => 10, totalmem: () => 20,
-      setInterval(callback: () => void) { tick = callback; return { unref() {} }; },
-      clearInterval() { cleared = true; },
+  const api = helpers<{
+    startCapProfileResources(): {
+      stop(): { samples: unknown[]; droppedSamples: number; processCpuAndIoObserved: boolean };
+    };
+  }>(supervisorFile, ['startCapProfileResources'], {
+    cpus: () => [{ times: { user: 1, nice: 0, sys: 1, idle: 10, irq: 0 } }],
+    loadavg: () => [1, 1, 1],
+    freemem: () => 10,
+    totalmem: () => 20,
+    setInterval(callback: () => void) {
+      tick = callback;
+      return { unref() {} };
     },
-  );
+    clearInterval() {
+      cleared = true;
+    },
+  });
   const sampler = api.startCapProfileResources();
   for (let index = 0; index < 40; index++) tick!();
   const result = sampler.stop();
@@ -527,8 +564,11 @@ interface SampleEvidence {
   legs: { scenario: string; leg: string; required: number | null; observed: number | null; sufficient: boolean }[];
 }
 interface SampleApi {
-  observedSampleSufficiency(report: unknown, requestedScenario: string,
-    profile?: { diagnostic?: boolean; serialProfile?: boolean; capProfile?: boolean }): SampleEvidence;
+  observedSampleSufficiency(
+    report: unknown,
+    requestedScenario: string,
+    profile?: { diagnostic?: boolean; serialProfile?: boolean; capProfile?: boolean },
+  ): SampleEvidence;
 }
 function sampleApi(): SampleApi {
   return helpers<SampleApi>(supervisorFile, ['observedSampleSufficiency']);
@@ -539,8 +579,11 @@ function completeSampleReport() {
     scenarios: {
       latency: { direct: { n: 100 }, gateway: { n: 100 } },
       ttfb: { direct: { n: 100 }, gateway: { n: 100 }, gatewayErrors: 0, ttfbOverheadMs: 1 },
-      concurrency: { statuses: { '200': 100 }, latency: { n: 100 },
-        acceptedLatency: { n: 100, measurement: 'request-start-through-response-body' } },
+      concurrency: {
+        statuses: { '200': 100 },
+        latency: { n: 100 },
+        acceptedLatency: { n: 100, measurement: 'request-start-through-response-body' },
+      },
       scaling: { statuses: { '200': 100 }, latency: { n: 100 } },
     },
   };
@@ -594,15 +637,15 @@ test('sample evidence rejects missing, malformed, inconsistent and incomplete st
   }
   for (const count of [undefined, null, '100', -1, 1.5, NaN, Infinity]) {
     const report = completeSampleReport();
-    const malformed = { ...report, scenarios: { ...report.scenarios,
-      scaling: { statuses: { '200': count }, latency: { n: count } } } };
+    const malformed = {
+      ...report,
+      scenarios: { ...report.scenarios, scaling: { statuses: { '200': count }, latency: { n: count } } },
+    };
     const evidence = api.observedSampleSufficiency(malformed, 'scaling');
     assert.equal(evidence.sufficient, false);
     assert.equal(evidence.legs.find((leg) => leg.scenario === 'scaling')?.observed, null);
   }
-  for (const patch of [
-    { gatewayErrors: 1 }, { ttfbOverheadMs: NaN }, { ttfbOverheadMs: Infinity },
-  ]) {
+  for (const patch of [{ gatewayErrors: 1 }, { ttfbOverheadMs: NaN }, { ttfbOverheadMs: Infinity }]) {
     const report = completeSampleReport();
     Object.assign(report.scenarios.ttfb, patch);
     assert.equal(api.observedSampleSufficiency(report, 'all').sufficient, false);
@@ -627,7 +670,10 @@ test('cap samples remain enforced while short diagnostic and serial retain their
   for (const count of [0, 99, 100]) {
     const report = completeSampleReport().scenarios.concurrency;
     report.statuses['200'] = report.latency.n = report.acceptedLatency.n = count;
-    assert.equal(api.observedSampleSufficiency({ scenarios: { concurrency: report } }, 'concurrency', cap).sufficient, count === 100);
+    assert.equal(
+      api.observedSampleSufficiency({ scenarios: { concurrency: report } }, 'concurrency', cap).sufficient,
+      count === 100,
+    );
   }
   const source = readFileSync(supervisorFile, 'utf8');
   assert.match(source, /validCapProfile && sampleSufficiency\.sufficient/);
@@ -644,7 +690,10 @@ test('insufficient baseline samples stop before the current leg and preserve the
     await api.runFullR9Benchmarks([{ protocol: 'openai' }], ['g1', 'g2', 'g3'], async (name) => {
       events.push(name);
       const scaling = { statuses: { '200': 99 }, latency: { n: 99 } };
-      return { reportFile: '/baseline', ok: samples.observedSampleSufficiency({ scenarios: { scaling } }, 'scaling').sufficient };
+      return {
+        reportFile: '/baseline',
+        ok: samples.observedSampleSufficiency({ scenarios: { scaling } }, 'scaling').sufficient,
+      };
     });
     events.push('final-stats', 'metrics');
   } finally {

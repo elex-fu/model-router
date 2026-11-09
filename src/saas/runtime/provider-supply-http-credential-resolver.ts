@@ -437,7 +437,7 @@ export class ProviderSupplyHttpCredentialResolver {
 
   async resolveCredentialFor(
     input: ProviderHttpCredentialResolveInput,
-    useCredential: Parameters<ProviderHttpCredentialResolver>[1],
+    withHeader: Parameters<ProviderHttpCredentialResolver>[1],
   ): Promise<PreparedEvidenceTransportResponse> {
     let callbackContractError: ProviderSupplyHttpCredentialResolverError | undefined;
     let callbacksOpen = false;
@@ -445,7 +445,7 @@ export class ProviderSupplyHttpCredentialResolver {
     let activeFormatted: Buffer | undefined;
     try {
       const evidenceId = evidenceIdFromInput(input);
-      if (typeof useCredential !== 'function') fail('INVALID_INPUT');
+      if (typeof withHeader !== 'function') fail('INVALID_INPUT');
       const credentialVersion = credentialVersionFromInput(input.credentialVersion);
       assertActive(input);
 
@@ -486,7 +486,7 @@ export class ProviderSupplyHttpCredentialResolver {
             try {
               assertActive(input);
               activeFormatted = formattedCredential(candidateSecret, authentication.valueFormat);
-              const candidate = await useCredential({ headerName: authentication.headerName, value: activeFormatted });
+              const candidate = await withHeader({ headerName: authentication.headerName, value: activeFormatted });
               assertActive(input);
               if (!callbacksOpen) fail('CREDENTIAL_INVALID');
               if (!isTransportResponse(candidate)) {

@@ -39,8 +39,8 @@ import {
   updateSyncedCodexVersion,
 } from '../saas/gateway/codex/identity.js';
 import {
-  clampCodexVersionSyncIntervalMs,
   type CodexVersionSyncFetch,
+  clampCodexVersionSyncIntervalMs,
   fetchLatestCodexStableVersion,
 } from '../saas/supply/codex-version-sync.js';
 

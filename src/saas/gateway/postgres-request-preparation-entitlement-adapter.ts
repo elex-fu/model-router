@@ -64,11 +64,14 @@ export class PostgresRequestPreparationEntitlementAdapter implements RequestPrep
     private readonly plans: RequestPlanResolver,
   ) {}
 
-  async resolve(input: {
-    readonly caller: RequestPreparationCaller;
-    readonly publicModel: string;
-    readonly protocol: GatewayProtocol;
-  }, options?: RequestPreparationSqlOptions): Promise<RequestPreparationDecision<RequestPreparationEntitlement>> {
+  async resolve(
+    input: {
+      readonly caller: RequestPreparationCaller;
+      readonly publicModel: string;
+      readonly protocol: GatewayProtocol;
+    },
+    options?: RequestPreparationSqlOptions,
+  ): Promise<RequestPreparationDecision<RequestPreparationEntitlement>> {
     const delegated = await this.delegate.resolve(input, options);
     if (delegated.decision !== 'allow' || input.caller.supplyMode !== 'byok') return delegated;
 

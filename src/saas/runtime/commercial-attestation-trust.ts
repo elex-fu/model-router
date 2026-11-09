@@ -5,13 +5,18 @@ import type { CommercialMeteringPolicyServiceOptions } from '../gateway/commerci
 
 export const COMMERCIAL_ATTESTATION_TRUST_FILE = 'MODEL_ROUTER_SAAS_COMMERCIAL_ATTESTATION_TRUST_FILE';
 export class CommercialAttestationTrustError extends Error {
-  constructor() { super('COMMERCIAL_ATTESTATION_TRUST_INVALID'); this.name = 'CommercialAttestationTrustError'; }
+  constructor() {
+    super('COMMERCIAL_ATTESTATION_TRUST_INVALID');
+    this.name = 'CommercialAttestationTrustError';
+  }
 }
-const invalid = (): never => { throw new CommercialAttestationTrustError(); };
+const invalid = (): never => {
+  throw new CommercialAttestationTrustError();
+};
 function record(value: unknown, keys: readonly string[]): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return invalid();
   const result = value as Record<string, unknown>;
-  if (Object.keys(result).some(key => !keys.includes(key))) invalid();
+  if (Object.keys(result).some((key) => !keys.includes(key))) invalid();
   return result;
 }
 function label(value: unknown): string {
@@ -22,12 +27,29 @@ function label(value: unknown): string {
 export function parseCommercialAttestationTrust(value: unknown): CommercialMeteringPolicyServiceOptions {
   try {
     const source = record(value, ['version', 'keys', 'testVectorDigests']);
-    if (source.version !== 1 || !Array.isArray(source.keys) || source.keys.length < 1 || source.keys.length > 64 || !Array.isArray(source.testVectorDigests) || source.testVectorDigests.length < 1 || source.testVectorDigests.length > 256) invalid();
+    if (
+      source.version !== 1 ||
+      !Array.isArray(source.keys) ||
+      source.keys.length < 1 ||
+      source.keys.length > 64 ||
+      !Array.isArray(source.testVectorDigests) ||
+      source.testVectorDigests.length < 1 ||
+      source.testVectorDigests.length > 256
+    )
+      invalid();
     const keys: Record<string, KeyObject> = Object.create(null);
     for (const item of source.keys as unknown[]) {
       const entry = record(item, ['keyId', 'publicKeyPem']);
       const id = label(entry.keyId);
-      if (keys[id] || typeof entry.publicKeyPem !== 'string' || entry.publicKeyPem.length > 8192 || !/^-----BEGIN PUBLIC KEY-----\r?\n[A-Za-z0-9+/=\r\n]+\r?\n-----END PUBLIC KEY-----\s*$/u.test(entry.publicKeyPem)) invalid();
+      if (
+        keys[id] ||
+        typeof entry.publicKeyPem !== 'string' ||
+        entry.publicKeyPem.length > 8192 ||
+        !/^-----BEGIN PUBLIC KEY-----\r?\n[A-Za-z0-9+/=\r\n]+\r?\n-----END PUBLIC KEY-----\s*$/u.test(
+          entry.publicKeyPem,
+        )
+      )
+        invalid();
       const key = createPublicKey({ key: entry.publicKeyPem as string, format: 'pem', type: 'spki' });
       if (key.type !== 'public' || key.asymmetricKeyType !== 'ed25519') invalid();
       keys[id] = key;
@@ -39,10 +61,18 @@ export function parseCommercialAttestationTrust(value: unknown): CommercialMeter
       if (vectors[suite] || typeof entry.sha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(entry.sha256)) invalid();
       vectors[suite] = entry.sha256 as string;
     }
-    return Object.freeze({ trustedVerifierPublicKeys: Object.freeze(keys), trustedTestVectorDigests: Object.freeze(vectors) });
-  } catch { return invalid(); }
+    return Object.freeze({
+      trustedVerifierPublicKeys: Object.freeze(keys),
+      trustedTestVectorDigests: Object.freeze(vectors),
+    });
+  } catch {
+    return invalid();
+  }
 }
-export async function loadCommercialAttestationTrust(deployment: ManagedSaasDeploymentConfig, environment: Readonly<Record<string, string | undefined>> = process.env): Promise<CommercialMeteringPolicyServiceOptions | undefined> {
+export async function loadCommercialAttestationTrust(
+  deployment: ManagedSaasDeploymentConfig,
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+): Promise<CommercialMeteringPolicyServiceOptions | undefined> {
   const path = environment[COMMERCIAL_ATTESTATION_TRUST_FILE];
   if (path === undefined) return undefined;
   if (deployment.workloadRole !== 'combined' && deployment.workloadRole !== 'control-plane') return invalid();
@@ -60,6 +90,10 @@ export async function loadCommercialAttestationTrust(deployment: ManagedSaasDepl
       }
       if (length > 65536) invalid();
       return parseCommercialAttestationTrust(JSON.parse(bytes.subarray(0, length).toString('utf8')));
-    } finally { await file.close(); }
-  } catch { return invalid(); }
+    } finally {
+      await file.close();
+    }
+  } catch {
+    return invalid();
+  }
 }

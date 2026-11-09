@@ -100,6 +100,7 @@ const gatewayRoots = [
   'tests/saas/db/migrations/055_prepared_evidence_optional_validity_scalars.postgres.integration.test.ts',
   'tests/saas/db/migrations/056_restricted_role_check_and_platform_auth_execution.postgres.integration.test.ts',
   'tests/saas/platform/auth/managed-postgres-mfa-enrollment.integration.test.ts',
+  'tests/saas/platform/codex-bound-admission.postgres.integration.test.ts',
   'tests/saas/billing/managed-postgres-financial-invariants.integration.test.ts',
   'tests/saas/supply/platform-inference-access.postgres.integration.test.ts',
   'tests/saas/gateway/responses-continuation.postgres.integration.test.ts',
@@ -113,6 +114,7 @@ const strictRoots = [
   terminalReplayFixture,
   'tests/saas/db/migrations.test.ts',
   ...gatewayRoots,
+  'tests/saas/db/migrations/155_codex_trusted_bound_profiles.test.ts',
   ...HOTPATH_FIXTURES,
   'src/types/busboy.d.ts',
   CLI,
@@ -797,17 +799,20 @@ function validateRuntimeHealthClockSource(source: string, fixture: string): void
   }
 }
 
+const PAYMENT_SIGKILL_FRESH_IDS = /\bconst\s+tenantId\s*=\s*randomUUID\(\)\s*,\s*actorId\s*=\s*randomUUID\(\)/;
+const PAYMENT_SIGKILL_DISABLED_BASELINE = /assert\.equal\(\s*initial\.mode\s*,\s*'disabled'\s*[,)]/;
+
 function validatePaymentWorkerSigkillSource(source: string): void {
+  assert.match(source, PAYMENT_SIGKILL_FRESH_IDS, 'payment SIGKILL fixture owns fresh tenant and actor IDs');
+  assert.match(source, PAYMENT_SIGKILL_DISABLED_BASELINE, 'payment SIGKILL fixture starts with disabled payments');
   for (const required of [
     'const urls = roleUrls();',
     "const CHILD = 'tests/drills/helpers/payment-worker-sigkill-child.ts';",
-    'const tenantId = randomUUID(), actorId = randomUUID()',
     'INSERT INTO saas_users(id,email)',
     'INSERT INTO saas_tenants(id,name,slug)',
     'await registerPaymentBindings(cp, resolver);',
     'await cp.verifySchema();',
     "await verifySaasRuntimeDatabasePrivileges(cp, 'control_plane');",
-    "assert.equal(initial.mode, 'disabled'",
     'await restoreControl?.();',
     '[15, 18].includes(postgresMajor)',
     'postgresMajor: evidence.postgresMajor',
@@ -994,7 +999,7 @@ test('P0 platform provisioning remains a complete required restricted-role PG ga
   validateWorkflow(workflow);
   const root = 'tests/saas/supply/platform-inference-access.postgres.integration.test.ts';
   const source = read(root);
-  assert.match(source, /REQUIRED_FLAG.*roleUrls.*seedFixture/);
+  assert.match(source, /import\s*\{[^}]*\bREQUIRED_FLAG\b[^}]*\broleUrls\b[^}]*\bseedFixture\b[^}]*\}\s*from '/);
   assert.match(source, /process\.env\[REQUIRED_FLAG\] !== '1' && !anyRoleConfigured/);
   assert.match(source, /seedFixture\(migrator,\s*gateway,\s*'platform'\)/);
   const job = managedJob(workflow);
@@ -1090,9 +1095,9 @@ test('encrypted Responses history permits only unconfigured offline skip and kee
   assert.match(source, /history\.insert\(saved\)/);
   assert.match(source, /history\.purgeExpired\(/);
   const offlineSkip =
-    "skip: process.env[REQUIRED_FLAG] !== '1' && !anyRoleConfigured ? `set ${REQUIRED_FLAG}=1 and disposable role URLs` : false";
+    /skip:\s*process\.env\[REQUIRED_FLAG\] !== '1' && !anyRoleConfigured\s*\?\s*`set \$\{REQUIRED_FLAG\}=1 and disposable role URLs`\s*:\s*false/;
   const validateSkip = (candidate: string): void => {
-    assert.equal(candidate.split(offlineSkip).length - 1, 1, 'only the exact unconfigured offline skip is permitted');
+    assert.match(candidate, offlineSkip, 'only the exact unconfigured offline skip is permitted');
     assert.doesNotMatch(candidate.replace(offlineSkip, ''), /\bskip\s*:|\bt\.skip\(|\btest\.skip\(/);
     assert.match(candidate, /const urls = roleUrls\(\)/);
   };
@@ -1149,7 +1154,8 @@ test('isolated signal drills retain independent fixtures and real signal/converg
   validateManagedSaasSigtermSource(managedSource);
   for (const required of [
     'await registerPaymentBindings(cp, resolver);',
-    "assert.equal(initial.mode, 'disabled'",
+    PAYMENT_SIGKILL_FRESH_IDS,
+    PAYMENT_SIGKILL_DISABLED_BASELINE,
     "signalOwned(submitChild, 'SIGKILL');",
     '[15, 18].includes(postgresMajor)',
   ]) {
@@ -1187,4 +1193,14 @@ test('v3 hot-path roots and shared fixtures are strict required seeded PostgreSQ
   for (const fixture of HOTPATH_FIXTURES) {
     assert.throws(() => validateWorkflow(workflow.replace(`          ${fixture}\n`, '')));
   }
+});
+
+test('customer browser PostgreSQL runs as an unconditional two-version gate', () => {
+  const job = managedJob(workflow, 'managed-saas-customer-postgres-e2e');
+  assert.match(job.source, /^ {8}postgres-version: \["15", "18"\]$/m);
+  assert.doesNotMatch(job.source, /^ {4}(?:if|continue-on-error):/m);
+  const run = command(job, 'npm run test:e2e -- tests/e2e/customer-*.spec.ts');
+  assert.deepEqual(run.env, { E2E_CUSTOMER_POSTGRES: '1' });
+  before(job, command(job, 'npm ci'), run);
+  before(job, command(job, 'npx playwright install --with-deps chromium'), run);
 });

@@ -960,17 +960,22 @@ for (const ending of ['eof', 'abort'] as const) {
     const environment = managedEnvironment(ports);
     const events: string[] = [];
     let release!: () => void;
-    const cleanup = new Promise<void>((resolve) => { release = resolve; });
-    const runtime = await startManagedSaasServer(deploymentFrom(environment), managedOptions(events, {
-      paymentHandler: async (_request, response) => {
-        response.writeHead(200, { 'content-type': 'text/event-stream' });
-        response.write('data: accepted\n\n');
-        if (ending === 'eof') response.end();
-        await cleanup;
-        assert.equal(events.includes('database-close'), false);
-        return true;
-      },
-    }));
+    const cleanup = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const runtime = await startManagedSaasServer(
+      deploymentFrom(environment),
+      managedOptions(events, {
+        paymentHandler: async (_request, response) => {
+          response.writeHead(200, { 'content-type': 'text/event-stream' });
+          response.write('data: accepted\n\n');
+          if (ending === 'eof') response.end();
+          await cleanup;
+          assert.equal(events.includes('database-close'), false);
+          return true;
+        },
+      }),
+    );
     try {
       const response = await fetch(`${origin(runtimeListener(runtime, 'customer'))}/deferred-cleanup`, {
         signal: AbortSignal.timeout(5000),
@@ -996,13 +1001,19 @@ for (const ending of ['eof', 'abort'] as const) {
 test('managed provider close failure remains rejected while settled owners receive one cleanup attempt', async () => {
   const events: string[] = [];
   const environment = managedEnvironment({ customer: 45121, platform: 45122, gateway: 45123 });
-  const runtime = await startManagedSaasServer(deploymentFrom(environment), managedOptions(events, {
-    createListener: () => inertListener(),
-    loadProviders: async () => ({ ...fakeProviders(events), close: async () => {
-      events.push('providers-close');
-      throw new Error('synthetic private cleanup error');
-    } }),
-  }));
+  const runtime = await startManagedSaasServer(
+    deploymentFrom(environment),
+    managedOptions(events, {
+      createListener: () => inertListener(),
+      loadProviders: async () => ({
+        ...fakeProviders(events),
+        close: async () => {
+          events.push('providers-close');
+          throw new Error('synthetic private cleanup error');
+        },
+      }),
+    }),
+  );
   const closing = runtime.close();
   assert.equal(runtime.close(), closing);
   await assert.rejects(closing, /^Error: MANAGED_SAAS_SHUTDOWN_RESOURCE_FAILED$/);
@@ -1044,14 +1055,20 @@ test('managed control plane owns and closes the account ban disposition worker',
 test('managed hung provider close is bounded and prevents dependent database close', async () => {
   const events: string[] = [];
   const environment = managedEnvironment({ customer: 45121, platform: 45122, gateway: 45123 });
-  const runtime = await startManagedSaasServer(deploymentFrom(environment), managedOptions(events, {
-    createListener: () => inertListener(),
-    shutdownCleanupMs: 10,
-    loadProviders: async () => ({ ...fakeProviders(events), close: async () => {
-      events.push('providers-close');
-      await new Promise<void>(() => {});
-    } }),
-  }));
+  const runtime = await startManagedSaasServer(
+    deploymentFrom(environment),
+    managedOptions(events, {
+      createListener: () => inertListener(),
+      shutdownCleanupMs: 10,
+      loadProviders: async () => ({
+        ...fakeProviders(events),
+        close: async () => {
+          events.push('providers-close');
+          await new Promise<void>(() => {});
+        },
+      }),
+    }),
+  );
   const closing = runtime.close();
   assert.equal(runtime.close(), closing);
   await assert.rejects(closing, /MANAGED_SAAS_SHUTDOWN_RESOURCE_TIMEOUT/);
@@ -1064,19 +1081,24 @@ test('managed forced customer socket close still waits for its original cleanup'
   const environment = managedEnvironment(ports);
   const events: string[] = [];
   let release!: () => void;
-  const cleanup = new Promise<void>((resolve) => { release = resolve; });
-  const runtime = await startManagedSaasServer(deploymentFrom(environment), managedOptions(events, {
-    shutdownGraceMs: 10,
-    shutdownCleanupMs: 1000,
-    paymentHandler: async (_request, response) => {
-      response.writeHead(200, { 'content-type': 'text/event-stream' });
-      response.write('data: accepted\n\n');
-      response.once('close', () => setTimeout(release, 5));
-      await cleanup;
-      assert.equal(events.includes('database-close'), false);
-      return true;
-    },
-  }));
+  const cleanup = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const runtime = await startManagedSaasServer(
+    deploymentFrom(environment),
+    managedOptions(events, {
+      shutdownGraceMs: 10,
+      shutdownCleanupMs: 1000,
+      paymentHandler: async (_request, response) => {
+        response.writeHead(200, { 'content-type': 'text/event-stream' });
+        response.write('data: accepted\n\n');
+        response.once('close', () => setTimeout(release, 5));
+        await cleanup;
+        assert.equal(events.includes('database-close'), false);
+        return true;
+      },
+    }),
+  );
   try {
     const response = await fetch(`${origin(runtimeListener(runtime, 'customer'))}/deferred-cleanup`, {
       signal: AbortSignal.timeout(5000),
@@ -1096,15 +1118,18 @@ test('managed never completed customer handler times out without closing its dat
   const ports = await threeFreePorts();
   const environment = managedEnvironment(ports);
   const events: string[] = [];
-  const runtime = await startManagedSaasServer(deploymentFrom(environment), managedOptions(events, {
-    shutdownGraceMs: 5,
-    shutdownCleanupMs: 5,
-    paymentHandler: async (_request, response) => {
-      response.end('accepted');
-      await new Promise<void>(() => {});
-      return true;
-    },
-  }));
+  const runtime = await startManagedSaasServer(
+    deploymentFrom(environment),
+    managedOptions(events, {
+      shutdownGraceMs: 5,
+      shutdownCleanupMs: 5,
+      paymentHandler: async (_request, response) => {
+        response.end('accepted');
+        await new Promise<void>(() => {});
+        return true;
+      },
+    }),
+  );
   const response = await fetch(`${origin(runtimeListener(runtime, 'customer'))}/deferred-cleanup`, {
     signal: AbortSignal.timeout(5000),
   });
@@ -2450,7 +2475,12 @@ test('validation startup supplies an immutable operator registry explicitly; gen
       events.push('kms-close');
     },
   };
-  const rawTuning = { maxAttempts: 20, pollIntervalMs: 100, approvedTargets: undefined, transportTestOptions: undefined };
+  const rawTuning = {
+    maxAttempts: 20,
+    pollIntervalMs: 100,
+    approvedTargets: undefined,
+    transportTestOptions: undefined,
+  };
   const runtime = await startManagedSaasServer(
     deploymentFrom(environment),
     managedOptions(events, {

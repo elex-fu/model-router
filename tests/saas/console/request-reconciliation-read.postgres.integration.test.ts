@@ -411,8 +411,10 @@ async function acl(tx: SqlExecutor): Promise<void> {
   // These existing column grants serve the worker/invoker triggers. Exact
   // enumeration proves every other request column remains non-updatable;
   // this query root still executes only READ ONLY transactions.
-  assert.deepEqual(row.update_columns,
-    ['execution_state', 'reconciliation_state', 'financial_status', 'updated_at', 'state_version'].sort());
+  assert.deepEqual(
+    row.update_columns,
+    ['execution_state', 'reconciliation_state', 'financial_status', 'updated_at', 'state_version'].sort(),
+  );
   assert.equal(row.schema_create, false);
   assert.equal(row.delete_allowed, false);
   assert.equal(row.execute_count, 1);
@@ -555,10 +557,12 @@ test('G5 restricted CP request axes and privacy contract on real PostgreSQL', {
         assert.ok(request);
         // The existing worker/invoker grant permits this field at the DB layer;
         // publicDetailProjection above independently excludes it from the DTO.
-        const permitted = await bounded(control, (tx) => tx.query(
-          'SELECT supply_profile_id FROM saas_requests WHERE tenant_id=$1::uuid AND id=$2::uuid',
-          [f.tenantId, request.id],
-        ));
+        const permitted = await bounded(control, (tx) =>
+          tx.query('SELECT supply_profile_id FROM saas_requests WHERE tenant_id=$1::uuid AND id=$2::uuid', [
+            f.tenantId,
+            request.id,
+          ]),
+        );
         assert.equal(permitted.rows.length, 1);
         assert.deepEqual(Object.keys(permitted.rows[0] as object), ['supply_profile_id']);
         const statements = [

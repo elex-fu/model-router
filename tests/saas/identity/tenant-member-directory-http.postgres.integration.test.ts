@@ -238,7 +238,12 @@ async function principal(executor: SqlExecutor, role: string, database: string):
 }
 
 async function aclEvidence(control: SaasDatabase) {
-  const result = await control.query<{ minimum_select: boolean; direct_execute: number; validator_execute: number; schema_create: boolean }>(
+  const result = await control.query<{
+    minimum_select: boolean;
+    direct_execute: number;
+    validator_execute: number;
+    schema_create: boolean;
+  }>(
     `WITH needed(relation_name, column_name) AS (VALUES
        ('saas_tenants', 'id'), ('saas_tenants', 'status'),
        ('saas_memberships', 'tenant_id'), ('saas_memberships', 'user_id'),

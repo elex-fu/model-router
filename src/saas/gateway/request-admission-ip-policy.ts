@@ -27,7 +27,8 @@ export function validateRequestAdmissionIpPolicy(
     }
     const address = clientAddress?.status === 'resolved' ? clientAddress.address : null;
     return address !== null && isIpAllowed(address, { mode: policy.mode, rules: policy.rules })
-      ? 'allow' : 'caller_denied';
+      ? 'allow'
+      : 'caller_denied';
   } catch {
     return 'storage_failure';
   }

@@ -1,5 +1,5 @@
 import { markCodexCanonicalReplay } from './codex/continuation-metadata.js';
-import { ResponsesWsRoundError, type ResponsesWsEvent, type ResponsesWsPinnedIdentity } from './responses-ws-engine.js';
+import { type ResponsesWsEvent, type ResponsesWsPinnedIdentity, ResponsesWsRoundError } from './responses-ws-engine.js';
 
 function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -8,7 +8,11 @@ function items(value: unknown): unknown[] | null {
   return Array.isArray(value) ? value : typeof value === 'string' ? [{ role: 'user', content: value }] : null;
 }
 function required(): never {
-  throw new ResponsesWsRoundError('full_context_required', 'the response context is unavailable; resend full context', 409);
+  throw new ResponsesWsRoundError(
+    'full_context_required',
+    'the response context is unavailable; resend full context',
+    409,
+  );
 }
 interface SavedContext {
   readonly body: Record<string, unknown>;
@@ -20,20 +24,41 @@ export class ResponsesContinuationStore {
   private readonly contexts = new Map<string, SavedContext>();
   constructor(private readonly maxBytes: number) {}
 
-  forget(responseId: string): void { this.contexts.delete(responseId); }
+  forget(responseId: string): void {
+    this.contexts.delete(responseId);
+  }
 
-  resolve(body: Record<string, unknown>, identity: {
-    readonly tenantId: string;
-    readonly projectId?: string;
-    readonly proxyKeyId: string;
-    readonly conversationId?: string;
-    readonly pinned: ResponsesWsPinnedIdentity | null;
-  }): Record<string, unknown> {
+  resolve(
+    body: Record<string, unknown>,
+    identity: {
+      readonly tenantId: string;
+      readonly projectId?: string;
+      readonly proxyKeyId: string;
+      readonly conversationId?: string;
+      readonly pinned: ResponsesWsPinnedIdentity | null;
+    },
+  ): Record<string, unknown> {
     if (body.previous_response_id === undefined || body.previous_response_id === null) return body;
-    const saved = typeof body.previous_response_id === 'string' ? this.contexts.get(body.previous_response_id) : undefined;
+    const saved =
+      typeof body.previous_response_id === 'string' ? this.contexts.get(body.previous_response_id) : undefined;
     const pin = identity.pinned;
-    if (!saved || !pin || saved.pin.tenantId !== identity.tenantId || saved.pin.projectId !== identity.projectId || saved.pin.proxyKeyId !== identity.proxyKeyId || saved.conversationId !== identity.conversationId) required();
-    for (const field of ['providerId', 'accountId', 'upstreamModel', 'credentialId', 'credentialVersion', 'credentialAuthzVersion'] as const) {
+    if (
+      !saved ||
+      !pin ||
+      saved.pin.tenantId !== identity.tenantId ||
+      saved.pin.projectId !== identity.projectId ||
+      saved.pin.proxyKeyId !== identity.proxyKeyId ||
+      saved.conversationId !== identity.conversationId
+    )
+      required();
+    for (const field of [
+      'providerId',
+      'accountId',
+      'upstreamModel',
+      'credentialId',
+      'credentialVersion',
+      'credentialAuthzVersion',
+    ] as const) {
       if (saved.pin[field] !== pin[field]) required();
     }
     if (body.model !== saved.pin.publicModel || !saved.pin.credentialId) required();
@@ -46,7 +71,12 @@ export class ResponsesContinuationStore {
     return markCodexCanonicalReplay(resolved);
   }
 
-  remember(body: Record<string, unknown>, terminal: ResponsesWsEvent, pin: ResponsesWsPinnedIdentity, conversationId?: string): void {
+  remember(
+    body: Record<string, unknown>,
+    terminal: ResponsesWsEvent,
+    pin: ResponsesWsPinnedIdentity,
+    conversationId?: string,
+  ): void {
     // Only a complete terminal output array proves what the next request must replay.
     const response = record(terminal.response) ? terminal.response : null;
     if (!response || typeof response.id !== 'string' || !Array.isArray(response.output)) return;

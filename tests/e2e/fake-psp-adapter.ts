@@ -11,7 +11,7 @@ import type {
   PaymentProviderOrderRecoveryInput,
   PaymentProviderWebhookVerificationInput,
   VerifiedPaymentProviderWebhook,
-} from '../src/saas/payments/types.js';
+} from '../../src/saas/payments/types.js';
 
 /**
  * The M1 e2e stand-in payment provider. There is deliberately no mock PSP in

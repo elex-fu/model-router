@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { PlatformWalletLedgerService } from '../billing/service.js';
 import { normalizeCurrency, parseStoredMinorUnits } from '../billing/money.js';
+import { PlatformWalletLedgerService } from '../billing/service.js';
 import type { SaasDatabase, SqlExecutor } from '../db/types.js';
 import { sha256Hex } from './digest.js';
 import { PostgresUnknownOutcomeOperatorAuthorizationAdapter } from './postgres-unknown-outcome-operator-authorization.js';
@@ -1173,7 +1173,8 @@ export class PostgresUnknownOutcomeRecoveryRepository implements UnknownOutcomeR
                 AND idempotency_namespace = $3 AND business_key = $4`,
             [claim.tenantId, claim.requestId, BILLING_RESERVATION_NAMESPACE, businessKey],
           );
-          if (original.rows.length !== 1) throw new Error('Unknown-outcome admission reservation is missing or ambiguous');
+          if (original.rows.length !== 1)
+            throw new Error('Unknown-outcome admission reservation is missing or ambiguous');
           const row = original.rows[0]!;
           const identity = {
             id: databaseText(row.id, 'reservation.id'),
@@ -1186,14 +1187,19 @@ export class PostgresUnknownOutcomeRecoveryRepository implements UnknownOutcomeR
             amountMinorUnits: parseStoredMinorUnits(row.amount_minor_units),
             priceSnapshotRef: databaseText(row.price_snapshot_ref, 'reservation.price_snapshot_ref'),
           };
-          if (identity.tenantId !== claim.tenantId || identity.requestId !== claim.requestId ||
-              identity.idempotencyNamespace !== BILLING_RESERVATION_NAMESPACE || identity.businessKey !== businessKey) {
+          if (
+            identity.tenantId !== claim.tenantId ||
+            identity.requestId !== claim.requestId ||
+            identity.idempotencyNamespace !== BILLING_RESERVATION_NAMESPACE ||
+            identity.businessKey !== businessKey
+          ) {
             throw new Error('Unknown-outcome admission reservation identity changed');
           }
           const reservationState = databaseText(row.state, 'reservation.state');
           let evidenceRef: string;
           if (reservationState === 'reconciliation_pending') {
             evidenceRef = databaseText(row.reconciliation_reference, 'reservation.reconciliation_reference');
+            // biome-ignore lint/suspicious/noControlCharactersInRegex: Evidence references must reject C0 controls and DEL.
             if (evidenceRef.trim() !== evidenceRef || /[\u0000-\u001f\u007f]/u.test(evidenceRef)) {
               throw new Error('Unknown-outcome admission reservation reference is invalid');
             }
@@ -1210,11 +1216,19 @@ export class PostgresUnknownOutcomeRecoveryRepository implements UnknownOutcomeR
             businessKey,
             idempotencyNamespace: BILLING_RESERVATION_NAMESPACE,
           });
-          if (pending.state !== 'reconciliation_pending' || pending.reconciliationReference !== evidenceRef ||
-              pending.id !== identity.id || pending.tenantId !== identity.tenantId || pending.requestId !== identity.requestId ||
-              pending.idempotencyNamespace !== identity.idempotencyNamespace || pending.businessKey !== identity.businessKey ||
-              pending.walletId !== identity.walletId || pending.currency !== identity.currency ||
-              parseStoredMinorUnits(pending.amountMinorUnits) !== identity.amountMinorUnits || pending.priceSnapshotRef !== identity.priceSnapshotRef) {
+          if (
+            pending.state !== 'reconciliation_pending' ||
+            pending.reconciliationReference !== evidenceRef ||
+            pending.id !== identity.id ||
+            pending.tenantId !== identity.tenantId ||
+            pending.requestId !== identity.requestId ||
+            pending.idempotencyNamespace !== identity.idempotencyNamespace ||
+            pending.businessKey !== identity.businessKey ||
+            pending.walletId !== identity.walletId ||
+            pending.currency !== identity.currency ||
+            parseStoredMinorUnits(pending.amountMinorUnits) !== identity.amountMinorUnits ||
+            pending.priceSnapshotRef !== identity.priceSnapshotRef
+          ) {
             throw new Error('Unknown-outcome admission reservation changed during reconciliation');
           }
           if (requestFinancial === 'pending') {

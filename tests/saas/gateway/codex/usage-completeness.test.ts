@@ -1,15 +1,24 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { chatCompletionsUsage, anthropicUsageFields } from '../../../../src/saas/gateway/codex/response-bridge.js';
-import { ResponsesUsageWatcher, codexUsageToObservedUsage } from '../../../../src/saas/gateway/codex/transport.js';
+import { anthropicUsageFields, chatCompletionsUsage } from '../../../../src/saas/gateway/codex/response-bridge.js';
+import { codexUsageToObservedUsage, ResponsesUsageWatcher } from '../../../../src/saas/gateway/codex/transport.js';
 
 function feed(watcher: ResponsesUsageWatcher, event: unknown): void {
   watcher.feed(new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`));
 }
 test('Codex missing token fields are unknown; explicit zero remains reported', () => {
-  assert.equal(codexUsageToObservedUsage({ inputTokens: null, outputTokens: 1, cachedTokens: null, reasoningTokens: null }), null);
-  assert.equal(codexUsageToObservedUsage({ inputTokens: 1, outputTokens: null, cachedTokens: null, reasoningTokens: null }), null);
-  assert.notEqual(codexUsageToObservedUsage({ inputTokens: 0, outputTokens: 0, cachedTokens: null, reasoningTokens: null }), null);
+  assert.equal(
+    codexUsageToObservedUsage({ inputTokens: null, outputTokens: 1, cachedTokens: null, reasoningTokens: null }),
+    null,
+  );
+  assert.equal(
+    codexUsageToObservedUsage({ inputTokens: 1, outputTokens: null, cachedTokens: null, reasoningTokens: null }),
+    null,
+  );
+  assert.notEqual(
+    codexUsageToObservedUsage({ inputTokens: 0, outputTokens: 0, cachedTokens: null, reasoningTokens: null }),
+    null,
+  );
 });
 for (const status of ['completed', 'incomplete', 'failed']) {
   test(`Codex ${status} preserves terminal usage independently from execution status`, () => {

@@ -51,17 +51,31 @@ export interface CodexTrustedBoundProfileResolver {
   readonly readiness: () => { readonly admittedProfileCount: number; readonly reason: string };
 }
 function canonical(value: unknown): string {
-  if (value === null || typeof value !== 'object') { const encoded = JSON.stringify(value); if (encoded === undefined) throw new Error('Invalid trusted bound profile'); return encoded; }
+  if (value === null || typeof value !== 'object') {
+    const encoded = JSON.stringify(value);
+    if (encoded === undefined) throw new Error('Invalid trusted bound profile');
+    return encoded;
+  }
   if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
   const object = value as Record<string, unknown>;
-  return `{${Object.keys(object).sort().map((key) => `${JSON.stringify(key)}:${canonical(object[key])}`).join(',')}}`;
+  return `{${Object.keys(object)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${canonical(object[key])}`)
+    .join(',')}}`;
 }
 export function codexTrustedProfileDigest(profile: CodexTrustedBoundProfile): string {
   const ordered = {
-    endpoint: profile.scope.endpoint, productId: profile.scope.productId, model: profile.scope.model,
-    operation: profile.scope.operation, transport: profile.scope.transport, continuationMode: profile.scope.continuationMode,
-    backendRevision: profile.backendRevision, evidenceVersion: profile.evidenceVersion,
-    evidenceReference: profile.evidenceReference, validFromMs: profile.validFromMs, expiresAtMs: profile.expiresAtMs,
+    endpoint: profile.scope.endpoint,
+    productId: profile.scope.productId,
+    model: profile.scope.model,
+    operation: profile.scope.operation,
+    transport: profile.scope.transport,
+    continuationMode: profile.scope.continuationMode,
+    backendRevision: profile.backendRevision,
+    evidenceVersion: profile.evidenceVersion,
+    evidenceReference: profile.evidenceReference,
+    validFromMs: profile.validFromMs,
+    expiresAtMs: profile.expiresAtMs,
     bounds: profile.bounds,
   };
   return createHash('sha256').update(canonical(ordered)).digest('hex');
@@ -72,29 +86,58 @@ export function createCodexTrustedBoundProfileResolver(
   const admitted: readonly CodexTrustedBoundProfile[] = Object.freeze([...profiles]);
   return Object.freeze({
     resolve(scope: CodexTrustedBoundScope, nowMs = Date.now()) {
-      const profile = admitted.find((candidate) =>
-        Object.entries(scope).every(([key, value]) => candidate.scope[key as keyof CodexTrustedBoundScope] === value) &&
-        candidate.validFromMs <= nowMs && nowMs < candidate.expiresAtMs,
+      const profile = admitted.find(
+        (candidate) =>
+          Object.entries(scope).every(
+            ([key, value]) => candidate.scope[key as keyof CodexTrustedBoundScope] === value,
+          ) &&
+          candidate.validFromMs <= nowMs &&
+          nowMs < candidate.expiresAtMs,
       );
       return profile ? { profile, digest: codexTrustedProfileDigest(profile) } : null;
     },
-    sendProfile(version: string, compilerVersion: string, actual: Omit<CodexTrustedBoundScope, 'continuationMode'>, nowMs = Date.now()) {
-      return admitted.find((profile) => profile.validFromMs <= nowMs && nowMs < profile.expiresAtMs &&
-        Object.entries(actual).every(([key, value]) => profile.scope[key as keyof CodexTrustedBoundScope] === value) &&
-        codexBoundCompilerVersion(compilerVersion, profile) === version) ?? null;
+    sendProfile(
+      version: string,
+      compilerVersion: string,
+      actual: Omit<CodexTrustedBoundScope, 'continuationMode'>,
+      nowMs = Date.now(),
+    ) {
+      return (
+        admitted.find(
+          (profile) =>
+            profile.validFromMs <= nowMs &&
+            nowMs < profile.expiresAtMs &&
+            Object.entries(actual).every(
+              ([key, value]) => profile.scope[key as keyof CodexTrustedBoundScope] === value,
+            ) &&
+            codexBoundCompilerVersion(compilerVersion, profile) === version,
+        ) ?? null
+      );
     },
     isDigestActive(digest: string, nowMs = Date.now()) {
-      return admitted.some((profile) => profile.validFromMs <= nowMs && nowMs < profile.expiresAtMs && codexTrustedProfileDigest(profile) === digest);
+      return admitted.some(
+        (profile) =>
+          profile.validFromMs <= nowMs && nowMs < profile.expiresAtMs && codexTrustedProfileDigest(profile) === digest,
+      );
     },
     readiness() {
       return admitted.length === 0
-        ? { admittedProfileCount: 0, reason: 'No reviewed endpoint-specific Codex enforcement and metering contract is admitted' }
-        : { admittedProfileCount: admitted.length, reason: 'Reviewed Codex enforcement and metering contracts are admitted' };
+        ? {
+            admittedProfileCount: 0,
+            reason: 'No reviewed endpoint-specific Codex enforcement and metering contract is admitted',
+          }
+        : {
+            admittedProfileCount: admitted.length,
+            reason: 'Reviewed Codex enforcement and metering contracts are admitted',
+          };
     },
   });
 }
 const DEFAULT_RESOLVER: CodexTrustedBoundProfileResolver = createCodexTrustedBoundProfileResolver(REVIEWED_PROFILES);
-export function resolveCodexTrustedBoundProfile(scope: CodexTrustedBoundScope, nowMs = Date.now()): {
+export function resolveCodexTrustedBoundProfile(
+  scope: CodexTrustedBoundScope,
+  nowMs = Date.now(),
+): {
   readonly digest: string;
   readonly profile: CodexTrustedBoundProfile;
 } | null {
@@ -109,14 +152,26 @@ export function codexTrustedBoundReadiness(): { readonly admittedProfileCount: n
 
 /** Compact signed compiler version stays within metering's 64-byte version contract. */
 export function codexBoundCompilerVersion(compilerVersion: string, profile: CodexTrustedBoundProfile): string {
-  return `cb1:${createHash('sha256').update(JSON.stringify({ compilerVersion, trustedBoundEvidenceDigest: codexTrustedProfileDigest(profile) })).digest('base64url')}`;
+  return `cb1:${createHash('sha256')
+    .update(JSON.stringify({ compilerVersion, trustedBoundEvidenceDigest: codexTrustedProfileDigest(profile) }))
+    .digest('base64url')}`;
 }
-export function resolveCodexBoundCompilerVersion(version: string, compilerVersion: string, scope: CodexTrustedBoundScope, nowMs = Date.now()): CodexTrustedBoundProfile | null {
+export function resolveCodexBoundCompilerVersion(
+  version: string,
+  compilerVersion: string,
+  scope: CodexTrustedBoundScope,
+  nowMs = Date.now(),
+): CodexTrustedBoundProfile | null {
   const resolved = resolveCodexTrustedBoundProfile(scope, nowMs);
   return resolved && codexBoundCompilerVersion(compilerVersion, resolved.profile) === version ? resolved.profile : null;
 }
 
 /** The signed version commits continuation mode; actual transport must match all other scope fields. */
-export function resolveCodexBoundSendProfile(version: string, compilerVersion: string, actual: Omit<CodexTrustedBoundScope, 'continuationMode'>, nowMs = Date.now()): CodexTrustedBoundProfile | null {
+export function resolveCodexBoundSendProfile(
+  version: string,
+  compilerVersion: string,
+  actual: Omit<CodexTrustedBoundScope, 'continuationMode'>,
+  nowMs = Date.now(),
+): CodexTrustedBoundProfile | null {
   return DEFAULT_RESOLVER.sendProfile(version, compilerVersion, actual, nowMs);
 }

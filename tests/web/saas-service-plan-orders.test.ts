@@ -228,8 +228,21 @@ test('bounded order polling stops when hidden, terminal, exhausted, or provider-
   const validOrder = parseServicePlanOrder(order()) as ServicePlanOrder;
   assert.equal(shouldPollServicePlanOrder(validOrder, true, 0), true);
   assert.equal(shouldPollServicePlanOrder(validOrder, false, 0), false);
-  assert.equal(shouldPollServicePlanOrder({ ...validOrder, checkout: { status: 'expired', action: null } }, true, 0), false);
-  assert.equal(shouldPollServicePlanOrder({ ...validOrder, checkout: { status: 'ready', action: { kind: 'qr', text: 'expired', expiresAt: '2000-01-01T00:00:00Z' } } }, true, 0), false);
+  assert.equal(
+    shouldPollServicePlanOrder({ ...validOrder, checkout: { status: 'expired', action: null } }, true, 0),
+    false,
+  );
+  assert.equal(
+    shouldPollServicePlanOrder(
+      {
+        ...validOrder,
+        checkout: { status: 'ready', action: { kind: 'qr', text: 'expired', expiresAt: '2000-01-01T00:00:00Z' } },
+      },
+      true,
+      0,
+    ),
+    false,
+  );
   assert.equal(shouldPollServicePlanOrder({ ...validOrder, state: 'fulfilled' }, true, 0), false);
   assert.equal(
     shouldPollServicePlanOrder({ ...validOrder, providerFailureCode: 'PROVIDER_CREATE_FAILED' }, true, 0),

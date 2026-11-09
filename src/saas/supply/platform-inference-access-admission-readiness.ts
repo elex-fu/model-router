@@ -23,12 +23,25 @@ export interface PlatformInferenceAccessAdmissionReadiness {
 export function createBuiltinPlatformInferenceAccessAdmissionReadiness(): PlatformInferenceAccessAdmissionReadiness {
   return {
     check(scope) {
-      if (scope.providerId !== 'openai-codex') return {status:'ready'};
-      if (scope.workflow !== 'responses-http-full' || scope.providerProtocol !== 'responses' || scope.endpoint !== '/v1/responses') {
-        return {status:'blocked',code:'WORKFLOW_UNSUPPORTED'};
+      if (scope.providerId !== 'openai-codex') return { status: 'ready' };
+      if (
+        scope.workflow !== 'responses-http-full' ||
+        scope.providerProtocol !== 'responses' ||
+        scope.endpoint !== '/v1/responses'
+      ) {
+        return { status: 'blocked', code: 'WORKFLOW_UNSUPPORTED' };
       }
-      const trusted=resolveCodexTrustedBoundProfile({endpoint:CODEX_RESPONSES_ENDPOINT,productId:scope.productId,model:scope.resolvedModel,operation:'responses',transport:'http',continuationMode:'full'});
-      return trusted ? {status:'ready',evidenceDigest:trusted.digest} : {status:'blocked',code:'TRUSTED_USAGE_BOUNDS_UNAVAILABLE'};
+      const trusted = resolveCodexTrustedBoundProfile({
+        endpoint: CODEX_RESPONSES_ENDPOINT,
+        productId: scope.productId,
+        model: scope.resolvedModel,
+        operation: 'responses',
+        transport: 'http',
+        continuationMode: 'full',
+      });
+      return trusted
+        ? { status: 'ready', evidenceDigest: trusted.digest }
+        : { status: 'blocked', code: 'TRUSTED_USAGE_BOUNDS_UNAVAILABLE' };
     },
   };
 }

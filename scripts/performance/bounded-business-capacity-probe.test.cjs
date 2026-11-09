@@ -136,7 +136,7 @@ test('sample retention is bounded; finished and aborted flags never release a pe
 });
 
 test('matched current module hash reaches installed proof and snapshots without a legacy label', () => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'capacity-current-pin-'));
+  const directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'capacity-current-pin-')));
   const filename = path.join(directory, 'server/managed-saas-gateway.js');
   fs.mkdirSync(path.dirname(filename));
   const source = compiled();

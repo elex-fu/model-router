@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
-import type { QuotaStore } from './store.js';
 import { type QuotaPeriod, quotaPeriod } from './period.js';
+import type { QuotaStore } from './store.js';
 
 export type QuotaTimezoneVersionState = 'active' | 'scheduled' | 'superseded';
 

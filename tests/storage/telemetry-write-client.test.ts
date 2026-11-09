@@ -92,7 +92,7 @@ test('queue overflow counts dropped observations and resumes accepting writes af
     const first = client.upsertRequest(request('accepted'));
     await assert.rejects(client.upsertRequest(request('overflow')), TelemetryWriteQueueFullError);
     assert.equal(client.getStatus().degraded, true);
-    assert.equal(client.getStatus().droppedEvents,1);
+    assert.equal(client.getStatus().droppedEvents, 1);
     await first;
     await client.upsertRequest(request('later'));
     reader = new SQLiteTelemetryStore(dbPath);
@@ -111,22 +111,24 @@ test('failed observation batches cannot block the independent business ledger or
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mr-telemetry-quota-rpc-'));
   const dbPath = path.join(dir, 'logs.sqlite');
   const store = new SQLiteTelemetryStore(dbPath);
-  const business=new Database(path.join(dir,'control.sqlite'));
+  const business = new Database(path.join(dir, 'control.sqlite'));
   business.pragma('journal_mode=WAL');
   initializeQuotaStore(business);
-  const quota=await QuotaWriteClient.open(business.name);
+  const quota = await QuotaWriteClient.open(business.name);
   let client: TelemetryWriteClient | undefined;
   try {
     await store.init();
-    store.connection.exec("CREATE TRIGGER fail_logs BEFORE INSERT ON requests BEGIN SELECT RAISE(ABORT,'injected log failure'); END");
-    client = await TelemetryWriteClient.open(dbPath,{flushIntervalMs:10});
-    const logged=client.upsertRequest(request('quota-request'));
-    await waitFor(()=>client!.getStatus().degraded);
+    store.connection.exec(
+      "CREATE TRIGGER fail_logs BEFORE INSERT ON requests BEGIN SELECT RAISE(ABORT,'injected log failure'); END",
+    );
+    client = await TelemetryWriteClient.open(dbPath, { flushIntervalMs: 10 });
+    const logged = client.upsertRequest(request('quota-request'));
+    await waitFor(() => client!.getStatus().degraded);
     assert.deepEqual(await quota.admit(admission('quota-request')), { allowed: true });
-    await quota.markAttemptSent('quota-request','attempt');
-    await quota.recordAttemptUsage('quota-request','attempt',37);
-    const ledger=new SQLiteQuotaLedger({connection:business});
-    assert.equal(await ledger.recoverInterrupted(),1);
+    await quota.markAttemptSent('quota-request', 'attempt');
+    await quota.recordAttemptUsage('quota-request', 'attempt', 37);
+    const ledger = new SQLiteQuotaLedger({ connection: business });
+    assert.equal(await ledger.recoverInterrupted(), 1);
     const balance = await ledger.balance('key-1', 'current-test-period');
     assert.deepEqual(balance, {
       reportedUsed: 37,
@@ -135,7 +137,7 @@ test('failed observation batches cannot block the independent business ledger or
       adjustmentTokens: 0,
       activeRequests: 0,
     });
-    assert.equal(await store.getRequest('quota-request'),null);
+    assert.equal(await store.getRequest('quota-request'), null);
     store.connection.exec('DROP TRIGGER fail_logs');
     await logged;
   } finally {

@@ -8,7 +8,10 @@ import { protectSaasUpgrade, SAAS_BACKUP_POLICY_FILE_ENV, SaasBackupFailure } fr
 import { verifyCredentialValidationWorkerRuntimePrivileges } from '../saas/db/credential-validation-worker-privileges.js';
 import { runSaasMigrations, verifySaasMigrations } from '../saas/db/migrate.js';
 import { SAAS_MIGRATIONS } from '../saas/db/migrations/001_initial_schema.js';
-import { verifySaasRuntimeDatabasePrivileges } from '../saas/db/runtime-privileges.js';
+import {
+  verifySaasRuntimeDatabasePrivileges,
+  verifySaasSchema155RuntimeDatabasePrivileges,
+} from '../saas/db/runtime-privileges.js';
 import type { SaasDatabasePool, SqlExecutor } from '../saas/db/types.js';
 import { DEPLOYMENT_ENV_VARS } from '../saas/deployment.js';
 import {
@@ -633,25 +636,29 @@ export async function saasUpgrade(
         await verifySaasRuntimeDatabasePrivileges(executor, role === 'gateway' ? 'gateway' : 'control_plane');
       });
 
-    const doctorRun =
-      dependencies.doctor ??
-      (async (role: SaasDeployRole, doctorEnv: NodeJS.ProcessEnv): Promise<SaasDoctorResult> => {
-        // The doctor output is captured, not printed: the upgrade surfaces the
-        // subset verdicts itself so its report stays the single narrative.
-        const sink: string[] = [];
-        return await saasDoctor(
-          { role },
-          {
-            env: doctorEnv,
-            createPool: (connectionString: string) =>
-              createPool(connectionString, {
-                allowLocalPlaintext,
-                applicationName: 'model-router-saas-upgrade-doctor',
-              }),
-            writeLine: (line) => sink.push(line),
-          },
-        );
-      });
+    const doctorRun = async (
+      role: SaasDeployRole,
+      doctorEnv: NodeJS.ProcessEnv,
+      baselineHead?: number,
+    ): Promise<SaasDoctorResult> => {
+      if (dependencies.doctor) return dependencies.doctor(role, doctorEnv);
+      // The doctor output is captured, not printed: the upgrade surfaces the
+      // subset verdicts itself so its report stays the single narrative.
+      const sink: string[] = [];
+      return await saasDoctor(
+        { role },
+        {
+          env: doctorEnv,
+          verifyRuntimePrivileges: baselineHead === 155 ? verifySaasSchema155RuntimeDatabasePrivileges : undefined,
+          createPool: (connectionString: string) =>
+            createPool(connectionString, {
+              allowLocalPlaintext,
+              applicationName: 'model-router-saas-upgrade-doctor',
+            }),
+          writeLine: (line) => sink.push(line),
+        },
+      );
+    };
 
     // ---------- rollback mode ----------
     if (options.rollbackTo !== undefined) {
@@ -723,7 +730,7 @@ export async function saasUpgrade(
       {
         mode: 'pre',
         allowPrivilegeHeal: alreadyAtHead,
-        doctor: doctorRun,
+        doctor: (role, env) => doctorRun(role, env, preState.head ?? undefined),
         env: environment,
       },
     );

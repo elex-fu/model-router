@@ -65,10 +65,7 @@ export class CachedRequestPreparationAuthority implements RequestPreparationAuth
   /** The wrapped PostgreSQL adapter; public read-only like the protocol decorators. */
   readonly underlyingAuthority: RequestPreparationAuthorityPort;
 
-  constructor(
-    source: RequestPreparationAuthorityPort,
-    options: CachedRequestPreparationAuthorityOptions = {},
-  ) {
+  constructor(source: RequestPreparationAuthorityPort, options: CachedRequestPreparationAuthorityOptions = {}) {
     this.underlyingAuthority = source;
     this.ttlMs = options.ttlMs ?? 5000;
     this.maxEntries = options.maxEntries ?? 4096;

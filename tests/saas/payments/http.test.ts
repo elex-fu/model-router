@@ -792,18 +792,31 @@ test('payment order history validates query parameters and returns unavailable w
   assert.equal(body.error.code, 'PAYMENT_ORDER_HISTORY_UNAVAILABLE');
 });
 
-
 test('Alipay acknowledges a durable inbox acceptance with exact plaintext success', async () => {
   const app = await createTestServer('owner', false, true, true, true, 'alipay');
-  const response = await fetch(`${app.origin}/payments/webhooks/alipay/binding-old`, { method: 'POST', body: 'signed-provider-body' });
+  const response = await fetch(`${app.origin}/payments/webhooks/alipay/binding-old`, {
+    method: 'POST',
+    body: 'signed-provider-body',
+  });
   assert.equal(response.status, 200);
   assert.match(response.headers.get('content-type') ?? '', /^text\/plain/);
   assert.equal(await response.text(), 'success');
 });
 
 test('Alipay never acknowledges a failed verification or inbox transaction', async () => {
-  const app = await createTestServer('owner', false, true, true, true, 'alipay', new Error('inbox transaction unavailable'));
-  const response = await fetch(`${app.origin}/payments/webhooks/alipay/binding-old`, { method: 'POST', body: 'signed-provider-body' });
+  const app = await createTestServer(
+    'owner',
+    false,
+    true,
+    true,
+    true,
+    'alipay',
+    new Error('inbox transaction unavailable'),
+  );
+  const response = await fetch(`${app.origin}/payments/webhooks/alipay/binding-old`, {
+    method: 'POST',
+    body: 'signed-provider-body',
+  });
   assert.equal(response.status, 500);
   assert.notEqual(await response.text(), 'success');
 });

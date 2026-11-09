@@ -27,11 +27,14 @@ import {
 import type { TenantContext } from '../identity/types.js';
 import { PostgresSupplyProfileResolver } from '../keys/resolver.js';
 import { ByokServicePlanService } from '../plans/service.js';
-import { createBuiltinProviderEvidenceTransportFactory } from './builtin-provider-transports.js';
 import { BUILTIN_PAYLOAD_COMPILER_VERSION } from './builtin-payload-compiler-version.js';
+import { createBuiltinProviderEvidenceTransportFactory } from './builtin-provider-transports.js';
 import { createBuiltinUsageUpperBoundEstimator } from './builtin-usage-bounds.js';
-import { collectCodexWorkflowFinancialReadiness, declaredCodexFinancialWorkflows } from './codex-workflow-financial-readiness.js';
 import { createDbCodexTrustedBoundProfileResolver } from './codex-bound-db-resolver.js';
+import {
+  collectCodexWorkflowFinancialReadiness,
+  declaredCodexFinancialWorkflows,
+} from './codex-workflow-financial-readiness.js';
 import type { GatewayCapabilityReadiness, GatewayCapabilityVerificationLevel } from './gateway-capability-readiness.js';
 import { assertGatewayCapabilityAssembly, projectGatewayCapabilityReadiness } from './gateway-capability-readiness.js';
 import type {
@@ -363,7 +366,11 @@ export async function createBuiltinManagedSaasGatewayRuntime(
         ...extensions.providerBundles
           .filter((bundle) => bundle.enabled)
           .map((bundle) => `provider-bundle:${bundle.bundle}`),
-        ...(extensions.providerBundles.some((bundle) => bundle.bundle === 'openai-codex' && bundle.enabled) ? ['responses-http-full', 'responses-ws-full', 'responses-ws-continuation', 'responses-compact'].map((workflow) => `codex-workflow:${workflow}`) : []),
+        ...(extensions.providerBundles.some((bundle) => bundle.bundle === 'openai-codex' && bundle.enabled)
+          ? ['responses-http-full', 'responses-ws-full', 'responses-ws-continuation', 'responses-compact'].map(
+              (workflow) => `codex-workflow:${workflow}`,
+            )
+          : []),
         ...(extensions.media ? [`media:${extensions.media.storage}`] : []),
         ...(extensions.tlsFingerprint ? [`tls-fingerprint:${extensions.tlsFingerprint.profile}`] : []),
       ]);
@@ -677,7 +684,11 @@ export async function createBuiltinManagedSaasGatewayRuntime(
                         },
                       }
                     : input.body;
-          if (input.providerId === 'openai-codex') return applyCodexCompilation(bounded, { allowNativePreviousResponseId: input.upstreamTransport === 'websocket' && input.continuationMode === 'remote-history' });
+          if (input.providerId === 'openai-codex')
+            return applyCodexCompilation(bounded, {
+              allowNativePreviousResponseId:
+                input.upstreamTransport === 'websocket' && input.continuationMode === 'remote-history',
+            });
           if (input.providerId === 'anthropic-claude')
             return applyClaudeOAuthTransform(bounded, { cliVersion: CLAUDE_CLI_BASELINE_VERSION });
           if (input.providerId === 'google-gemini') return normalizeGeminiToolsForAiStudio(bounded);
@@ -712,7 +723,8 @@ export async function createBuiltinManagedSaasGatewayRuntime(
       enabled.filter((entry) => entry?.dispatch !== 'generic').flatMap((entry) => entry?.endpointScopes ?? []),
     );
     const codexDeclaredWorkflows = enabled.some((entry) => entry?.providerId === 'openai-codex')
-      ? declaredCodexFinancialWorkflows(nativeCompact) : Object.freeze([]);
+      ? declaredCodexFinancialWorkflows(nativeCompact)
+      : Object.freeze([]);
     const deploymentFacts: GatewayCapabilityDeploymentFacts = Object.freeze({
       get dispatch() {
         return Object.freeze({
@@ -758,12 +770,17 @@ export async function createBuiltinManagedSaasGatewayRuntime(
         undefined,
         codexProfileResolver,
       );
-      const unavailable = (facts.unavailableUsageBoundProviderIds ?? []).filter((providerId) => providerId !== 'openai-codex');
-      if (enabled.some((entry) => entry?.providerId === 'openai-codex') &&
-        !(codexDeclaredWorkflows.length > 0 && codexDeclaredWorkflows.every((workflow) => financial[workflow] === true))) {
+      const unavailable = (facts.unavailableUsageBoundProviderIds ?? []).filter(
+        (providerId) => providerId !== 'openai-codex',
+      );
+      if (
+        enabled.some((entry) => entry?.providerId === 'openai-codex') &&
+        !(codexDeclaredWorkflows.length > 0 && codexDeclaredWorkflows.every((workflow) => financial[workflow] === true))
+      ) {
         unavailable.push('openai-codex');
       }
-      return Object.freeze({ ...facts,
+      return Object.freeze({
+        ...facts,
         codexWorkflowFinancialReadiness: financial,
         unavailableUsageBoundProviderIds: Object.freeze(unavailable),
       });

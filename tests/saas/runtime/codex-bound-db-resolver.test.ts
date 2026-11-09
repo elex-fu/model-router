@@ -20,7 +20,7 @@ const SCOPE = {
   model: 'gpt-5.2-codex',
   operation: 'responses',
   transport: 'http',
-  continuationMode: 'canonical-replay',
+  continuationMode: 'full',
 } as const;
 
 const BOUNDS = {
@@ -142,7 +142,26 @@ test('scope mismatches, not-yet-valid and corrupt-digest rows never admit', asyn
   assert.ok(resolver.resolve(SCOPE));
   assert.equal(resolver.resolve(SCOPE)?.digest, digest);
   assert.equal(resolver.resolve({ ...SCOPE, model: 'other-model' }), null);
-  assert.equal(resolver.resolve({ ...SCOPE, continuationMode: 'full' }), null);
+  assert.equal(resolver.resolve({ ...SCOPE, continuationMode: 'remote-history' }), null);
+});
+
+test('semantically invalid approved rows fail closed even with a matching digest', async () => {
+  const fake = new LedgerFake();
+  const invalid = {
+    ...profile(1000, 60_000),
+    bounds: { ...BOUNDS, cacheReadUpperBound: '101' },
+  };
+  fake.rows = [row(1000, 60_000, codexTrustedProfileDigest(invalid))];
+  const corruptedRow = fake.rows[0];
+  assert.ok(corruptedRow);
+  corruptedRow.bounds = invalid.bounds;
+  const resolver = await createDbCodexTrustedBoundProfileResolver({
+    database: fake,
+    expiryMarginMs: 5000,
+    now: () => 2000,
+  });
+  assert.equal(resolver.resolve(SCOPE), null);
+  assert.equal(resolver.readiness().admittedProfileCount, 0);
 });
 
 test('the TTL cache reads once per interval and refresh picks up new approvals', async () => {

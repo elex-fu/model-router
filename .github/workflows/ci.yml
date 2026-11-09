@@ -115,6 +115,8 @@ jobs:
           tests/saas/db/migrations/056_restricted_role_check_and_platform_auth_execution.test.ts
           tests/saas/db/migrations/056_restricted_role_check_and_platform_auth_execution.postgres.integration.test.ts
           tests/saas/platform/auth/managed-postgres-mfa-enrollment.integration.test.ts
+          tests/saas/platform/codex-bound-admission.postgres.integration.test.ts
+          tests/saas/db/migrations/155_codex_trusted_bound_profiles.test.ts
           tests/saas/db/migrations/057_normal_success_usage_evidence_reference.test.ts
           tests/saas/db/migrations/058_credential_validation_invalidation_trigger_execution.test.ts
           tests/saas/db/migrations/058_credential_validation_invalidation_trigger_execution.postgres.integration.test.ts
@@ -235,6 +237,14 @@ jobs:
           MODEL_ROUTER_SAAS_GATEWAY_E2E_CONTROL_PLANE_URL: postgresql://model_router_saas_control_plane@postgres:5432/model_router_saas_ci
           MODEL_ROUTER_SAAS_GATEWAY_E2E_GATEWAY_URL: postgresql://model_router_saas_gateway@postgres:5432/model_router_saas_ci
         run: node --import tsx --test tests/saas/platform/auth/managed-postgres-mfa-enrollment.integration.test.ts
+      - name: Run required real PostgreSQL Codex profile approval and resolution gate
+        env:
+          NODE_ENV: test
+          MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED: "1"
+          MODEL_ROUTER_SAAS_GATEWAY_E2E_MIGRATOR_URL: postgresql://model_router_saas_migrator@postgres:5432/model_router_saas_ci
+          MODEL_ROUTER_SAAS_GATEWAY_E2E_CONTROL_PLANE_URL: postgresql://model_router_saas_control_plane@postgres:5432/model_router_saas_ci
+          MODEL_ROUTER_SAAS_GATEWAY_E2E_GATEWAY_URL: postgresql://model_router_saas_gateway@postgres:5432/model_router_saas_ci
+        run: node --import tsx --test tests/saas/platform/codex-bound-admission.postgres.integration.test.ts
       - name: Run required real PostgreSQL financial invariants
         env:
           NODE_ENV: test
@@ -483,3 +493,40 @@ jobs:
           elapsed=$((SECONDS - start))
           echo "saas:deploy + saas:doctor wall time: ${elapsed}s (plan §6 budget: 900s)"
           test "$elapsed" -lt 900
+
+  managed-saas-customer-postgres-e2e:
+    name: Managed SaaS customer browser E2E (PG ${{ matrix.postgres-version }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres-version: ["15", "18"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.16.0"
+          cache: npm
+      - name: Install PostgreSQL server and client tools
+        env:
+          POSTGRES_MAJOR: ${{ matrix.postgres-version }}
+        run: |
+          key=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+          sudo install -d /usr/share/postgresql-common/pgdg
+          curl --fail --silent --show-error --location https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo tee "$key" >/dev/null
+          fingerprint=$(gpg --batch --with-colons --show-keys "$key" | awk -F: '$1 == "fpr" { print $10; exit }')
+          test "$fingerprint" = B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8
+          printf 'deb [signed-by=%s] https://apt.postgresql.org/pub/repos/apt noble-pgdg main\n' "$key" | sudo tee /etc/apt/sources.list.d/model-router-pgdg.list >/dev/null
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends "postgresql-$POSTGRES_MAJOR"
+          "/usr/lib/postgresql/$POSTGRES_MAJOR/bin/postgres" --version
+          echo "/usr/lib/postgresql/$POSTGRES_MAJOR/bin" >> "$GITHUB_PATH"
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Install Chromium for customer browser E2E
+        run: npx playwright install --with-deps chromium
+      - name: Run required customer PostgreSQL browser E2E
+        env:
+          E2E_CUSTOMER_POSTGRES: "1"
+        run: npm run test:e2e -- tests/e2e/customer-*.spec.ts

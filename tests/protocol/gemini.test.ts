@@ -2,10 +2,11 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import {
+  AnthToGeminiBridge,
   anthropicToGeminiRequest,
+  GeminiToAnthBridge,
   geminiStreamToAnthropicStream,
   geminiToAnthropicResponse,
-  AnthToGeminiBridge, GeminiToAnthBridge,
 } from '../../src/protocol/gemini.js';
 import { GeminiShadowStore } from '../../src/protocol/gemini-shadow.js';
 
@@ -42,7 +43,18 @@ test('anthropicToGeminiRequest maps array system blocks', () => {
 });
 
 test('anthropicToGeminiRequest explicitly rejects image blocks without a proven media workflow', () => {
-  assert.throws(() => anthropicToGeminiRequest({messages:[{role:'user',content:[{type:'image',source:{media_type:'image/jpeg',data:'synthetic'}}]}]},'gemini-pro'), /Unsupported bridge feature/);
+  assert.throws(
+    () =>
+      anthropicToGeminiRequest(
+        {
+          messages: [
+            { role: 'user', content: [{ type: 'image', source: { media_type: 'image/jpeg', data: 'synthetic' } }] },
+          ],
+        },
+        'gemini-pro',
+      ),
+    /Unsupported bridge feature/,
+  );
 });
 
 test('anthropicToGeminiRequest maps tools', () => {
@@ -165,29 +177,142 @@ test('geminiStreamToAnthropicStream tool IDs are stable via shadow store', () =>
   assert.equal(snapshot[ids[0]].name, 'fn');
 });
 
-function fragmentedSse(events:any[]):ReadableStream<Uint8Array>{const bytes=new TextEncoder().encode(events.map(e=>`data: ${JSON.stringify(e)}\r\n\r\n`).join(''));let i=0;return new ReadableStream({pull(c){if(i===bytes.length)c.close();else c.enqueue(bytes.slice(i,++i));}});}
-async function collectEvents(stream:ReadableStream<Uint8Array>):Promise<any[]>{const reader=stream.getReader();let text='';const decoder=new TextDecoder();while(true){const r=await reader.read();if(r.done)break;text+=decoder.decode(r.value,{stream:true});}return text.split('\n\n').filter(Boolean).map(block=>JSON.parse(block.split('\n').find(l=>l.startsWith('data: '))!.slice(6)));}
+function fragmentedSse(events: any[]): ReadableStream<Uint8Array> {
+  const bytes = new TextEncoder().encode(events.map((e) => `data: ${JSON.stringify(e)}\r\n\r\n`).join(''));
+  let i = 0;
+  return new ReadableStream({
+    pull(c) {
+      if (i === bytes.length) c.close();
+      else c.enqueue(bytes.slice(i, ++i));
+    },
+  });
+}
+async function collectEvents(stream: ReadableStream<Uint8Array>): Promise<any[]> {
+  const reader = stream.getReader();
+  let text = '';
+  const decoder = new TextDecoder();
+  while (true) {
+    const r = await reader.read();
+    if (r.done) break;
+    text += decoder.decode(r.value, { stream: true });
+  }
+  return text
+    .split('\n\n')
+    .filter(Boolean)
+    .map((block) =>
+      JSON.parse(
+        block
+          .split('\n')
+          .find((l) => l.startsWith('data: '))!
+          .slice(6),
+      ),
+    );
+}
 
-test('Anthropic/Gemini two same-name tool calls retain IDs across full history',()=>{
-  const anthropic={model:'g',max_tokens:128,messages:[{role:'user',content:'hi'},{role:'assistant',content:[{type:'tool_use',id:'a',name:'f',input:{n:1}},{type:'tool_use',id:'b',name:'f',input:{n:2}}]},{role:'user',content:[{type:'tool_result',tool_use_id:'b',content:'{"ok":true}'},{type:'tool_result',tool_use_id:'a',content:'text'}]}]};
-  const gemini=new AnthToGeminiBridge().transformRequest(anthropic);
-  assert.equal(gemini.contents[2].parts[0].functionResponse.id,'b');
-  const back=new GeminiToAnthBridge().transformRequest(gemini);
-  assert.equal(back.messages[1].content[1].id,'b');assert.equal(back.messages[2].content[0].tool_use_id,'b');
+test('Anthropic/Gemini two same-name tool calls retain IDs across full history', () => {
+  const anthropic = {
+    model: 'g',
+    max_tokens: 128,
+    messages: [
+      { role: 'user', content: 'hi' },
+      {
+        role: 'assistant',
+        content: [
+          { type: 'tool_use', id: 'a', name: 'f', input: { n: 1 } },
+          { type: 'tool_use', id: 'b', name: 'f', input: { n: 2 } },
+        ],
+      },
+      {
+        role: 'user',
+        content: [
+          { type: 'tool_result', tool_use_id: 'b', content: '{"ok":true}' },
+          { type: 'tool_result', tool_use_id: 'a', content: 'text' },
+        ],
+      },
+    ],
+  };
+  const gemini = new AnthToGeminiBridge().transformRequest(anthropic);
+  assert.equal(gemini.contents[2].parts[0].functionResponse.id, 'b');
+  const back = new GeminiToAnthBridge().transformRequest(gemini);
+  assert.equal(back.messages[1].content[1].id, 'b');
+  assert.equal(back.messages[2].content[0].tool_use_id, 'b');
 });
-test('Gemini→Anthropic complete SSE lifecycle preserves UTF8, tool IDs and usage',async()=>{
-  const result=new AnthToGeminiBridge().transformStream(fragmentedSse([{responseId:'r',candidates:[{content:{parts:[{text:'你好'},{functionCall:{id:'a',name:'f',args:{n:1}}},{functionCall:{id:'b',name:'f',args:{n:2}}}]}}]},{candidates:[{finishReason:'STOP'}],usageMetadata:{promptTokenCount:7,candidatesTokenCount:3,cachedContentTokenCount:2}}]));
-  const events=await collectEvents(result.clientStream);assert.equal(events[0].type,'message_start');assert.equal(events.at(-1).type,'message_stop');
-  const starts=events.filter(e=>e.type==='content_block_start');assert.deepEqual(starts.map(e=>e.index),[0,1,2]);assert.equal(starts[1].content_block.id,'a');assert.equal(starts[2].content_block.id,'b');
-  assert.equal(events.at(-2).delta.stop_reason,'tool_use');assert.deepEqual(events.at(-2).usage,{input_tokens:5,output_tokens:3,cache_read_input_tokens:2});assert.equal((await result.usage).inputTokens,7);
+test('Gemini→Anthropic complete SSE lifecycle preserves UTF8, tool IDs and usage', async () => {
+  const result = new AnthToGeminiBridge().transformStream(
+    fragmentedSse([
+      {
+        responseId: 'r',
+        candidates: [
+          {
+            content: {
+              parts: [
+                { text: '你好' },
+                { functionCall: { id: 'a', name: 'f', args: { n: 1 } } },
+                { functionCall: { id: 'b', name: 'f', args: { n: 2 } } },
+              ],
+            },
+          },
+        ],
+      },
+      {
+        candidates: [{ finishReason: 'STOP' }],
+        usageMetadata: { promptTokenCount: 7, candidatesTokenCount: 3, cachedContentTokenCount: 2 },
+      },
+    ]),
+  );
+  const events = await collectEvents(result.clientStream);
+  assert.equal(events[0].type, 'message_start');
+  assert.equal(events.at(-1).type, 'message_stop');
+  const starts = events.filter((e) => e.type === 'content_block_start');
+  assert.deepEqual(
+    starts.map((e) => e.index),
+    [0, 1, 2],
+  );
+  assert.equal(starts[1].content_block.id, 'a');
+  assert.equal(starts[2].content_block.id, 'b');
+  assert.equal(events.at(-2).delta.stop_reason, 'tool_use');
+  assert.deepEqual(events.at(-2).usage, { input_tokens: 5, output_tokens: 3, cache_read_input_tokens: 2 });
+  assert.equal((await result.usage).inputTokens, 7);
 });
-test('Anthropic→Gemini stream assembles tool JSON fragments and waits for message_stop',async()=>{
-  const result=new GeminiToAnthBridge().transformStream(fragmentedSse([{type:'message_start',message:{id:'r',model:'a',usage:{input_tokens:4}}},{type:'content_block_start',index:0,content_block:{type:'tool_use',id:'a',name:'f',input:{}}},{type:'content_block_delta',index:0,delta:{type:'input_json_delta',partial_json:'{"n":'}},{type:'content_block_delta',index:0,delta:{type:'input_json_delta',partial_json:'1}'}},{type:'content_block_stop',index:0},{type:'message_delta',delta:{stop_reason:'tool_use'},usage:{output_tokens:2}},{type:'message_stop'}]));
-  const events=await collectEvents(result.clientStream);assert.deepEqual(events[0].candidates[0].content.parts[0].functionCall,{id:'a',name:'f',args:{n:1}});assert.equal(events.at(-1).candidates[0].finishReason,'STOP');assert.equal(events.at(-1).usageMetadata.promptTokenCount,4);assert.equal((await result.usage).outputTokens,2);
+test('Anthropic→Gemini stream assembles tool JSON fragments and waits for message_stop', async () => {
+  const result = new GeminiToAnthBridge().transformStream(
+    fragmentedSse([
+      { type: 'message_start', message: { id: 'r', model: 'a', usage: { input_tokens: 4 } } },
+      { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'a', name: 'f', input: {} } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"n":' } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '1}' } },
+      { type: 'content_block_stop', index: 0 },
+      { type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 2 } },
+      { type: 'message_stop' },
+    ]),
+  );
+  const events = await collectEvents(result.clientStream);
+  assert.deepEqual(events[0].candidates[0].content.parts[0].functionCall, { id: 'a', name: 'f', args: { n: 1 } });
+  assert.equal(events.at(-1).candidates[0].finishReason, 'STOP');
+  assert.equal(events.at(-1).usageMetadata.promptTokenCount, 4);
+  assert.equal((await result.usage).outputTokens, 2);
 });
-test('unsupported reasoning fails streams without successful terminal and cancellation reaches upstream',async()=>{
-  const bad=new AnthToGeminiBridge().transformStream(fragmentedSse([{candidates:[{content:{parts:[{text:'private',thought:true}]},finishReason:'STOP'}]}]));
-  await assert.rejects(collectEvents(bad.clientStream),/Unsupported bridge feature/);await bad.usage;
-  let cancelled=false;const upstream=new ReadableStream<Uint8Array>({cancel(){cancelled=true;}});const result=new GeminiToAnthBridge().transformStream(upstream);await result.clientStream.cancel('stop');assert.equal(cancelled,true);await result.usage;
-  const missing=new GeminiToAnthBridge().transformStream(fragmentedSse([{type:'message_start',message:{id:'r',model:'a'}}]));await assert.rejects(collectEvents(missing.clientStream),/Unsupported bridge feature/);await missing.usage;
+test('unsupported reasoning fails streams without successful terminal and cancellation reaches upstream', async () => {
+  const bad = new AnthToGeminiBridge().transformStream(
+    fragmentedSse([
+      { candidates: [{ content: { parts: [{ text: 'private', thought: true }] }, finishReason: 'STOP' }] },
+    ]),
+  );
+  await assert.rejects(collectEvents(bad.clientStream), /Unsupported bridge feature/);
+  await bad.usage;
+  let cancelled = false;
+  const upstream = new ReadableStream<Uint8Array>({
+    cancel() {
+      cancelled = true;
+    },
+  });
+  const result = new GeminiToAnthBridge().transformStream(upstream);
+  await result.clientStream.cancel('stop');
+  assert.equal(cancelled, true);
+  await result.usage;
+  const missing = new GeminiToAnthBridge().transformStream(
+    fragmentedSse([{ type: 'message_start', message: { id: 'r', model: 'a' } }]),
+  );
+  await assert.rejects(collectEvents(missing.clientStream), /Unsupported bridge feature/);
+  await missing.usage;
 });

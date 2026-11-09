@@ -106,7 +106,10 @@ describe('openai → responses bridge (F3 real conversion)', () => {
 
   it('leaves absent cached-token details unknown instead of fabricating zero', () => {
     const completion = new OpenAIToResponsesBridge().transformResponse({
-      id: 'resp_unknown_cache', model: 'grok-4.7', status: 'completed', output: [],
+      id: 'resp_unknown_cache',
+      model: 'grok-4.7',
+      status: 'completed',
+      output: [],
       usage: { input_tokens: 5, output_tokens: 2 },
     }) as Record<string, unknown>;
     assert.deepEqual(completion.usage, { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 });

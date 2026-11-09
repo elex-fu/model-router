@@ -232,6 +232,10 @@ import {
   createPostgresClaudeCatalogBindingResolver,
   createProviderSupplyClaudeCredentialSink,
 } from '../saas/platform/claude-oauth/supply-sink.js';
+import {
+  type CodexBoundAdminHttpHandler,
+  createCodexBoundAdminHttpHandler,
+} from '../saas/platform/codex-bound-admin-http.js';
 import { CodexOAuthBindingService, InMemoryBindingSessionStore } from '../saas/platform/codex-oauth/binding-service.js';
 import { type CodexOauthHttpHandler, createCodexOauthHttpHandler } from '../saas/platform/codex-oauth/http.js';
 import {
@@ -296,11 +300,6 @@ import { PlatformOperationsSummaryService } from '../saas/platform/operations/in
 import { createPaymentsControlHttpHandler } from '../saas/platform/payments-control-http.js';
 import { createPluginsHttpHandler, type PluginsHttpHandler } from '../saas/platform/plugins-http.js';
 import {
-  createCodexBoundAdminHttpHandler,
-  type CodexBoundAdminHttpHandler,
-} from '../saas/platform/codex-bound-admin-http.js';
-import { CodexBoundAdmissionService } from '../saas/supply/codex-bound-admission-service.js';
-import {
   createPostgresRiskControlAuditWriter,
   createRiskControlHttpHandler,
   type RiskControlHttpHandler,
@@ -318,13 +317,13 @@ import { PostgresPluginStore } from '../saas/plugins/store.js';
 import { SaasPricingService } from '../saas/pricing/index.js';
 import type { ModerationEmailSender } from '../saas/risk/moderation.js';
 import { PostgresRiskControlAdminStore } from '../saas/risk/postgres-store.js';
-import { UserLimitAdminService } from '../saas/risk/user-limit-admin-service.js';
 import {
   type RiskControlRetentionWorkerHandle,
   resolveUserRiskObservationRetentionDays,
   startRiskControlRetentionWorker,
 } from '../saas/risk/retention-worker.js';
-import { type UserAnomalyWorkerHandle, startUserAnomalyDetectionWorker } from '../saas/risk/user-anomaly-worker.js';
+import { startUserAnomalyDetectionWorker, type UserAnomalyWorkerHandle } from '../saas/risk/user-anomaly-worker.js';
+import { UserLimitAdminService } from '../saas/risk/user-limit-admin-service.js';
 import { PostgresUserRiskObservationRecorder } from '../saas/risk/user-risk.js';
 import { loadCommercialAttestationTrust } from '../saas/runtime/commercial-attestation-trust.js';
 import { loadCredentialValidationTargetsModule } from '../saas/runtime/credential-validation-targets-module.js';
@@ -381,6 +380,7 @@ import {
   type CnProvidersQuotaWorkerOptions,
   startCnProvidersQuotaWorker,
 } from '../saas/supply/cn-providers-quota-worker.js';
+import { CodexBoundAdmissionService } from '../saas/supply/codex-bound-admission-service.js';
 import {
   type CodexVersionSyncSettings,
   type CodexVersionSyncWorkerHandle,
@@ -3823,7 +3823,12 @@ export async function startManagedSaasServer(
         onError: (error) => console.error('model-router managed user anomaly detection cycle failed', error),
         onCycle: (result) => {
           if (result.skipped === true) return;
-          if (result.detected > 0 || result.rateLimited > 0 || result.keysSuspended > 0 || result.accountsSuspended > 0) {
+          if (
+            result.detected > 0 ||
+            result.rateLimited > 0 ||
+            result.keysSuspended > 0 ||
+            result.accountsSuspended > 0
+          ) {
             console.warn('model-router managed user anomaly cycle', JSON.stringify(result));
           }
         },

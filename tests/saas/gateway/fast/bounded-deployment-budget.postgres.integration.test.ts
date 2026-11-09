@@ -231,14 +231,14 @@ test('bounded global budgets retain every old owner and epoch under real restric
       }
       await initializer;
       assert.ok(writer);
-      await assert.rejects(writer, { code: '23514' });
-      assert.equal((await census(tenantId)).actual, '50');
+      await writer;
+      assert.deepEqual(await census(tenantId), { actual: '100', counter: '100', cap: '100', retired: '0' });
       await Promise.all([legacy.close(), concurrent.close()]);
     },
   );
 
   await t.test(
-    'old writers cannot bypass the cap, direct counter mutation is forbidden and rebalance is atomic',
+    'uncapped SQL writers cannot bypass the cap, direct counter mutation is forbidden and rebalance is atomic',
     async () => {
       const tenantId = await tenant();
       const { activations } = await deployment();
@@ -249,7 +249,22 @@ test('bounded global budgets retain every old owner and epoch under real restric
         allocationOwner: randomUUID(),
         allocationTrancheMinorUnits: '100',
       });
-      await assert.rejects(legacy.replenish(tenantId, 'USD'), { code: '23514' });
+      await legacy.replenish(tenantId, 'USD');
+      assert.equal((await census(tenantId)).actual, '100');
+      await assert.rejects(
+        gateway.transaction(async (tx) => {
+          await tx.query(WALLET_FENCE_SQL, [saasAdvisoryKey.walletFence(tenantId, 'USD')]);
+          const updated = await tx.query(
+            `UPDATE saas_fast_credit_allocations
+             SET backing_minor_units=backing_minor_units+1, available_minor_units=available_minor_units+1
+             WHERE id=(SELECT id FROM saas_fast_credit_allocations
+               WHERE tenant_id=$1 AND currency='USD' AND state='active' ORDER BY id LIMIT 1)`,
+            [tenantId],
+          );
+          assert.equal(updated.rowCount, 1);
+        }),
+        { code: '23514' },
+      );
       assert.equal((await census(tenantId)).actual, '100');
       await assert.rejects(
         gateway.query('UPDATE saas_fast_gateway_credit_budgets SET allocated_minor_units=0 WHERE tenant_id=$1', [

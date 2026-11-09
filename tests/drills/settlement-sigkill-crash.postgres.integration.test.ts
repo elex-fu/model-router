@@ -4,12 +4,11 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { test } from 'node:test';
+import { PlatformWalletLedgerService } from '../../src/saas/billing/service.js';
 import { createSaasDatabase, verifySaasRuntimeDatabasePrivileges } from '../../src/saas/db/index.js';
 import type { SqlExecutor } from '../../src/saas/db/types.js';
-import { PlatformWalletLedgerService } from '../../src/saas/billing/service.js';
-import { SaasMeteringService } from '../../src/saas/metering/service.js';
 import { DurableNormalSuccessSettlementPort } from '../../src/saas/metering/conditional-settlement-port.js';
-import { startPgCommitAckLossProxy } from './helpers/pg-commit-ack-loss-proxy.js';
+import { SaasMeteringService } from '../../src/saas/metering/service.js';
 import {
   anyRoleConfigured,
   FIN057_FIXTURE_HMAC_HEX,
@@ -19,6 +18,7 @@ import {
   roleUrls,
   seedFixture,
 } from '../saas/metering/normal-success-postgres-fixture.js';
+import { startPgCommitAckLossProxy } from './helpers/pg-commit-ack-loss-proxy.js';
 
 // FIN-01 F3 crash cell (A3, base script shared with Track I): a real child
 // process settles prepared requests through the conditional settlement port,
@@ -53,11 +53,29 @@ interface ChildExit {
   readonly signal: NodeJS.Signals | null;
 }
 
-function spawnChild(root: string, gatewayUrl: string, inputsPath: string, progressPath: string, runId: string, pauseBeforeMarker = false) {
+function spawnChild(
+  root: string,
+  gatewayUrl: string,
+  inputsPath: string,
+  progressPath: string,
+  runId: string,
+  pauseBeforeMarker = false,
+) {
   // Fixed minimal env: no inherited credentials, PG overrides or user config.
   const child = spawn(
     process.execPath,
-    ['--import', 'tsx', CHILD, '--inputs', inputsPath, '--progress', progressPath, '--run-id', runId, ...(pauseBeforeMarker ? ['--pause-before-marker', '2'] : [])],
+    [
+      '--import',
+      'tsx',
+      CHILD,
+      '--inputs',
+      inputsPath,
+      '--progress',
+      progressPath,
+      '--run-id',
+      runId,
+      ...(pauseBeforeMarker ? ['--pause-before-marker', '2'] : []),
+    ],
     {
       cwd: root,
       env: {
@@ -73,7 +91,7 @@ function spawnChild(root: string, gatewayUrl: string, inputsPath: string, progre
   const exit = new Promise<ChildExit>((resolveExit) => {
     child.once('exit', (code, signal) => resolveExit({ code, signal }));
   });
-  const barrier = new Promise<unknown>(resolveBarrier => child.once('message', resolveBarrier));
+  const barrier = new Promise<unknown>((resolveBarrier) => child.once('message', resolveBarrier));
   return { child, exit, barrier };
 }
 
@@ -207,8 +225,22 @@ test('FIN-01 F3: SIGKILL mid-settlement never double-charges; restart replays to
   });
   const crashedAt = await untilMarkers(progressPath, 1, first.exit);
   // Child pauses only after input 2 really commits, before its financial marker.
-  const barrier = await boundedExit(Promise.race([first.barrier, first.exit.then(() => { throw new Error('child exited before commit-to-marker barrier'); })]), 60_000);
-  assert.deepEqual(barrier, { kind: 'before-marker', runId: 'run-1', sequence: 2, requestId: fixtures[1]!.input.requestId, resultKind: 'settled' });
+  const barrier = await boundedExit(
+    Promise.race([
+      first.barrier,
+      first.exit.then(() => {
+        throw new Error('child exited before commit-to-marker barrier');
+      }),
+    ]),
+    60_000,
+  );
+  assert.deepEqual(barrier, {
+    kind: 'before-marker',
+    runId: 'run-1',
+    sequence: 2,
+    requestId: fixtures[1]!.input.requestId,
+    resultKind: 'settled',
+  });
   first.child.kill('SIGKILL');
   const crash = await boundedExit(first.exit, 15_000);
   assert.equal(crash.signal, 'SIGKILL', 'the drill child must die by the real signal, not gracefully');
@@ -229,8 +261,8 @@ test('FIN-01 F3: SIGKILL mid-settlement never double-charges; restart replays to
   for (const fixture of fixtures) await assertSettledOnce(migrator.database, fixture.tenantId);
 
   const all = markers(progressPath);
-  const runOne = all.filter(marker => marker.runId === 'run-1');
-  const runTwo = all.filter(marker => marker.runId === 'run-2');
+  const runOne = all.filter((marker) => marker.runId === 'run-1');
+  const runTwo = all.filter((marker) => marker.runId === 'run-2');
   assert.equal(all.length, runOne.length + runTwo.length, 'only the two owned child runs may append markers');
   assert.deepEqual(all.slice(0, runOne.length), runOne, 'first-run prefix must precede every recovery marker');
   assert.ok(runOne.length >= 1 && runOne.length <= REQUESTS, 'the killed run records a nonempty committed prefix');
@@ -247,9 +279,9 @@ test('FIN-01 F3: SIGKILL mid-settlement never double-charges; restart replays to
     assert.equal(recovery.sequence, index + 1);
     assert.equal(recovery.requestId, requestId, 'recovery reports the exact original input in order');
     assert.ok(['settled', 'replayed'].includes(recovery.kind));
-    const firstMarkers = runOne.filter(marker => marker.requestId === requestId);
+    const firstMarkers = runOne.filter((marker) => marker.requestId === requestId);
     assert.ok(firstMarkers.length <= 1, 'the first run reports each input at most once');
-    const settledCount = all.filter(marker => marker.requestId === requestId && marker.kind === 'settled').length;
+    const settledCount = all.filter((marker) => marker.requestId === requestId && marker.kind === 'settled').length;
     assert.ok(settledCount <= 1, `request ${requestId} has at most one observed settlement acknowledgement`);
     if (firstMarkers.length === 1) {
       assert.equal(recovery.kind, 'replayed', 'an acknowledged first-run commit must replay');
@@ -265,33 +297,78 @@ test('FIN-01 F3: SIGKILL mid-settlement never double-charges; restart replays to
   assert.equal(committedWithoutMarker, 1, 'the barrier must exercise exactly one committed input without a marker');
   assert.equal(runOne.length, 1);
   assert.equal(runTwo[1]!.kind, 'replayed', 'the commit paused before its marker must replay');
-  for (const marker of runTwo.slice(2)) assert.equal(marker.kind, 'settled', 'inputs after the paused commit first settle in recovery');
-  t.diagnostic(`kill window: ${crashedAt.length}/${REQUESTS} observed committed; ${committedWithoutMarker} committed before marker`);
+  for (const marker of runTwo.slice(2))
+    assert.equal(marker.kind, 'settled', 'inputs after the paused commit first settle in recovery');
+  t.diagnostic(
+    `kill window: ${crashedAt.length}/${REQUESTS} observed committed; ${committedWithoutMarker} committed before marker`,
+  );
 });
 
 async function commitAckSnapshot(executor: SqlExecutor, tenantId: string) {
   const rows = async (sql: string) => (await executor.query<Record<string, unknown>>(sql, [tenantId])).rows;
-  const [requests, attempts, evidence, holds, usage, settlements, wallets, ledger, entries, leases, idempotency, capacity] = await Promise.all([
-    rows('SELECT id,execution_state,reconciliation_state,financial_status,state_version FROM saas_requests WHERE tenant_id=$1 ORDER BY id'),
-    rows('SELECT id,request_id,dispatch_state,result_state,response_started,state_version FROM saas_attempts WHERE tenant_id=$1 ORDER BY id'),
-    rows('SELECT id,request_id,attempt_id,status,claimed_attempt_id,statement_sha256 FROM saas_prepared_request_evidence WHERE tenant_id=$1 ORDER BY id'),
+  const [
+    requests,
+    attempts,
+    evidence,
+    holds,
+    usage,
+    settlements,
+    wallets,
+    ledger,
+    entries,
+    leases,
+    idempotency,
+    capacity,
+  ] = await Promise.all([
+    rows(
+      'SELECT id,execution_state,reconciliation_state,financial_status,state_version FROM saas_requests WHERE tenant_id=$1 ORDER BY id',
+    ),
+    rows(
+      'SELECT id,request_id,dispatch_state,result_state,response_started,state_version FROM saas_attempts WHERE tenant_id=$1 ORDER BY id',
+    ),
+    rows(
+      'SELECT id,request_id,attempt_id,status,claimed_attempt_id,statement_sha256 FROM saas_prepared_request_evidence WHERE tenant_id=$1 ORDER BY id',
+    ),
     rows('SELECT * FROM saas_billing_reservations WHERE tenant_id=$1 ORDER BY id'),
     rows('SELECT * FROM saas_usage_events WHERE tenant_id=$1 ORDER BY id'),
     rows('SELECT * FROM saas_usage_settlements WHERE tenant_id=$1 ORDER BY id'),
-    rows('SELECT id,currency,posted_balance_minor_units::text AS balance FROM saas_wallets WHERE tenant_id=$1 ORDER BY id'),
+    rows(
+      'SELECT id,currency,posted_balance_minor_units::text AS balance FROM saas_wallets WHERE tenant_id=$1 ORDER BY id',
+    ),
     rows('SELECT * FROM saas_ledger_transactions WHERE tenant_id=$1 ORDER BY id'),
     rows('SELECT * FROM saas_ledger_entries WHERE tenant_id=$1 ORDER BY id'),
-    rows('SELECT id,attempt_id,status,fencing_token,lease_expires_at,released_at FROM saas_provider_account_leases WHERE tenant_id=$1 ORDER BY id'),
-    rows('SELECT id,request_id,kind,key_digest,request_fingerprint FROM saas_idempotency_records WHERE tenant_id=$1 ORDER BY id'),
+    rows(
+      'SELECT id,attempt_id,status,fencing_token,lease_expires_at,released_at FROM saas_provider_account_leases WHERE tenant_id=$1 ORDER BY id',
+    ),
+    rows(
+      'SELECT id,request_id,kind,key_digest,request_fingerprint FROM saas_idempotency_records WHERE tenant_id=$1 ORDER BY id',
+    ),
     rows('SELECT * FROM saas_gateway_capacity_reservations WHERE tenant_id=$1 ORDER BY request_id'),
   ]);
-  return { requests, attempts, evidence, holds, usage, settlements, wallets, ledger, entries, leases, idempotency, capacity };
+  return {
+    requests,
+    attempts,
+    evidence,
+    holds,
+    usage,
+    settlements,
+    wallets,
+    ledger,
+    entries,
+    leases,
+    idempotency,
+    capacity,
+  };
 }
 
 test('FIN-01 wire COMMIT ACK loss rejects the original native transaction while independent PG facts commit and exact-input replay writes nothing', {
-  skip: process.env[REQUIRED_FLAG] !== '1' && !anyRoleConfigured ? `set ${REQUIRED_FLAG}=1 and three disposable local/CI role URLs` : false,
-  timeout: 120000, concurrency: false,
-}, async t => {
+  skip:
+    process.env[REQUIRED_FLAG] !== '1' && !anyRoleConfigured
+      ? `set ${REQUIRED_FLAG}=1 and three disposable local/CI role URLs`
+      : false,
+  timeout: 120000,
+  concurrency: false,
+}, async (t) => {
   const urls = roleUrls();
   const target = new URL(urls[2]);
   const migrator = observedDatabase(urls[0]);
@@ -303,7 +380,15 @@ test('FIN-01 wire COMMIT ACK loss rejects the original native transaction while 
     try {
       await proxy?.close();
     } finally {
-      await boundedExit(Promise.allSettled([interrupted?.close(), restarted?.close(), gateway.database.close(), migrator.database.close()]), 15000);
+      await boundedExit(
+        Promise.allSettled([
+          interrupted?.close(),
+          restarted?.close(),
+          gateway.database.close(),
+          migrator.database.close(),
+        ]),
+        15000,
+      );
     }
   });
   await migrator.database.verifySchema();
@@ -311,37 +396,57 @@ test('FIN-01 wire COMMIT ACK loss rejects the original native transaction while 
   // Independent finance scope: never add this request to the SIGKILL marker
   // fixture above. Its dispatch is SQL-prepared, not a live provider call.
   const fixture = await seedFixture(migrator.database, gateway.database, 'platform');
-  const observe = () => migrator.database.transaction(async tx => {
-    await tx.query('SET TRANSACTION READ ONLY');
-    return commitAckSnapshot(tx, fixture.tenantId);
-  });
+  const observe = () =>
+    migrator.database.transaction(async (tx) => {
+      await tx.query('SET TRANSACTION READ ONLY');
+      return commitAckSnapshot(tx, fixture.tenantId);
+    });
   const before = await observe();
-  assert.equal(before.wallets.length, 1); assert.equal(before.wallets[0]!.balance, '100');
-  assert.equal(before.holds.length, 1); assert.equal(before.holds[0]!.state, 'reserved');
+  assert.equal(before.wallets.length, 1);
+  assert.equal(before.wallets[0]!.balance, '100');
+  assert.equal(before.holds.length, 1);
+  assert.equal(before.holds[0]!.state, 'reserved');
   assert.equal(String(before.holds[0]!.amount_minor_units), '50');
-  assert.equal(before.usage.length, 0); assert.equal(before.settlements.length, 0);
-  assert.equal(before.entries.length, 2); assert.equal(before.leases.length, 0);
-  proxy = await startPgCommitAckLossProxy({ host: target.hostname, port: Number(target.port), database: decodeURIComponent(target.pathname.slice(1)) });
-  const proxied = new URL(urls[2]);
-  proxied.hostname = proxy.host; proxied.port = String(proxy.port); proxied.searchParams.set('sslmode', 'disable');
-  interrupted = createSaasDatabase({ connectionString: proxied.toString(), max: 1, connectionTimeoutMillis: 5000 });
-  const port = (database: ReturnType<typeof createSaasDatabase>) => new DurableNormalSuccessSettlementPort(database, {
-    metering: new SaasMeteringService(database, { idempotencyHmacSecret: Uint8Array.from(Buffer.from(FIN057_FIXTURE_HMAC_HEX, 'hex')) }),
-    billing: new PlatformWalletLedgerService(),
+  assert.equal(before.usage.length, 0);
+  assert.equal(before.settlements.length, 0);
+  assert.equal(before.entries.length, 2);
+  assert.equal(before.leases.length, 0);
+  proxy = await startPgCommitAckLossProxy({
+    host: target.hostname,
+    port: Number(target.port),
+    database: decodeURIComponent(target.pathname.slice(1)),
   });
+  const proxied = new URL(urls[2]);
+  proxied.hostname = proxy.host;
+  proxied.port = String(proxy.port);
+  proxied.searchParams.set('sslmode', 'disable');
+  interrupted = createSaasDatabase({ connectionString: proxied.toString(), max: 1, connectionTimeoutMillis: 5000 });
+  const port = (database: ReturnType<typeof createSaasDatabase>) =>
+    new DurableNormalSuccessSettlementPort(database, {
+      metering: new SaasMeteringService(database, {
+        idempotencyHmacSecret: Uint8Array.from(Buffer.from(FIN057_FIXTURE_HMAC_HEX, 'hex')),
+      }),
+      billing: new PlatformWalletLedgerService(),
+    });
   let nativeCommitRejected = false;
-  await assert.rejects(boundedExit(port(interrupted).complete(fixture.input), 30000), error => {
+  await assert.rejects(boundedExit(port(interrupted).complete(fixture.input), 30000), (error) => {
     // Accept a real native transport failure, never a timeout/sentinel or a
     // resolved domain result such as reconciliation_pending.
-    const socketError = error instanceof Error && (
-      error.message === 'Connection terminated unexpectedly' || error.message === 'Connection terminated' ||
-      ['ECONNRESET', 'EPIPE'].includes(String((error as NodeJS.ErrnoException).code))
-    );
+    const socketError =
+      error instanceof Error &&
+      (error.message === 'Connection terminated unexpectedly' ||
+        error.message === 'Connection terminated' ||
+        ['ECONNRESET', 'EPIPE'].includes(String((error as NodeJS.ErrnoException).code)));
     nativeCommitRejected = socketError;
     return socketError;
   });
   assert.equal(nativeCommitRejected, true);
-  assert.deepEqual(proxy.evidence(), { frontendCommitForwarded: true, serverCommitObserved: true, backendCommitForwarded: false, connectionCut: true });
+  assert.deepEqual(proxy.evidence(), {
+    frontendCommitForwarded: true,
+    serverCommitObserved: true,
+    backendCommitForwarded: false,
+    connectionCut: true,
+  });
   // This direct read-only connection is not the failed client and never
   // passes the wire proxy. PostgreSQL must prove that COMMIT really won.
   await assertSettledOnce(migrator.database, fixture.tenantId);
@@ -359,8 +464,22 @@ test('FIN-01 wire COMMIT ACK loss rejects the original native transaction while 
   assert.deepEqual(committed.leases, before.leases);
   restarted = createSaasDatabase({ connectionString: urls[2], max: 1, connectionTimeoutMillis: 5000 });
   const replay = await boundedExit(port(restarted).complete(fixture.input), 30000);
-  assert.equal(replay.kind, 'replayed'); assert.equal(replay.attempt.id, fixture.input.attemptId);
+  assert.equal(replay.kind, 'replayed');
+  assert.equal(replay.attempt.id, fixture.input.attemptId);
   await assertSettledOnce(migrator.database, fixture.tenantId);
-  assert.deepEqual(await observe(), committed, 'replay adds or mutates no financial, attempt, evidence, lease, capacity or idempotency fact');
-  t.diagnostic(JSON.stringify({ boundary: 'owned-test-PG-wire-ACK-loss; SQL-prepared-dispatch; no live upstream or occupied-lease fault', nativeCommitRejected, ...proxy.evidence(), directObserverCommitted: true, exactInputReplayed: true, snapshotUnchanged: true }));
+  assert.deepEqual(
+    await observe(),
+    committed,
+    'replay adds or mutates no financial, attempt, evidence, lease, capacity or idempotency fact',
+  );
+  t.diagnostic(
+    JSON.stringify({
+      boundary: 'owned-test-PG-wire-ACK-loss; SQL-prepared-dispatch; no live upstream or occupied-lease fault',
+      nativeCommitRejected,
+      ...proxy.evidence(),
+      directObserverCommitted: true,
+      exactInputReplayed: true,
+      snapshotUnchanged: true,
+    }),
+  );
 });

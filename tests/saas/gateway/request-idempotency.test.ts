@@ -130,7 +130,10 @@ class FakeSqlExecutor implements SqlExecutor {
     if (statement.includes(' FROM saas_gateway_request_idempotency_keys k LEFT JOIN saas_requests r ')) {
       assert.match(statement, /^SELECT k\.request_fingerprint/);
       assert.match(statement, /LEFT JOIN saas_requests r ON r\.tenant_id=k\.tenant_id AND r\.id=k\.request_id/);
-      assert.match(statement, /WHERE k\.tenant_id=\$1 AND k\.project_id=\$2 AND k\.proxy_key_id=\$3 AND k\.key_digest=\$4$/);
+      assert.match(
+        statement,
+        /WHERE k\.tenant_id=\$1 AND k\.project_id=\$2 AND k\.proxy_key_id=\$3 AND k\.key_digest=\$4$/,
+      );
       assert.doesNotMatch(statement, /\b(?:INSERT|UPDATE|DELETE|FOR UPDATE|FOR SHARE)\b/);
       assert.equal(values.length, 4);
       const [tenantId, projectId, proxyKeyId, keyDigest] = values;
@@ -139,13 +142,19 @@ class FakeSqlExecutor implements SqlExecutor {
       const binding = {
         request_fingerprint: row.request_fingerprint,
         request_fingerprint_version: row.request_fingerprint_version,
-        request_id: row.request_id, state: row.state, execution_state: row.execution_state,
-        canonical_project_id: row.project_id, canonical_proxy_key_id: row.proxy_key_id,
+        request_id: row.request_id,
+        state: row.state,
+        execution_state: row.execution_state,
+        canonical_project_id: row.project_id,
+        canonical_proxy_key_id: row.proxy_key_id,
         canonical_request_fingerprint: row.request_fingerprint,
         canonical_request_fingerprint_version: row.request_fingerprint_version,
       };
       if (statement.includes('LEFT JOIN saas_attempts a ')) {
-        assert.match(statement, /LEFT JOIN saas_attempts a ON a\.tenant_id=r\.tenant_id AND a\.request_id=r\.id AND a\.ordinal=1/);
+        assert.match(
+          statement,
+          /LEFT JOIN saas_attempts a ON a\.tenant_id=r\.tenant_id AND a\.request_id=r\.id AND a\.ordinal=1/,
+        );
         return sqlResult([{ ...binding, ...canonicalCompilationColumns(), ...row.readOverrides }] as Row[]);
       }
       return sqlResult([{ ...binding, ...row.readOverrides }] as Row[]);
@@ -456,9 +465,8 @@ test('a later request/hold failure rolls back the mapping on the caller-provided
   assert.ok(database.calls.every(({ executor }) => executor === database.transactionExecutors[0]));
 });
 
-
 function expectedReadDigest(input = claimInput()): string {
-  const fields = [input.tenantId, input.projectId, input.proxyKeyId, input.clientKey].map(value => {
+  const fields = [input.tenantId, input.projectId, input.proxyKeyId, input.clientKey].map((value) => {
     const bytes = Buffer.from(value, 'utf8');
     const length = Buffer.alloc(4);
     length.writeUInt32BE(bytes.length);
@@ -471,20 +479,42 @@ function expectedReadDigest(input = claimInput()): string {
 
 function canonicalCompilationColumns(): Record<string, unknown> {
   return {
-    public_model: 'public-alias', request_protocol: 'responses', request_endpoint: '/v1/responses',
-    route_config_id: 'route-original', route_config_version: '3', route_public_model_id: 'public-model',
-    route_public_model_version: '2', route_protocol: 'responses', route_target_mode: 'platform_pool',
-    route_upstream_id: 'upstream-original', attempt_id: REQUEST_D_ID, attempt_ordinal: 1,
-    provider_id: 'provider-original', product_id: 'product-original', resolved_model: 'model-original',
-    attempt_protocol: 'responses', attempt_endpoint: '/v1/responses', attempt_upstream_id: 'upstream-original',
-    provider_protocol: 'openai', client_operation: 'responses', provider_operation: 'chat.completions',
-    model_resolution_requested_model: 'public-alias', model_resolution_mapped_model: 'mapped-original',
-    model_resolution_mapping_source: 'alias', model_resolution_mapping_version: '7',
-    attempt_request_fingerprint: FINGERPRINT_A, attempt_request_fingerprint_version: 'gateway-request-v1',
-    payload_compiler_version: 'compiler-original', usage_estimator_version: 'estimator-original', payload_sha256: 'c'.repeat(64),
-    attempt_route_config_id: 'route-original', attempt_route_config_version: 3,
-    attempt_route_public_model_id: 'public-model', attempt_route_public_model_version: 2,
-    attempt_route_protocol: 'responses', attempt_route_target_mode: 'platform_pool',
+    public_model: 'public-alias',
+    request_protocol: 'responses',
+    request_endpoint: '/v1/responses',
+    route_config_id: 'route-original',
+    route_config_version: '3',
+    route_public_model_id: 'public-model',
+    route_public_model_version: '2',
+    route_protocol: 'responses',
+    route_target_mode: 'platform_pool',
+    route_upstream_id: 'upstream-original',
+    attempt_id: REQUEST_D_ID,
+    attempt_ordinal: 1,
+    provider_id: 'provider-original',
+    product_id: 'product-original',
+    resolved_model: 'model-original',
+    attempt_protocol: 'responses',
+    attempt_endpoint: '/v1/responses',
+    attempt_upstream_id: 'upstream-original',
+    provider_protocol: 'openai',
+    client_operation: 'responses',
+    provider_operation: 'chat.completions',
+    model_resolution_requested_model: 'public-alias',
+    model_resolution_mapped_model: 'mapped-original',
+    model_resolution_mapping_source: 'alias',
+    model_resolution_mapping_version: '7',
+    attempt_request_fingerprint: FINGERPRINT_A,
+    attempt_request_fingerprint_version: 'gateway-request-v1',
+    payload_compiler_version: 'compiler-original',
+    usage_estimator_version: 'estimator-original',
+    payload_sha256: 'c'.repeat(64),
+    attempt_route_config_id: 'route-original',
+    attempt_route_config_version: 3,
+    attempt_route_public_model_id: 'public-model',
+    attempt_route_public_model_version: 2,
+    attempt_route_protocol: 'responses',
+    attempt_route_target_mode: 'platform_pool',
   };
 }
 
@@ -493,9 +523,16 @@ function seededReadFixture(readOverrides: Record<string, unknown> = {}) {
   const input = claimInput();
   const digest = expectedReadDigest(input);
   database.rows.set(mapKey(input.tenantId, input.projectId, input.proxyKeyId, digest), {
-    tenant_id: input.tenantId, project_id: input.projectId, proxy_key_id: input.proxyKeyId,
-    key_digest: digest, request_id: REQUEST_A_ID, request_fingerprint: FINGERPRINT_A,
-    request_fingerprint_version: 'gateway-request-v1', state: 'in_progress', execution_state: 'pending', readOverrides,
+    tenant_id: input.tenantId,
+    project_id: input.projectId,
+    proxy_key_id: input.proxyKeyId,
+    key_digest: digest,
+    request_id: REQUEST_A_ID,
+    request_fingerprint: FINGERPRINT_A,
+    request_fingerprint_version: 'gateway-request-v1',
+    state: 'in_progress',
+    execution_state: 'pending',
+    readOverrides,
   });
   return { database, idempotency: store(), input, digest };
 }
@@ -518,16 +555,38 @@ test('pure reads return canonical first-attempt compilation and existing identit
   const before = structuredClone([...database.rows]);
   const compilation = await idempotency.readCanonicalCompilation(database.executor(), input);
   assert.deepEqual(compilation, {
-    canonicalRequestId: REQUEST_A_ID, providerId: 'provider-original', productId: 'product-original',
-    resolvedModel: 'model-original', publicModel: 'public-alias', endpoint: '/v1/responses',
-    clientProtocol: 'responses', providerProtocol: 'openai', clientOperation: 'responses', providerOperation: 'chat.completions',
-    modelResolution: { requestedModel: 'public-alias', mappedModel: 'mapped-original', resolvedModel: 'model-original', mappingSource: 'alias', mappingVersion: 7 },
-    compilerVersion: 'compiler-original', usageEstimatorVersion: 'estimator-original',
-    routeConfigId: 'route-original', routeConfigVersion: '3', publicModelId: 'public-model', publicModelVersion: '2',
+    canonicalRequestId: REQUEST_A_ID,
+    providerId: 'provider-original',
+    productId: 'product-original',
+    resolvedModel: 'model-original',
+    publicModel: 'public-alias',
+    endpoint: '/v1/responses',
+    clientProtocol: 'responses',
+    providerProtocol: 'openai',
+    clientOperation: 'responses',
+    providerOperation: 'chat.completions',
+    modelResolution: {
+      requestedModel: 'public-alias',
+      mappedModel: 'mapped-original',
+      resolvedModel: 'model-original',
+      mappingSource: 'alias',
+      mappingVersion: 7,
+    },
+    compilerVersion: 'compiler-original',
+    usageEstimatorVersion: 'estimator-original',
+    routeConfigId: 'route-original',
+    routeConfigVersion: '3',
+    publicModelId: 'public-model',
+    publicModelVersion: '2',
   });
   const existing = await idempotency.lookupExisting(database.executor(), claimInput({ requestId: REQUEST_B_ID }));
-  assert.deepEqual(existing, { kind: 'existing', state: 'in_progress', canonicalRequestId: REQUEST_A_ID,
-    canonicalRequestStatus: 'in_progress', keyDigest: digest });
+  assert.deepEqual(existing, {
+    kind: 'existing',
+    state: 'in_progress',
+    canonicalRequestId: REQUEST_A_ID,
+    canonicalRequestStatus: 'in_progress',
+    keyDigest: digest,
+  });
   assert.equal(isGatewayRequestIdempotencyClaimed(compilation), false);
   assert.equal(isGatewayRequestIdempotencyClaimed(existing), false);
   assert.deepEqual([...database.rows], before);
@@ -537,23 +596,32 @@ test('pure reads return canonical first-attempt compilation and existing identit
 
 test('only an absent scoped HMAC mapping is a pure-read miss', async () => {
   const { database, idempotency } = seededReadFixture();
-  for (const overrides of [{ tenantId: OTHER_TENANT_ID }, { projectId: OTHER_PROJECT_ID }, { proxyKeyId: OTHER_PROXY_KEY_ID }, { clientKey: 'another-client-key' }]) {
+  for (const overrides of [
+    { tenantId: OTHER_TENANT_ID },
+    { projectId: OTHER_PROJECT_ID },
+    { proxyKeyId: OTHER_PROXY_KEY_ID },
+    { clientKey: 'another-client-key' },
+  ]) {
     const input = claimInput(overrides);
     assert.equal(await idempotency.readCanonicalCompilation(database.executor(), input), null);
     assert.deepEqual(await idempotency.lookupExisting(database.executor(), input), { kind: 'missing' });
     const calls = database.calls.slice(-2);
-    for (const call of calls) assert.deepEqual(call.values, [input.tenantId, input.projectId, input.proxyKeyId, expectedReadDigest(input)]);
+    for (const call of calls)
+      assert.deepEqual(call.values, [input.tenantId, input.projectId, input.proxyKeyId, expectedReadDigest(input)]);
   }
   assert.equal(database.rows.size, 1);
   assertPureReadCalls(database);
 });
 
 function isClosedCanonicalReadError(error: unknown): boolean {
-  return error instanceof Error && [
-    'Canonical request compilation context is unavailable',
-    'Canonical request binding does not match its idempotency mapping',
-    'Invalid canonical request project id',
-  ].includes(error.message);
+  return (
+    error instanceof Error &&
+    [
+      'Canonical request compilation context is unavailable',
+      'Canonical request binding does not match its idempotency mapping',
+      'Invalid canonical request project id',
+    ].includes(error.message)
+  );
 }
 
 test('canonical read hits fail closed for orphaned or incomplete/mismatched first-attempt context', async () => {
@@ -581,24 +649,38 @@ test('canonical read hits fail closed for orphaned or incomplete/mismatched firs
 
 test('existing lookup preserves fingerprint/version conflicts and rejects corrupt canonical bindings instead of missing', async () => {
   const { database, idempotency } = seededReadFixture();
-  for (const overrides of [{ requestFingerprint: FINGERPRINT_B }, { requestFingerprintVersion: 'gateway-request-v2' }]) {
+  for (const overrides of [
+    { requestFingerprint: FINGERPRINT_B },
+    { requestFingerprintVersion: 'gateway-request-v2' },
+  ]) {
     const result = await idempotency.lookupExisting(database.executor(), claimInput(overrides));
     assert.deepEqual(result, { kind: 'fingerprint_conflict' });
     assert.equal(isGatewayRequestIdempotencyClaimed(result), false);
   }
   assertPureReadCalls(database);
-  for (const corruption of [{ canonical_project_id: null }, { canonical_proxy_key_id: OTHER_PROXY_KEY_ID }, { canonical_request_fingerprint_version: 'corrupt-version' }]) {
+  for (const corruption of [
+    { canonical_project_id: null },
+    { canonical_proxy_key_id: OTHER_PROXY_KEY_ID },
+    { canonical_request_fingerprint_version: 'corrupt-version' },
+  ]) {
     const fixture = seededReadFixture(corruption);
-    await assert.rejects(fixture.idempotency.lookupExisting(fixture.database.executor(), fixture.input), isClosedCanonicalReadError);
+    await assert.rejects(
+      fixture.idempotency.lookupExisting(fixture.database.executor(), fixture.input),
+      isClosedCanonicalReadError,
+    );
     assertPureReadCalls(fixture.database);
   }
 });
 
 test('existing pure lookup retains unknown/completed canonical status without modifying mappings', async () => {
-  for (const [state, execution, canonicalStatus] of [['unknown', 'pending', 'unknown'], ['in_progress', 'succeeded', 'completed']] as const) {
+  for (const [state, execution, canonicalStatus] of [
+    ['unknown', 'pending', 'unknown'],
+    ['in_progress', 'succeeded', 'completed'],
+  ] as const) {
     const fixture = seededReadFixture();
     const row = [...fixture.database.rows.values()][0];
-    row.state = state; row.execution_state = execution;
+    row.state = state;
+    row.execution_state = execution;
     const before = structuredClone([...fixture.database.rows]);
     const result = await fixture.idempotency.lookupExisting(fixture.database.executor(), fixture.input);
     assert.equal(result.kind, 'existing');

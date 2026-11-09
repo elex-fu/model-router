@@ -17,6 +17,7 @@ import {
   type RequestPreparationEntitlement,
   type RequestPreparationPayloadCompiler,
 } from './request-preparation-service.js';
+import { validatePreparedRequestUsageEnvelope } from './usage-envelope-validation.js';
 import { buildSearchResponsesBody, parseSearchClientRequest } from './websearch/emulation.js';
 
 /** The version is part of the preparation contract, not provider metadata. */
@@ -29,13 +30,9 @@ const MAX_PROVIDER_PAYLOAD_BYTES = 64 * 1024 * 1024;
 const MAX_MODEL_BYTES = 512;
 const MAX_COMPILER_VERSION_BYTES = 128;
 const MAX_ESTIMATOR_VERSION_BYTES = 128;
-const MAX_BIGINT = 9_223_372_036_854_775_807n;
 const SHA256 = /^[0-9a-f]{64}$/;
 
 const PROTOCOLS = new Set<GatewayProtocol>(['anthropic', 'openai', 'gemini', 'responses']);
-const INPUT_BUCKETS = new Set(['input', 'cache_read', 'cache_write', 'cache_write_5m', 'cache_write_1h']);
-// §4.1: canonical per-unit size tiers (the pricing registry).
-const PER_UNIT_TIER_SET = new Set(['1k', '2k', '4k', '480p', '720p', '1080p', 'tts', 'stt', 'realtime']);
 
 /** Canonical provider operations understood by this compiler. */
 export type ProviderPayloadOperation =
@@ -418,20 +415,6 @@ function text(value: unknown, label: ProviderPayloadCompilerFailureCode = 'INVAL
 
 function safeVersion(value: unknown, code: ProviderPayloadCompilerFailureCode, maxBytes: number): string {
   return text(value, code, maxBytes);
-}
-
-function exactNonNegative(value: unknown): bigint {
-  let result: bigint;
-  try {
-    if (typeof value === 'bigint') result = value;
-    else if (typeof value === 'number' && Number.isSafeInteger(value)) result = BigInt(value);
-    else if (typeof value === 'string' && /^\d+$/.test(value)) result = BigInt(value);
-    else compilerFailure('USAGE_BOUND_INVALID');
-  } catch {
-    compilerFailure('USAGE_BOUND_INVALID');
-  }
-  if (result < 0n || result > MAX_BIGINT) compilerFailure('USAGE_BOUND_INVALID');
-  return result;
 }
 
 function isProtocol(value: unknown): value is GatewayProtocol {
@@ -944,98 +927,9 @@ function usageFromEstimate(
 }
 
 function validateUsage(value: unknown): PreparedRequestUsageEnvelope {
-  if (!isRecord(value)) compilerFailure('USAGE_BOUND_INVALID');
-  const fields = [
-    'inputTotalUpperBound',
-    'inputUncachedUpperBound',
-    'cacheReadUpperBound',
-    'cacheWriteUpperBound',
-    'cacheWrite5mUpperBound',
-    'cacheWrite1hUpperBound',
-    'outputTotalUpperBound',
-    'reasoningOutputUpperBound',
-  ] as const;
-  const normalized = new Map<string, bigint>();
-  for (const field of fields) normalized.set(field, exactNonNegative(value[field]));
-  const inputTotal = normalized.get('inputTotalUpperBound');
-  const outputTotal = normalized.get('outputTotalUpperBound');
-  const inputUncached = normalized.get('inputUncachedUpperBound');
-  const cacheRead = normalized.get('cacheReadUpperBound');
-  const cacheWrite = normalized.get('cacheWriteUpperBound');
-  const cacheWrite5m = normalized.get('cacheWrite5mUpperBound');
-  const cacheWrite1h = normalized.get('cacheWrite1hUpperBound');
-  const reasoningOutput = normalized.get('reasoningOutputUpperBound');
-  if (
-    inputTotal === undefined ||
-    outputTotal === undefined ||
-    inputUncached === undefined ||
-    cacheRead === undefined ||
-    cacheWrite === undefined ||
-    cacheWrite5m === undefined ||
-    cacheWrite1h === undefined ||
-    reasoningOutput === undefined
-  ) {
-    compilerFailure('USAGE_BOUND_INVALID');
-  }
-  if (
-    inputUncached > inputTotal ||
-    cacheRead > inputTotal ||
-    cacheWrite > inputTotal ||
-    cacheWrite5m > inputTotal ||
-    cacheWrite1h > inputTotal ||
-    reasoningOutput > outputTotal
-  ) {
-    compilerFailure('USAGE_BOUND_INVALID');
-  }
-  const buckets = value.feasibleInputBuckets;
-  if (
-    !Array.isArray(buckets) ||
-    buckets.length === 0 ||
-    new Set(buckets).size !== buckets.length ||
-    buckets.some((bucket) => typeof bucket !== 'string' || !INPUT_BUCKETS.has(bucket))
-  ) {
-    compilerFailure('USAGE_BOUND_INVALID');
-  }
-  const decimal = (bound: bigint | undefined): string => {
-    if (bound === undefined) compilerFailure('USAGE_BOUND_INVALID');
-    return bound.toString(10);
-  };
-  /*
-   * §4.1: optional per-unit (media) bounds. Absent keeps the token-only
-   * envelope; present values must be an exact non-negative unit count and,
-   * for the tier, a canonical registry tier.
-   */
-  const perUnitUnitsRaw = value.perUnitUnitsUpperBound;
-  const media = perUnitUnitsRaw !== undefined && perUnitUnitsRaw !== null;
-  const sizeTierRaw = value.sizeTier;
-  if (!media && sizeTierRaw !== undefined && sizeTierRaw !== null) {
-    // A tier without a unit bound shapes nothing; reject the shape.
-    compilerFailure('USAGE_BOUND_INVALID');
-  }
-  return {
-    inputTotalUpperBound: decimal(inputTotal),
-    inputUncachedUpperBound: decimal(inputUncached),
-    cacheReadUpperBound: decimal(cacheRead),
-    cacheWriteUpperBound: decimal(cacheWrite),
-    cacheWrite5mUpperBound: decimal(cacheWrite5m),
-    cacheWrite1hUpperBound: decimal(cacheWrite1h),
-    outputTotalUpperBound: decimal(outputTotal),
-    reasoningOutputUpperBound: decimal(reasoningOutput),
-    feasibleInputBuckets: [...buckets] as readonly string[],
-    ...(media
-      ? {
-          perUnitUnitsUpperBound: exactNonNegative(perUnitUnitsRaw).toString(10),
-          ...(sizeTierRaw !== undefined && sizeTierRaw !== null
-            ? {
-                sizeTier:
-                  typeof sizeTierRaw === 'string' && PER_UNIT_TIER_SET.has(sizeTierRaw)
-                    ? sizeTierRaw
-                    : compilerFailure('USAGE_BOUND_INVALID'),
-              }
-            : {}),
-        }
-      : {}),
-  };
+  const validated = validatePreparedRequestUsageEnvelope(value);
+  if (!validated.ok) compilerFailure('USAGE_BOUND_INVALID');
+  return validated.value;
 }
 
 async function estimateUsage(

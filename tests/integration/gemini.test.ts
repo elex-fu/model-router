@@ -9,8 +9,8 @@ import { test } from 'node:test';
 import { ConfigStore } from '../../src/config/store.js';
 import type { Config } from '../../src/config/types.js';
 import type { LogEntry } from '../../src/logger/types.js';
-import { proxyHandler } from '../../src/server/proxy.js';
 import { parseSseStream } from '../../src/protocol/sse.js';
+import { proxyHandler } from '../../src/server/proxy.js';
 
 interface MockCall {
   method: string;
@@ -224,22 +224,35 @@ test('proxies anthropic client to gemini upstream (streaming)', async () => {
       assert.equal(frame.event, event.type, 'SSE event names must match the Anthropic payload type');
       events.push(event);
     }
-    assert.deepEqual(events.map(event => event.type), [
-      'message_start',
-      'content_block_start', 'content_block_delta', 'content_block_stop',
-      'content_block_start', 'content_block_delta', 'content_block_stop',
-      'message_delta', 'message_stop',
-    ]);
+    assert.deepEqual(
+      events.map((event) => event.type),
+      [
+        'message_start',
+        'content_block_start',
+        'content_block_delta',
+        'content_block_stop',
+        'content_block_start',
+        'content_block_delta',
+        'content_block_stop',
+        'message_delta',
+        'message_stop',
+      ],
+    );
     assert.equal(events[0].message.role, 'assistant');
-    const deltas = events.filter(event => event.type === 'content_block_delta');
+    const deltas = events.filter((event) => event.type === 'content_block_delta');
     assert.equal(deltas[0].delta.text, 'hello');
-    assert.equal(deltas.map(event => event.delta.text).join(''), 'hello world');
-    assert.deepEqual(events.filter(event => event.type === 'content_block_start').map(event => event.index), [0, 1]);
-    assert.deepEqual(events.filter(event => event.type === 'content_block_stop').map(event => event.index), [0, 1]);
+    assert.equal(deltas.map((event) => event.delta.text).join(''), 'hello world');
+    assert.deepEqual(
+      events.filter((event) => event.type === 'content_block_start').map((event) => event.index),
+      [0, 1],
+    );
+    assert.deepEqual(
+      events.filter((event) => event.type === 'content_block_stop').map((event) => event.index),
+      [0, 1],
+    );
     const terminal = events[events.length - 2];
     assert.equal(terminal.delta.stop_reason, 'end_turn');
     assert.deepEqual(terminal.usage, { input_tokens: 3, output_tokens: 2 });
-
   } finally {
     await proxy.close();
     await upstream.close();

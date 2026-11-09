@@ -192,14 +192,22 @@ test('OPS-01 I3: dual-instance SIGKILL failover keeps gates green and PostgreSQL
   let continuity: { instanceId: string; token: string; sequence: number } | undefined;
   function assertContinuity(observed: readonly Marker[] = markers(progressPath)): void {
     if (!continuity) return;
-    const current = observed.filter((entry) =>
-      entry.instanceId === continuity!.instanceId && entry.sequence >= continuity!.sequence);
-    assert.equal(current.filter((entry) => entry.kind === 'lease-acquired').length, 1,
-      'survivor cannot reacquire before intentional SIGTERM');
-    assert.ok(current.every((entry) => !['lease-lost', 'failed', 'shutdown'].includes(entry.kind)),
-      'survivor lease continuity must not be lost before intentional SIGTERM');
-    assert.ok(current.every((entry) => entry.fencingToken === undefined || entry.fencingToken === continuity!.token),
-      'survivor must retain the exact failover fencing token');
+    const current = observed.filter(
+      (entry) => entry.instanceId === continuity!.instanceId && entry.sequence >= continuity!.sequence,
+    );
+    assert.equal(
+      current.filter((entry) => entry.kind === 'lease-acquired').length,
+      1,
+      'survivor cannot reacquire before intentional SIGTERM',
+    );
+    assert.ok(
+      current.every((entry) => !['lease-lost', 'failed', 'shutdown'].includes(entry.kind)),
+      'survivor lease continuity must not be lost before intentional SIGTERM',
+    );
+    assert.ok(
+      current.every((entry) => entry.fencingToken === undefined || entry.fencingToken === continuity!.token),
+      'survivor must retain the exact failover fencing token',
+    );
   }
   t.after(async () => {
     // Observe before killing children/removing scratch. Never emit raw errors.
@@ -208,22 +216,43 @@ test('OPS-01 I3: dual-instance SIGKILL failover keeps gates green and PostgreSQL
       const rows = await leaseRows().catch(() => null);
       const observed = markers(progressPath);
       const selected = observed.slice(-120).map((entry) => ({
-        kind: entry.kind, instanceId: entry.instanceId, sequence: entry.sequence,
-        wallTimeMs: entry.wallTimeMs, monotonicMs: entry.monotonicMs,
-        fencingToken: entry.fencingToken, renewals: entry.renewals,
-        operationDurationMs: entry.operationDurationMs, sinceAckMs: entry.sinceAckMs,
-        gate: entry.gate, ok: entry.ok, clean: entry.clean, stage: entry.stage,
+        kind: entry.kind,
+        instanceId: entry.instanceId,
+        sequence: entry.sequence,
+        wallTimeMs: entry.wallTimeMs,
+        monotonicMs: entry.monotonicMs,
+        fencingToken: entry.fencingToken,
+        renewals: entry.renewals,
+        operationDurationMs: entry.operationDurationMs,
+        sinceAckMs: entry.sinceAckMs,
+        gate: entry.gate,
+        ok: entry.ok,
+        clean: entry.clean,
+        stage: entry.stage,
         code: entry.code && /^[A-Z][A-Z0-9_]{0,63}$/.test(entry.code) ? entry.code : undefined,
       }));
-      t.diagnostic('failover evidence ' + JSON.stringify({
-        stage: diagnosticStage, leaseTtlMs: LEASE_TTL_MS, survivorStopRequestedAt,
-        assertionSnapshot,
-        markerCount: observed.length, markerTail: selected, databaseRows: rows,
-        authorityEvents: observed.filter((entry) =>
-          ['lease-acquired', 'lease-lost', 'failed', 'shutdown'].includes(entry.kind))
-          .map(({ kind, instanceId, sequence, fencingToken, wallTimeMs, monotonicMs }) =>
-            ({ kind, instanceId, sequence, fencingToken, wallTimeMs, monotonicMs })),
-      }));
+      t.diagnostic(
+        'failover evidence ' +
+          JSON.stringify({
+            stage: diagnosticStage,
+            leaseTtlMs: LEASE_TTL_MS,
+            survivorStopRequestedAt,
+            assertionSnapshot,
+            markerCount: observed.length,
+            markerTail: selected,
+            databaseRows: rows,
+            authorityEvents: observed
+              .filter((entry) => ['lease-acquired', 'lease-lost', 'failed', 'shutdown'].includes(entry.kind))
+              .map(({ kind, instanceId, sequence, fencingToken, wallTimeMs, monotonicMs }) => ({
+                kind,
+                instanceId,
+                sequence,
+                fencingToken,
+                wallTimeMs,
+                monotonicMs,
+              })),
+          }),
+      );
     } catch {
       t.diagnostic('failover evidence unavailable; original assertion remains authoritative');
     }
@@ -377,10 +406,12 @@ test('OPS-01 I3: dual-instance SIGKILL failover keeps gates green and PostgreSQL
   diagnosticStage = 'contender-startup';
   const attemptB = randomUUID();
   const instanceB = startHold('b', attemptB);
-  const readyB = await untilMarker(progressPath, (marker) => marker.kind === 'ready' && marker.instanceId === 'b', 'b:ready', [
-    instanceA.exit,
-    instanceB.exit,
-  ]);
+  const readyB = await untilMarker(
+    progressPath,
+    (marker) => marker.kind === 'ready' && marker.instanceId === 'b',
+    'b:ready',
+    [instanceA.exit, instanceB.exit],
+  );
   await untilMarker(
     progressPath,
     (marker) => marker.kind === 'lease-pending' && marker.instanceId === 'b' && marker.sequence > readyB.sequence,
@@ -429,8 +460,12 @@ test('OPS-01 I3: dual-instance SIGKILL failover keeps gates green and PostgreSQL
   // both roles' startup gate chains still pass after the kill.
   await untilMarker(
     progressPath,
-    (marker) => marker.kind === 'lease-renewed' && marker.instanceId === 'b' &&
-      marker.fencingToken === tokenB && marker.sequence > acquiredB.sequence && Number(marker.renewals) >= 3,
+    (marker) =>
+      marker.kind === 'lease-renewed' &&
+      marker.instanceId === 'b' &&
+      marker.fencingToken === tokenB &&
+      marker.sequence > acquiredB.sequence &&
+      Number(marker.renewals) >= 3,
     'b:lease-renewed>=3',
     [instanceB.exit],
     30_000,
@@ -461,8 +496,12 @@ test('OPS-01 I3: dual-instance SIGKILL failover keeps gates green and PostgreSQL
   const attemptA2 = randomUUID();
   const instanceA2 = startHold('a2', attemptA2);
   const readyA2 = await untilMarker(
-    progressPath, (marker) => marker.kind === 'ready' && marker.instanceId === 'a2', 'a2:ready',
-    [instanceB.exit, instanceA2.exit], 90_000, assertContinuity,
+    progressPath,
+    (marker) => marker.kind === 'ready' && marker.instanceId === 'a2',
+    'a2:ready',
+    [instanceB.exit, instanceA2.exit],
+    90_000,
+    assertContinuity,
   );
   await untilMarker(
     progressPath,
@@ -472,12 +511,23 @@ test('OPS-01 I3: dual-instance SIGKILL failover keeps gates green and PostgreSQL
     90_000,
     assertContinuity,
   );
-  const renewalCursor = Math.max(0, ...markers(progressPath)
-    .filter((entry) => entry.instanceId === 'b').map((entry) => entry.sequence));
+  const renewalCursor = Math.max(
+    0,
+    ...markers(progressPath)
+      .filter((entry) => entry.instanceId === 'b')
+      .map((entry) => entry.sequence),
+  );
   await untilMarker(
-    progressPath, (marker) => marker.kind === 'lease-renewed' && marker.instanceId === 'b' &&
-      marker.fencingToken === tokenB && marker.sequence > renewalCursor,
-    'b:fresh-renewal-after-a2-pending', [instanceB.exit, instanceA2.exit], 30_000, assertContinuity,
+    progressPath,
+    (marker) =>
+      marker.kind === 'lease-renewed' &&
+      marker.instanceId === 'b' &&
+      marker.fencingToken === tokenB &&
+      marker.sequence > renewalCursor,
+    'b:fresh-renewal-after-a2-pending',
+    [instanceB.exit, instanceA2.exit],
+    30_000,
+    assertContinuity,
   );
   const beforeRelease = liveLease(await leaseRows());
   assert.equal(beforeRelease?.attempt_id, attemptB, 'the restarted instance does not steal the lease');
@@ -525,4 +575,3 @@ test('OPS-01 I3: dual-instance SIGKILL failover keeps gates green and PostgreSQL
   assert.equal(liveLease(terminal), undefined, 'no live lease remains after both graceful shutdowns');
   diagnosticStage = 'complete';
 });
-

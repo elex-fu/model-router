@@ -408,12 +408,12 @@ test('seedSyncedCodexVersionFromSettings seeds max(synced, override) into the id
   }
 });
 
-test('identity integration: a synced slot is advertised until it is ineligible', () => {
+test('identity integration: a synced slot newer than the baseline is advertised until it is ineligible', () => {
   resetSyncedCodexVersionForTests();
   try {
-    assert.equal(updateSyncedCodexVersion('0.150.0'), true);
-    assert.equal(buildCanonicalIdentity().version, '0.150.0');
-    assert.match(buildCanonicalIdentity().userAgent, /^codex_cli_rs\/0\.150\.0 /);
+    assert.equal(updateSyncedCodexVersion('0.170.0'), true);
+    assert.equal(buildCanonicalIdentity().version, '0.170.0');
+    assert.match(buildCanonicalIdentity().userAgent, /^codex_cli_rs\/0\.170\.0 /);
   } finally {
     resetSyncedCodexVersionForTests();
   }

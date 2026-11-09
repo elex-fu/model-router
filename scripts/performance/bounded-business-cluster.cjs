@@ -6,6 +6,7 @@
 const cluster = require('node:cluster');
 const fs = require('node:fs');
 const path = require('node:path');
+const { execFileSync } = require('node:child_process');
 
 const PROFILE_DATA = require('./bounded-business-profiles.json');
 function totalBudgets(profile = 'c32') {
@@ -19,6 +20,14 @@ function totalBudgets(profile = 'c32') {
 const TOTALS = totalBudgets();
 
 function processStartTicks(pid) {
+  if (process.platform === 'darwin') {
+    const started = execFileSync('/bin/ps', ['-p', String(pid), '-o', 'lstart='], {
+      encoding: 'utf8', env: { ...process.env, LC_ALL: 'C' }, stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    const value = Date.parse(started);
+    if (!started.includes('\n') && Number.isSafeInteger(value) && value >= 1) return value;
+    throw new Error('BOUNDED_PROCESS_IDENTITY_UNAVAILABLE');
+  }
   const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
   const fields = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/);
   const value = Number(fields[19]); // /proc stat field22; fields starts at3.

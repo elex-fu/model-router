@@ -236,7 +236,7 @@ test('workspace switches two tenants without leaking project roles/members and p
   page,
 }) => {
   const state = await installIdentity(page);
-  await page.goto(`${site}/admin/console?tenantId=${tenantA}&projectId=project-a`);
+  await page.goto(`${site}/admin/console/workspace?tenantId=${tenantA}&projectId=project-a`);
   await expect(page.getByRole('heading', { name: '客户控制台' })).toBeVisible();
   await expect(workspaceSection(page, '租户详情')).toContainText('所有者');
   await expect(page.getByLabel('项目详情')).toContainText('只读成员');
@@ -294,7 +294,7 @@ test('admin invite scope, explicit selector refusal and 409/403 failure keep saf
   page,
 }) => {
   const state = await installIdentity(page, { tenants: [{ ...owner, role: 'admin' }, viewer], invitationError: 409 });
-  await page.goto(`${site}/admin/console?tenantId=${tenantA}`);
+  await page.goto(`${site}/admin/console/workspace?tenantId=${tenantA}`);
   await page.getByRole('button', { name: '邀请成员', exact: true }).click();
   const options = page.getByLabel('邀请租户角色').locator('option');
   expect(await options.evaluateAll((items) => items.map((item) => (item as HTMLOptionElement).value))).toEqual([
@@ -315,7 +315,7 @@ test('admin invite scope, explicit selector refusal and 409/403 failure keep saf
   await expect(page.getByRole('alert')).toContainText('权限不足');
   await expect(page.getByLabel('邀请租户角色')).toHaveValue('viewer');
   expect(state.issued).toBe(2);
-  await page.goto(`${site}/admin/console?tenantId=30000000-0000-4000-8000-000000000001`);
+  await page.goto(`${site}/admin/console/workspace?tenantId=30000000-0000-4000-8000-000000000001`);
   await expect(page.getByRole('alert')).toContainText('指定租户不可访问');
   await expect(page.getByRole('heading', { name: '租户详情' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: '邀请成员', exact: true })).toHaveCount(0);
@@ -326,7 +326,7 @@ test('lost invitation response blocks automatic/remount duplicate submission and
   page,
 }) => {
   const state = await installIdentity(page, { abortInvitation: true });
-  await page.goto(`${site}/admin/console?tenantId=${tenantA}`);
+  await page.goto(`${site}/admin/console/workspace?tenantId=${tenantA}`);
   await page.getByRole('button', { name: '邀请成员', exact: true }).click();
   await page.getByLabel('成员邮箱').fill('invited@example.test');
   await page.getByRole('button', { name: '创建一次性邀请' }).click();
@@ -386,7 +386,7 @@ test('workspace empty/failed reads and 401 revocation use safe states and clear 
   page,
 }) => {
   const state = await installIdentity(page, { tenants: [] });
-  await page.goto(`${site}/admin/console`);
+  await page.goto(`${site}/admin/console/workspace`);
   await expect(page.getByText('暂无可访问租户；可创建租户，或通过有效邀请加入。', { exact: true })).toBeVisible();
   await page.getByLabel('租户名称').fill('Safe tenant draft');
   await page.evaluate(() => sessionStorage.setItem('unrelated-feature-draft', 'preserve-this'));

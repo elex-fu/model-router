@@ -107,7 +107,10 @@ test('the aggregate joins head keys by reservation lineage and excludes the in-f
   await evaluatePostgresUserDailyBudget(executor, reservation);
   const aggregate = executor.statements.find(({ sql }) => sql.includes('FROM saas_api_key_budget_reservations r'));
   assert.ok(aggregate);
-  assert.match(aggregate.sql, /JOIN saas_api_keys k ON k\.tenant_id = r\.tenant_id\s+AND k\.project_id = r\.project_id AND k\.id = r\.lineage_id/);
+  assert.match(
+    aggregate.sql,
+    /JOIN saas_api_keys k ON k\.tenant_id = r\.tenant_id\s+AND k\.project_id = r\.project_id AND k\.id = r\.lineage_id/,
+  );
   assert.match(aggregate.sql, /other_key\.project_id = other\.project_id AND other_key\.id = other\.lineage_id/);
   assert.doesNotMatch(aggregate.sql, /k\.lineage_id/);
   assert.match(aggregate.sql, /other\.request_id <> \$4/);

@@ -53,7 +53,7 @@ import {
   createManagedSaasGatewayProductionComposition,
   type ManagedSaasGatewayComposition,
 } from '../../dist/server/managed-saas-gateway.js';
-import type { SaasDatabase } from '../src/saas/db/types.js';
+import type { SaasDatabase } from '../../src/saas/db/types.js';
 import { type DisposablePostgres, startDisposablePostgres } from './customer-harness.js';
 import { FakePspAdapter } from './fake-psp-adapter.js';
 import {

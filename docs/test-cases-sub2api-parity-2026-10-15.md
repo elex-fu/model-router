@@ -14,7 +14,7 @@
 
 | 用例 | 内容 | 状态 |
 |---|---|---|
-| TC-P1a-01 | 出站身份三件套:UA 形状 `{originator}/{version} ({OS} {osver}; {arch}) {terminal}`,version 低于 0.144.0 时降级到基准 0.146.0 | ✅ identity.test.ts |
+| TC-P1a-01 | 出站身份三件套:UA 形状 `{originator}/{version} ({OS} {osver}; {arch}) {terminal}`,version 低于 0.144.0 时降级到基准 0.167.0 | ✅ identity.test.ts |
 | TC-P1a-02 | 每账号身份命名空间:`sha256("u{keyId}:a{chatgpt:{acct}:user:{user}}:{raw}")[:8]`,failover 换账号后同会话 ID 不同 | ✅ identity.test.ts + transport.test.ts(跨账号断言) |
 | TC-P1a-03 | 指纹收敛 off/device/session/full 四模式,种子派生 UUIDv4 确定性 | ✅ identity.test.ts |
 | TC-P1a-04 | 请求变换:store=false、stream=true 强制;system→instructions 提升;16 字段白名单 | ✅ transform.test.ts |

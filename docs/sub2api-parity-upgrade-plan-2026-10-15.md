@@ -47,7 +47,7 @@
 
 **`identity.ts`** —— 出站身份三件套:
 
-- UA 形状 `{originator}/{version} ({OS} {osver}; {arch}) {terminal}`,默认 `codex_cli_rs`,version 最低 **0.144.0**(低于此上游 404),基准 `0.146.0`,需跟踪 CLI release(做 `codex-version-sync`:从 `chatgpt.com/backend-api/codex/models` manifest 或 npm registry 拉最新版本号,控制台可覆盖+告警过期)。
+- UA 形状 `{originator}/{version} ({OS} {osver}; {arch}) {terminal}`,默认 `codex_cli_rs`,version 最低 **0.144.0**(低于此上游 404),基准 `0.167.0`,需跟踪 CLI release(做 `codex-version-sync`:从 `chatgpt.com/backend-api/codex/models` manifest 或 npm registry 拉最新版本号,控制台可覆盖+告警过期)。
 - 每次出站强制重写 UA/originator/version 为规范值;`OpenAI-Beta: responses=experimental`。
 - **每账号身份命名空间**(必做,非可选):`session_id/conversation_id = sha256("u{keyId}:a{chatgpt:{accountId}:user:{userId}}:{raw}")[:8]`——保证 failover 换账号后同一客户端会话不出现在两个上游凭证下。
 - **指纹收敛**(账号级 opt-in,默认 off——sub2api v0.1.175 配额缩水事故教训):mode `off|device|session|full`;种子 UUIDv4 系统生成、更新时原子保留;派生 ID `deriveStableUUIDv4(sha256(namespace+seed))`;头(`x-codex-installation-id/-window-id/-client-request-id/session-id/thread-id`)与 `x-codex-turn-metadata` JSON、body `client_metadata.*`、`prompt_cache_key`(仅当等于原 session_id 时)同源重写;`turn_id` 每 attempt 随机 UUIDv7。

@@ -196,7 +196,7 @@ test('quota admission uncertainty blocks forwarding while attempt observation fa
     },
   });
   try {
-    const response=await attempt.post();
+    const response = await attempt.post();
     assert.equal(response.status, 200);
     await response.text();
     assert.equal(attempt.outbound, 1);
@@ -268,18 +268,26 @@ test('terminal observation failure does not retry in the request path or mutate 
   }
 });
 
-test('blocked observation promises do not delay the upstream request or streaming response', async()=>{
-  let release!:()=>void;
-  const blocked=new Promise<void>(resolve=>{release=resolve;});
-  const h=await harness({request:()=>blocked,attempt:()=>blocked},true);
+test('blocked observation promises do not delay the upstream request or streaming response', async () => {
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const h = await harness({ request: () => blocked, attempt: () => blocked }, true);
   try {
-    const response=await Promise.race([h.post(),new Promise<never>((_,reject)=>setTimeout(()=>reject(new Error('observation blocked request')),1000))]);
-    assert.equal(response.status,200);
-    assert.match(await response.text(),/data: \[DONE\]/);
-    assert.equal(h.outbound,1);
-    assert.equal(h.active.size,0);
-    assert.equal(h.requests.length,0);
-  } finally { release(); await h.close(); }
+    const response = await Promise.race([
+      h.post(),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('observation blocked request')), 1000)),
+    ]);
+    assert.equal(response.status, 200);
+    assert.match(await response.text(), /data: \[DONE\]/);
+    assert.equal(h.outbound, 1);
+    assert.equal(h.active.size, 0);
+    assert.equal(h.requests.length, 0);
+  } finally {
+    release();
+    await h.close();
+  }
 });
 
 test('persistent settle failure still writes terminal state and preserves the delivered response', async () => {

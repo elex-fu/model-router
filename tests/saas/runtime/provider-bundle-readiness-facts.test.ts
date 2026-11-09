@@ -27,17 +27,18 @@ class FakeDatabase implements SqlExecutor {
 
   async query<Row>(sql: string): Promise<SqlResult<Row>> {
     this.queries.push(sql);
-    const rows = sql === PROVIDER_BUNDLE_READINESS_SQL.codexFinancialCatalogScopes
-      ? []
-      : sql.includes('FROM saas_provider_products')
-      ? this.rows.providers
-      : sql.includes('FROM saas_provider_capabilities')
-        ? this.rows.catalogScopes
-        : sql.includes('FROM saas_supplier_cost_versions')
-          ? this.rows.pricedScopes
-          : sql.includes('FROM saas_platform_provider_accounts')
-            ? this.rows.credentialProviders
-            : [];
+    const rows =
+      sql === PROVIDER_BUNDLE_READINESS_SQL.codexFinancialCatalogScopes
+        ? []
+        : sql.includes('FROM saas_provider_products')
+          ? this.rows.providers
+          : sql.includes('FROM saas_provider_capabilities')
+            ? this.rows.catalogScopes
+            : sql.includes('FROM saas_supplier_cost_versions')
+              ? this.rows.pricedScopes
+              : sql.includes('FROM saas_platform_provider_accounts')
+                ? this.rows.credentialProviders
+                : [];
     return { rows: rows as Row[], rowCount: rows.length };
   }
 }

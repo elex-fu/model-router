@@ -1,11 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { test } from 'node:test';
-import {
-  accountIdentityNamespace,
-  CODEX_BASELINE_VERSION,
-  isolateSessionId,
-} from '../../../../src/saas/gateway/codex/identity.js';
+import { accountIdentityNamespace, isolateSessionId } from '../../../../src/saas/gateway/codex/identity.js';
 import {
   CODEX_RESPONSES_ENDPOINT,
   CodexHttpTransport,
@@ -142,8 +138,8 @@ test('headers: bearer, account id, canonical identity and whitelist passthrough'
 
   // The canonical identity trio always wins over client passthrough.
   assert.equal(headers.originator, 'codex_cli_rs');
-  assert.equal(headers.version, CODEX_BASELINE_VERSION);
-  assert.ok((headers['user-agent'] ?? '').startsWith(`codex_cli_rs/${CODEX_BASELINE_VERSION} (`));
+  assert.equal(headers.version, '0.167.0');
+  assert.equal(headers['user-agent'], 'codex_cli_rs/0.167.0 (Mac OS X 10.15.7; arm64) Apple_Terminal');
   assert.equal(headers['openai-beta'], 'responses=experimental');
 
   // Whitelisted x-codex-* passthrough survives; non-whitelisted names do not.
@@ -160,6 +156,20 @@ test('headers: bearer, account id, canonical identity and whitelist passthrough'
   // Body is serialized verbatim.
   const bodyText = Buffer.from(calls[0]?.init.body as Buffer).toString('utf8');
   assert.deepEqual(JSON.parse(bodyText), { model: 'gpt-5.3-codex', input: [], instructions: 'inst' });
+});
+
+test('headers: an explicit identity version override wins over the default', async () => {
+  const { calls, fetch } = captureFetch(() => sseResponse([COMPLETED_EVENT]));
+  const transport = new CodexHttpTransport({ fetch, resolveCredential: resolver() });
+
+  const result = await transport.send(baseRequest({ identityVersionOverride: '0.168.1' }));
+
+  assert.equal(result.ok, true);
+  assert.equal(calls.length, 1);
+  const headers = calls[0]?.init.headers as Record<string, string>;
+  assert.equal(headers.originator, 'codex_cli_rs');
+  assert.equal(headers.version, '0.168.1');
+  assert.equal(headers['user-agent'], 'codex_cli_rs/0.168.1 (Mac OS X 10.15.7; arm64) Apple_Terminal');
 });
 
 test('session namespace differs across accounts (failover isolation)', async () => {

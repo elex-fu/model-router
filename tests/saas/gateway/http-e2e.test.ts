@@ -1197,13 +1197,16 @@ function claudeOnlyGateway(
     preparation: preparation as RequestPreparationPort,
     dispatch,
   });
-  const request = new FakeIncomingMessage({
-    model: 'public-model',
-    max_tokens: 1024,
-    system: [{ type: 'text', text: "You are Claude Code, Anthropic's official CLI for Claude." }],
-    metadata: { user_id: 'user_e2b8a1c4d5f6a7b8c9d0e1f2a3b4c5d6' },
-    messages: [{ role: 'user', content: 'hello from client' }],
-  }, '/v1/messages');
+  const request = new FakeIncomingMessage(
+    {
+      model: 'public-model',
+      max_tokens: 1024,
+      system: [{ type: 'text', text: "You are Claude Code, Anthropic's official CLI for Claude." }],
+      metadata: { user_id: 'user_e2b8a1c4d5f6a7b8c9d0e1f2a3b4c5d6' },
+      messages: [{ role: 'user', content: 'hello from client' }],
+    },
+    '/v1/messages',
+  );
   Object.assign(request.headers, { 'user-agent': userAgent, ...extraHeaders });
   return { handler, request, response: new FakeServerResponse(), statements, preparationState };
 }
@@ -1244,12 +1247,9 @@ test('a claude_code_only group admits genuine Claude Code clients past the group
     setup.statements.map(({ sql }) => sql.match(/postgres-provider-account-scheduler:([a-z-]+)/)?.[1]),
     ['billing-group', 'threshold-candidates', 'route'],
   );
-  assert.deepEqual(setup.statements[2]?.values, [
-    'tenant-1',
-    'project-1',
-    'public-model',
-    'anthropic',
-    'platform',
-  ]);
-  assert.equal(setup.statements.some(({ sql }) => sql.includes('-eligibility')), false);
+  assert.deepEqual(setup.statements[2]?.values, ['tenant-1', 'project-1', 'public-model', 'anthropic', 'platform']);
+  assert.equal(
+    setup.statements.some(({ sql }) => sql.includes('-eligibility')),
+    false,
+  );
 });

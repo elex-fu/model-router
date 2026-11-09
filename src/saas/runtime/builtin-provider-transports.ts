@@ -48,7 +48,7 @@ import {
 import type { ProviderCredentialDispatchProofReader } from '../supply/types.js';
 import { BUILTIN_PAYLOAD_COMPILER_VERSION } from './builtin-payload-compiler-version.js';
 import { consumeBuiltinProviderSecret } from './builtin-provider-secret-callback.js';
-import { resolveCodexBoundSendProfile, type CodexTrustedBoundProfileResolver } from './codex-trusted-bound-profiles.js';
+import { type CodexTrustedBoundProfileResolver, resolveCodexBoundSendProfile } from './codex-trusted-bound-profiles.js';
 import type { GatewayProviderCredentialUnsealer } from './gateway-provider-credential-unsealer.js';
 import type { ProviderBundleConfiguration } from './gateway-runtime-module.js';
 import { providerBundleManifest } from './provider-bundles.js';

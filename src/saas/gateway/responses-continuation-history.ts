@@ -1,11 +1,24 @@
 import { ResponsesWsRoundError } from './responses-ws-engine.js';
 
+// biome-ignore lint/suspicious/noControlCharactersInRegex: Continuation IDs must reject C0 controls and DEL.
+const invalidConversationCharacter = /[\u0000-\u001f\u007f]/;
+
 /** A stable client namespace is scoped again by authenticated tenant/project/key in every lookup. */
 export function normalizeResponsesHistoryConversationId(header: unknown, body: unknown): string | undefined {
   const parse = (value: unknown): string | undefined => {
     if (value === undefined) return undefined;
-    if (typeof value !== 'string' || value === '' || value.trim() !== value || Buffer.byteLength(value) > 512 || /[\u0000-\u001f\u007f]/.test(value)) {
-      throw new ResponsesWsRoundError('full_context_required', 'a valid stable conversation_id is required for response history', 409);
+    if (
+      typeof value !== 'string' ||
+      value === '' ||
+      value.trim() !== value ||
+      Buffer.byteLength(value) > 512 ||
+      invalidConversationCharacter.test(value)
+    ) {
+      throw new ResponsesWsRoundError(
+        'full_context_required',
+        'a valid stable conversation_id is required for response history',
+        409,
+      );
     }
     return value;
   };
@@ -59,6 +72,12 @@ export interface ResponsesContinuationHistoryPort {
 }
 export interface ResponsesHistoryCipherPort {
   /** Associated data binds the full immutable identity, reference, digest and expiry. */
-  seal(plaintext: Uint8Array, associatedData: Uint8Array): Promise<{ readonly encryptionKeyId: string; readonly encryptedContext: Uint8Array }>;
-  open(record: { readonly encryptionKeyId: string; readonly encryptedContext: Uint8Array }, associatedData: Uint8Array): Promise<Uint8Array>;
+  seal(
+    plaintext: Uint8Array,
+    associatedData: Uint8Array,
+  ): Promise<{ readonly encryptionKeyId: string; readonly encryptedContext: Uint8Array }>;
+  open(
+    record: { readonly encryptionKeyId: string; readonly encryptedContext: Uint8Array },
+    associatedData: Uint8Array,
+  ): Promise<Uint8Array>;
 }

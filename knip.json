@@ -1,6 +1,23 @@
 {
   "$schema": "https://unpkg.com/knip@5/schema.json",
-  "project": ["src/**/*.ts", "tests/**/*.ts"],
+  "workspaces": {
+    ".": {
+      "entry": [
+        "src/cli/index.ts",
+        "scripts/**/*.ts",
+        "tests/drills/helpers/payment-worker-sigkill-child.ts",
+        "src/admin/rollups-worker.ts",
+        "src/quota/write-worker.ts",
+        "src/server/bounded-gateway-worker.ts",
+        "src/storage/telemetry-write-worker.ts",
+        "tests/**/*.test.ts",
+        "tests/e2e/**/*.spec.ts",
+        "tests/saas/gateway/fast/journal-crash-child.ts",
+        "tests/saas/runtime/redis-resp-tls-child.fixture.ts"
+      ],
+      "project": ["src/**/*.ts", "scripts/**/*.ts", "tests/**/*.ts"]
+    }
+  },
   "ignoreExportsUsedInFile": true,
   "compilers": {
     "sh": "off"

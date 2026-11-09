@@ -114,7 +114,9 @@ export function chatCompletionsUsage(usage: CodexResponsesUsage): ChatCompletion
   return {
     ...(usage.inputTokens === null ? {} : { prompt_tokens: usage.inputTokens }),
     ...(usage.outputTokens === null ? {} : { completion_tokens: usage.outputTokens }),
-    ...(usage.inputTokens === null || usage.outputTokens === null ? {} : { total_tokens: usage.inputTokens + usage.outputTokens }),
+    ...(usage.inputTokens === null || usage.outputTokens === null
+      ? {}
+      : { total_tokens: usage.inputTokens + usage.outputTokens }),
     ...(usage.cachedTokens === null ? {} : { prompt_tokens_details: { cached_tokens: usage.cachedTokens } }),
   };
 }
@@ -127,7 +129,9 @@ export function anthropicUsageFields(usage: CodexResponsesUsage): {
   readonly output_tokens?: number;
 } {
   return {
-    ...(usage.inputTokens === null || usage.cachedTokens === null ? {} : { input_tokens: Math.max(0, usage.inputTokens - usage.cachedTokens) }),
+    ...(usage.inputTokens === null || usage.cachedTokens === null
+      ? {}
+      : { input_tokens: Math.max(0, usage.inputTokens - usage.cachedTokens) }),
     ...(usage.cachedTokens === null ? {} : { cache_read_input_tokens: usage.cachedTokens }),
     cache_creation_input_tokens: 0,
     ...(usage.outputTokens === null ? {} : { output_tokens: usage.outputTokens }),
@@ -744,7 +748,10 @@ export function aggregateResponsesToAnthropicMessage(
         break;
     }
   }
-  const terminal = events.find((event) => isRecord(event) && ['response.completed', 'response.incomplete', 'response.failed'].includes(String(event.type)));
+  const terminal = events.find(
+    (event) =>
+      isRecord(event) && ['response.completed', 'response.incomplete', 'response.failed'].includes(String(event.type)),
+  );
   const facts = terminal !== undefined && isRecord(terminal) ? terminalFacts(terminal) : null;
   const stopReason = mapAnthropicStopReason(
     facts?.status ?? null,

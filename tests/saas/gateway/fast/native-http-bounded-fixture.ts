@@ -383,10 +383,7 @@ export class NativeBoundedGatewayFixture {
       assert.ok(!oldEpochs.includes(slot.epoch), 'clean recovery cannot reuse any historical activation');
       await assert.rejects(verifyBoundedOwner(this.database, old), /BOUNDED_DEPLOYMENT_OWNER_NOT_ACTIVE/);
     }
-    const expectedHistory = [
-      ...oldHistory,
-      ...slots.map(({ owner, epoch }) => ({ owner, epoch })),
-    ].sort((a, b) => {
+    const expectedHistory = [...oldHistory, ...slots.map(({ owner, epoch }) => ({ owner, epoch }))].sort((a, b) => {
       if (a.owner !== b.owner) return a.owner < b.owner ? -1 : 1;
       return a.epoch < b.epoch ? -1 : a.epoch > b.epoch ? 1 : 0;
     });

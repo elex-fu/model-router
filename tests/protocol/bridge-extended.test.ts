@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { pickBridge, type Protocol } from '../../src/protocol/bridge.js';
+import { type Protocol, pickBridge } from '../../src/protocol/bridge.js';
 
 describe('pickBridge extended protocols', () => {
   it('returns pass-through for gemini->gemini', () => {
@@ -12,7 +12,12 @@ describe('pickBridge extended protocols', () => {
     assert.equal(b.clientProto, 'responses');
   });
   it('registers the four direct Gemini pairs', () => {
-    for (const [client, upstream] of [['gemini', 'openai'], ['openai', 'gemini'], ['gemini', 'responses'], ['responses', 'gemini']] as const) {
+    for (const [client, upstream] of [
+      ['gemini', 'openai'],
+      ['openai', 'gemini'],
+      ['gemini', 'responses'],
+      ['responses', 'gemini'],
+    ] as const) {
       const bridge = pickBridge(client, upstream);
       assert.equal(bridge.clientProto, client);
       assert.equal(bridge.upstreamProto, upstream);
@@ -23,6 +28,9 @@ describe('pickBridge extended protocols', () => {
   });
   it('registered Gemini bridges still reject unsupported opaque reasoning', () => {
     const bridge = pickBridge('gemini', 'openai');
-    assert.throws(() => bridge.transformRequest({ contents: [{ role: 'model', parts: [{ thoughtSignature: 'opaque' }] }] }), /Unsupported bridge feature/);
+    assert.throws(
+      () => bridge.transformRequest({ contents: [{ role: 'model', parts: [{ thoughtSignature: 'opaque' }] }] }),
+      /Unsupported bridge feature/,
+    );
   });
 });

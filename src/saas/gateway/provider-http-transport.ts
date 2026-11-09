@@ -1,6 +1,4 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
-import type { PreparedRequestEvidenceRecord } from './prepared-request-evidence-service.js';
-import { currentRequestDiagnosticTrace } from './request-diagnostic-trace.js';
 import { isIP } from 'node:net';
 import type { Dispatcher, RequestInit as UndiciRequestInit } from 'undici';
 import { OpenAIToAnthBridge } from '../../protocol/openai-to-anth.js';
@@ -13,6 +11,7 @@ import type {
   PreparedEvidenceTransportRequest,
   PreparedEvidenceTransportResponse,
 } from './prepared-evidence-dispatch-service.js';
+import type { PreparedRequestEvidenceRecord } from './prepared-request-evidence-service.js';
 import {
   createPinnedProviderHttpConnector,
   createPinnedProviderHttpTestConnectorFactory,
@@ -35,6 +34,7 @@ import {
 import { observeProviderJsonUsage, type ProviderMediaUsageExtractor } from './provider-json-usage-observer.js';
 import { observeProviderSseUsage } from './provider-sse-usage-observer.js';
 import { providerUsageObserverVersion, providerUsageProfile } from './provider-usage-profile.js';
+import { currentRequestDiagnosticTrace } from './request-diagnostic-trace.js';
 import {
   createUsageEvidence,
   type NormalizedUsageEvidence,
@@ -215,12 +215,32 @@ export type ProviderHttpFixedRequestHeadersResolver = (
   | PromiseLike<Readonly<Record<string, string>> | null | undefined>;
 
 /** Only transport facts: neither a persisted evidence row nor a claim assertion. */
-export type ProviderHttpTransportBinding = Pick<PreparedRequestEvidenceRecord,
-  'evidenceId' | 'tenantId' | 'projectId' | 'requestId' | 'attemptId' | 'supplyMode' |
-  'accountOwnerKind' | 'publicModel' | 'protocol' | 'clientProtocol' | 'providerProtocol' |
-  'clientOperation' | 'providerOperation' | 'endpoint' | 'upstreamId' | 'providerId' |
-  'productId' | 'accountId' | 'credentialId' | 'credentialVersion' | 'payloadSha256' |
-  'resolvedModel' | 'payloadCompilerVersion'>;
+export type ProviderHttpTransportBinding = Pick<
+  PreparedRequestEvidenceRecord,
+  | 'evidenceId'
+  | 'tenantId'
+  | 'projectId'
+  | 'requestId'
+  | 'attemptId'
+  | 'supplyMode'
+  | 'accountOwnerKind'
+  | 'publicModel'
+  | 'protocol'
+  | 'clientProtocol'
+  | 'providerProtocol'
+  | 'clientOperation'
+  | 'providerOperation'
+  | 'endpoint'
+  | 'upstreamId'
+  | 'providerId'
+  | 'productId'
+  | 'accountId'
+  | 'credentialId'
+  | 'credentialVersion'
+  | 'payloadSha256'
+  | 'resolvedModel'
+  | 'payloadCompilerVersion'
+>;
 
 export type ProviderHttpBoundRequest = Omit<PreparedEvidenceTransportRequest, 'evidence'> & {
   readonly evidence: ProviderHttpTransportBinding;
@@ -1003,10 +1023,7 @@ function managedResponseBody(body: ReadableStream<Uint8Array>, context: RequestC
   });
 }
 
-function profileInput(
-  request: ProviderHttpBoundRequest,
-  signal: AbortSignal,
-): ProviderHttpDispatchProfileResolveInput {
+function profileInput(request: ProviderHttpBoundRequest, signal: AbortSignal): ProviderHttpDispatchProfileResolveInput {
   return {
     tenantId: request.tenantId,
     projectId: request.projectId,
@@ -1064,8 +1081,11 @@ export class ProviderHttpTransport implements PreparedEvidenceTransport {
   async send(input: PreparedEvidenceTransportRequest): Promise<PreparedEvidenceTransportResponse> {
     // The legacy entrypoint retains its exact claim requirement. Fast mode
     // never fabricates a claimed PreparedRequestEvidenceRecord.
-    if (!input?.evidence || input.evidence.status !== 'claimed' ||
-        input.evidence.claimedAttemptId !== input.attemptId) {
+    if (
+      !input?.evidence ||
+      input.evidence.status !== 'claimed' ||
+      input.evidence.claimedAttemptId !== input.attemptId
+    ) {
       fail('PAYLOAD_BINDING_MISMATCH', 'prepared evidence is not claimed by this attempt');
     }
     return this.sendBound(input);

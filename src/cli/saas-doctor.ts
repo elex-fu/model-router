@@ -5,6 +5,7 @@ import {
   SAAS_CREDENTIAL_VALIDATION_WORKER_PRIVILEGE_PROBE_SQL,
   verifyCredentialValidationWorkerRuntimePrivileges,
 } from '../saas/db/credential-validation-worker-privileges.js';
+import { resolveSaasDatabasePoolSettings } from '../saas/db/database.js';
 import { verifySaasMigrations } from '../saas/db/migrate.js';
 import { SAAS_MIGRATIONS } from '../saas/db/migrations/001_initial_schema.js';
 import {
@@ -17,7 +18,6 @@ import {
   verifySaasRuntimeDatabasePrivileges,
 } from '../saas/db/runtime-privileges.js';
 import type { SaasDatabaseClient, SaasDatabasePool } from '../saas/db/types.js';
-import { resolveSaasDatabasePoolSettings } from '../saas/db/database.js';
 import {
   MODEL_ROUTER_SAAS_CONTROL_PLANE_DATABASE_URL,
   MODEL_ROUTER_SAAS_DATABASE_URL,
@@ -26,24 +26,27 @@ import {
   MODEL_ROUTER_SAAS_VALIDATION_WORKER_DATABASE_URL,
   MODEL_ROUTER_SAAS_VALIDATION_WORKER_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE,
   MODEL_ROUTER_SAAS_WORKLOAD_ROLE,
+  parseDeploymentConfig,
   SAAS_GATEWAY_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE,
   SAAS_PROVIDER_CREDENTIAL_REWRAP_KMS_MODULE,
   SAAS_PROVIDER_CREDENTIAL_SEAL_KMS_MODULE,
-  parseDeploymentConfig,
 } from '../saas/deployment.js';
-import { loadPaymentDeployment } from '../saas/runtime/payment-deployment.js';
-import { loadCommercialAttestationTrust, COMMERCIAL_ATTESTATION_TRUST_FILE } from '../saas/runtime/commercial-attestation-trust.js';
-import { loadResponsesContinuationDeployment } from '../saas/runtime/responses-continuation-deployment.js';
-import { codexTrustedBoundReadiness } from '../saas/runtime/codex-trusted-bound-profiles.js';
 import { CONCURRENCY_INFLIGHT_HORIZON_SECONDS } from '../saas/gateway/postgres-preparation-capacity.js';
+import { codexTrustedBoundReadiness } from '../saas/runtime/codex-trusted-bound-profiles.js';
+import {
+  COMMERCIAL_ATTESTATION_TRUST_FILE,
+  loadCommercialAttestationTrust,
+} from '../saas/runtime/commercial-attestation-trust.js';
 import {
   type GatewayCapabilityStatus,
   readGatewayCapabilityStatus,
 } from '../saas/runtime/gateway-capability-status.js';
 import { loadGatewayProviderCredentialUnsealingKms } from '../saas/runtime/gateway-provider-credential-kms.js';
+import { loadPaymentDeployment } from '../saas/runtime/payment-deployment.js';
 import { loadProviderCredentialSealingKms } from '../saas/runtime/provider-credential-kms.js';
 import { loadProviderCredentialRewrappingKms } from '../saas/runtime/provider-credential-rewrapping-kms.js';
 import { RedisRespClient, RedisRespError } from '../saas/runtime/redis-resp-client.js';
+import { loadResponsesContinuationDeployment } from '../saas/runtime/responses-continuation-deployment.js';
 import { loadValidationWorkerProviderCredentialKms } from '../saas/runtime/validation-worker-provider-credential-kms.js';
 
 /**
@@ -126,6 +129,7 @@ export interface SaasDoctorFilesystem {
 export interface SaasDoctorDependencies {
   env?: NodeJS.ProcessEnv;
   createPool?: (connectionString: string) => SaasDatabasePool;
+  verifyRuntimePrivileges?: typeof verifySaasRuntimeDatabasePrivileges;
   loadSealingKms?: (options: { env: NodeJS.ProcessEnv }) => Promise<DoctorKmsHandle | undefined>;
   loadRewrappingKms?: (options: { env: NodeJS.ProcessEnv }) => Promise<DoctorKmsHandle | undefined>;
   loadGatewayUnsealingKms?: (options: { env: NodeJS.ProcessEnv }) => Promise<DoctorKmsHandle | undefined>;
@@ -181,7 +185,8 @@ const PROBE_HINTS: Readonly<Record<SaasDoctorCheckId, string>> = Object.freeze({
   'payments-readiness': 'probe: read-only descriptor and credential loading; no PSP request or activation',
   'commercial-attestation-trust': 'probe: bounded public verification key and suite digest file loading',
   'request-diagnostics': 'probe: sampling configuration only; no request or log emission',
-  'responses-history': 'probe: schema and SELECT/INSERT/DELETE privilege checks plus production KMS canary; no history row write or purge',
+  'responses-history':
+    'probe: schema and SELECT/INSERT/DELETE privilege checks plus production KMS canary; no history row write or purge',
   'validation-worker-attempts': 'probe: role and bounded retry configuration only; no provider request',
   'redis-contract': 'probe: RedisRespClient RESP2 connect + PING within REDIS_RESP_BOUNDS',
   'gateway-capabilities':
@@ -605,7 +610,8 @@ async function checkRolePrivileges(context: DoctorContext): Promise<SaasDoctorCh
     if (role === 'credential-validation-worker') {
       await verifyCredentialValidationWorkerRuntimePrivileges(pool);
     } else {
-      await verifySaasRuntimeDatabasePrivileges(pool, role === 'gateway' ? 'gateway' : 'control_plane');
+      const verify = context.dependencies.verifyRuntimePrivileges ?? verifySaasRuntimeDatabasePrivileges;
+      await verify(pool, role === 'gateway' ? 'gateway' : 'control_plane');
     }
   } catch {
     let named: readonly string[] = [];
@@ -1154,7 +1160,20 @@ export async function saasDoctor(
   try {
     const validationAttempts = env.MODEL_ROUTER_SAAS_VALIDATION_WORKER_MAX_ATTEMPTS;
     if (validationAttempts !== undefined) {
-      checks.push(role === 'credential-validation-worker' && /^[1-9]\d?$/u.test(validationAttempts) && Number(validationAttempts) <= 20 ? pass('validation-worker-attempts', `Credential validation worker max attempts=${Number(validationAttempts)} per job; this does not cap all worker/provider traffic`) : fail('validation-worker-attempts', 'VALIDATION_WORKER_MAX_ATTEMPTS_INVALID', 'Configure an integer from 1 to 20 only on the credential-validation-worker role'));
+      checks.push(
+        role === 'credential-validation-worker' &&
+          /^[1-9]\d?$/u.test(validationAttempts) &&
+          Number(validationAttempts) <= 20
+          ? pass(
+              'validation-worker-attempts',
+              `Credential validation worker max attempts=${Number(validationAttempts)} per job; this does not cap all worker/provider traffic`,
+            )
+          : fail(
+              'validation-worker-attempts',
+              'VALIDATION_WORKER_MAX_ATTEMPTS_INVALID',
+              'Configure an integer from 1 to 20 only on the credential-validation-worker role',
+            ),
+      );
     }
     const historyMode = env.MODEL_ROUTER_SAAS_RESPONSES_HISTORY_MODE;
     if (historyMode !== undefined && historyMode !== 'disabled') {
@@ -1166,24 +1185,88 @@ export async function saasDoctor(
         if (!history) throw new Error();
         try {
           const metadata = history.diagnostics?.();
-          const expiry = metadata?.credentialExpiresAt && Number.isFinite(Date.parse(metadata.credentialExpiresAt)) ? new Date(metadata.credentialExpiresAt).toISOString() : 'unavailable';
+          const expiry =
+            metadata?.credentialExpiresAt && Number.isFinite(Date.parse(metadata.credentialExpiresAt))
+              ? new Date(metadata.credentialExpiresAt).toISOString()
+              : 'unavailable';
           const retainedKeyCount = metadata?.retainedDecryptKeyIds?.length ?? 0;
-          checks.push(history.readiness === 'production-kms' ? pass('responses-history', `Dedicated history KMS roundtrip and schema checks passed; retained decrypt key count=${retainedKeyCount}; credential expiry=${expiry}; productionEvidence=external_evidence_required; live continuation acceptance remains separate`) : warn('responses-history', 'Pilot file keyring is available; not production ready', 'Use the dedicated production KMS provider and complete real cross-instance continuation acceptance'));
+          checks.push(
+            history.readiness === 'production-kms'
+              ? pass(
+                  'responses-history',
+                  `Dedicated history KMS roundtrip and schema checks passed; retained decrypt key count=${retainedKeyCount}; credential expiry=${expiry}; productionEvidence=external_evidence_required; live continuation acceptance remains separate`,
+                )
+              : warn(
+                  'responses-history',
+                  'Pilot file keyring is available; not production ready',
+                  'Use the dedicated production KMS provider and complete real cross-instance continuation acceptance',
+                ),
+          );
+        } finally {
+          await history.close();
         }
-        finally { await history.close(); }
-      } catch { checks.push(fail('responses-history', 'RESPONSES_HISTORY_READINESS_FAILED', 'Inspect the gateway-only history schema, grants and dedicated history KMS/keyring configuration')); }
+      } catch {
+        checks.push(
+          fail(
+            'responses-history',
+            'RESPONSES_HISTORY_READINESS_FAILED',
+            'Inspect the gateway-only history schema, grants and dedicated history KMS/keyring configuration',
+          ),
+        );
+      }
     }
     const diagnostics = env.MODEL_ROUTER_REQUEST_DIAGNOSTICS_SAMPLE_EVERY;
-    if (diagnostics !== undefined) checks.push(/^[1-9]\d{0,8}$/u.test(diagnostics) ? pass('request-diagnostics', 'Numeric phase diagnostics sampling is configured; this does not establish performance acceptance') : fail('request-diagnostics', 'REQUEST_DIAGNOSTICS_CONFIG_INVALID', 'Use a positive integer up to 999999999, or unset to disable'));
+    if (diagnostics !== undefined)
+      checks.push(
+        /^[1-9]\d{0,8}$/u.test(diagnostics)
+          ? pass(
+              'request-diagnostics',
+              'Numeric phase diagnostics sampling is configured; this does not establish performance acceptance',
+            )
+          : fail(
+              'request-diagnostics',
+              'REQUEST_DIAGNOSTICS_CONFIG_INVALID',
+              'Use a positive integer up to 999999999, or unset to disable',
+            ),
+      );
     if (role === 'combined' || role === 'control-plane' || env[COMMERCIAL_ATTESTATION_TRUST_FILE] !== undefined) {
-      if (env[COMMERCIAL_ATTESTATION_TRUST_FILE] === undefined) checks.push(warn('commercial-attestation-trust', 'Platform inference access provisioning is unavailable: commercial attestation trust is missing', 'Configure the dedicated public key and suite digest trust file; no Codex billing bound is established'));
+      if (env[COMMERCIAL_ATTESTATION_TRUST_FILE] === undefined)
+        checks.push(
+          warn(
+            'commercial-attestation-trust',
+            'Platform inference access provisioning is unavailable: commercial attestation trust is missing',
+            'Configure the dedicated public key and suite digest trust file; no Codex billing bound is established',
+          ),
+        );
       else {
         try {
-          const trust = await loadCommercialAttestationTrust({ workloadRole: role } as import('../saas/deployment.js').ManagedSaasDeploymentConfig, env);
+          const trust = await loadCommercialAttestationTrust(
+            { workloadRole: role } as import('../saas/deployment.js').ManagedSaasDeploymentConfig,
+            env,
+          );
           if (!trust) throw new Error();
           const codexBounds = codexTrustedBoundReadiness();
-          checks.push(resolveSaasDatabasePoolSettings({}, env).max < 2 ? warn('commercial-attestation-trust', 'Platform inference access provisioning is unavailable: CP database pool requires at least two connections', 'Increase MODEL_ROUTER_SAAS_DB_POOL_MAX to at least 2') : pass('commercial-attestation-trust', `Dedicated commercial public verification keys and suite digests are valid; reviewed Codex bound profiles=${codexBounds.admittedProfileCount} (display only); each Codex provisioning operation requires an exact scope match or returns TRUSTED_USAGE_BOUNDS_UNAVAILABLE`));
-        } catch { checks.push(fail('commercial-attestation-trust', 'COMMERCIAL_ATTESTATION_TRUST_INVALID', 'Inspect the dedicated public verification file and CP-only role declaration')); }
+          checks.push(
+            resolveSaasDatabasePoolSettings({}, env).max < 2
+              ? warn(
+                  'commercial-attestation-trust',
+                  'Platform inference access provisioning is unavailable: CP database pool requires at least two connections',
+                  'Increase MODEL_ROUTER_SAAS_DB_POOL_MAX to at least 2',
+                )
+              : pass(
+                  'commercial-attestation-trust',
+                  `Dedicated commercial public verification keys and suite digests are valid; reviewed Codex bound profiles=${codexBounds.admittedProfileCount} (display only); each Codex provisioning operation requires an exact scope match or returns TRUSTED_USAGE_BOUNDS_UNAVAILABLE`,
+                ),
+          );
+        } catch {
+          checks.push(
+            fail(
+              'commercial-attestation-trust',
+              'COMMERCIAL_ATTESTATION_TRUST_INVALID',
+              'Inspect the dedicated public verification file and CP-only role declaration',
+            ),
+          );
+        }
       }
     }
     if (env.MODEL_ROUTER_SAAS_PAYMENTS_CONFIG_FILE !== undefined) {
@@ -1195,7 +1278,13 @@ export async function saasDoctor(
         await paymentDeployment.close();
         checks.push(pass('payments-readiness', 'Payment descriptor and credential references are valid'));
       } catch {
-        checks.push(fail('payments-readiness', 'Payment configuration or credentials are unavailable for this role', 'Inspect CP-only descriptor and credential mount; no secret contents are reported'));
+        checks.push(
+          fail(
+            'payments-readiness',
+            'Payment configuration or credentials are unavailable for this role',
+            'Inspect CP-only descriptor and credential mount; no secret contents are reported',
+          ),
+        );
       }
     }
     for (const check of checkScopes(role)) {

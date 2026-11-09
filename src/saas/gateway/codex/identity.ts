@@ -29,7 +29,7 @@ import {
 /** Lowest CLI version the upstream still serves; below this the upstream answers 404. */
 export const CODEX_MIN_VERSION = '0.144.0';
 /** Version the canonical UA advertises when no tracked override is supplied. */
-export const CODEX_BASELINE_VERSION = '0.146.0';
+export const CODEX_BASELINE_VERSION = '0.167.0';
 /** Default `originator` value reported by the Codex CLI Rust build. */
 export const CODEX_DEFAULT_ORIGINATOR = 'codex_cli_rs';
 
@@ -153,13 +153,13 @@ export function resetSyncedCodexVersionForTests(): void {
  *
  * 1. `versionOverride` — honored only when well-formed and at or above
  *    CODEX_MIN_VERSION (an explicit per-request override always wins);
- * 2. the process-level synced slot (`updateSyncedCodexVersion`), same
- *    eligibility rule;
+ * 2. the process-level synced slot (`updateSyncedCodexVersion`), when it is
+ *    eligible and at least CODEX_BASELINE_VERSION;
  * 3. CODEX_BASELINE_VERSION.
  *
- * Anything else degrades to CODEX_BASELINE_VERSION because a low version is
- * rejected upstream with a plain 404. The three returned values are always
- * mutually consistent.
+ * Anything else degrades to the newer of the synced slot and
+ * CODEX_BASELINE_VERSION because a low version is rejected upstream with a
+ * plain 404. The three returned values are always mutually consistent.
  */
 export function buildCanonicalIdentity(
   versionOverride?: string,
@@ -171,7 +171,9 @@ export function buildCanonicalIdentity(
       : null;
   const syncedVersion =
     syncedCodexVersion !== null && semverGte(syncedCodexVersion, CODEX_MIN_VERSION) ? syncedCodexVersion : null;
-  const version = overrideVersion ?? syncedVersion ?? CODEX_BASELINE_VERSION;
+  const defaultVersion =
+    syncedVersion !== null && semverGte(syncedVersion, CODEX_BASELINE_VERSION) ? syncedVersion : CODEX_BASELINE_VERSION;
+  const version = overrideVersion ?? defaultVersion;
   const originator = CODEX_DEFAULT_ORIGINATOR;
   const userAgent = `${originator}/${version} (${profile.os} ${profile.osVersion}; ${profile.arch}) ${profile.terminal}`;
   return { userAgent, originator, version };

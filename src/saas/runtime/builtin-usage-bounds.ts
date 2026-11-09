@@ -1,6 +1,9 @@
 import { CODEX_RESPONSES_ENDPOINT } from '../gateway/codex/transport.js';
-import { resolveCodexTrustedBoundProfile, type CodexTrustedBoundProfileResolver } from './codex-trusted-bound-profiles.js';
 import type { ProviderUsageUpperBoundEstimator } from '../gateway/provider-payload-compiler.js';
+import {
+  type CodexTrustedBoundProfileResolver,
+  resolveCodexTrustedBoundProfile,
+} from './codex-trusted-bound-profiles.js';
 
 const FRAMING_TOKEN_ALLOWANCE = 4096;
 const NONLOCAL_KEYS = new Set([
@@ -168,12 +171,16 @@ export function createBuiltinUsageUpperBoundEstimator(options: {
         // Only this exact backend contract may admit Codex; SIWC/API limits do not apply here.
         const compact = normalizedRequest.providerOperation === 'responses.compact';
         const trusted = resolveCodexProfile({
-          endpoint: compact ? `${CODEX_RESPONSES_ENDPOINT}/compact` : normalizedRequest.upstreamTransport === 'websocket' ? CODEX_RESPONSES_ENDPOINT.replace('https:', 'wss:') : CODEX_RESPONSES_ENDPOINT,
+          endpoint: compact
+            ? `${CODEX_RESPONSES_ENDPOINT}/compact`
+            : normalizedRequest.upstreamTransport === 'websocket'
+              ? CODEX_RESPONSES_ENDPOINT.replace('https:', 'wss:')
+              : CODEX_RESPONSES_ENDPOINT,
           productId: normalizedRequest.productId,
           model: normalizedRequest.resolvedModel,
           operation: normalizedRequest.providerOperation,
           transport: normalizedRequest.upstreamTransport ?? 'http',
-          continuationMode: compact ? 'compact' : normalizedRequest.continuationMode ?? 'full',
+          continuationMode: compact ? 'compact' : (normalizedRequest.continuationMode ?? 'full'),
         });
         if (!trusted) return unavailable();
         return { bounds: trusted.profile.bounds, trustedBoundEvidenceDigest: trusted.digest };

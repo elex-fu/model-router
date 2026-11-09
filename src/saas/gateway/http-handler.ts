@@ -1014,8 +1014,8 @@ class ResponsesHistoryHttpCapture implements PreparedEvidenceClientStream {
       return;
     }
     this.pending += text;
-    let boundary: RegExpExecArray | null;
-    while ((boundary = /\r\n\r\n|\n\n|\r\r/.exec(this.pending))) {
+    const delimiter = /\r\n\r\n|\n\n|\r\r/;
+    for (let boundary = delimiter.exec(this.pending); boundary; boundary = delimiter.exec(this.pending)) {
       const block = this.pending.slice(0, boundary.index + boundary[0].length);
       this.pending = this.pending.slice(block.length);
       if (!this.terminal) {

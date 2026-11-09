@@ -56,15 +56,17 @@ export function renderCodexModelsManifestResponse(
   entries: readonly CodexModelManifestEntry[],
   usableSlugs: readonly string[] | null,
 ): RenderedCodexModelsManifest | null {
-  const selected =
-    usableSlugs === null ? entries : entries.filter((entry) => usableSlugs.includes(entry.slug));
+  const selected = usableSlugs === null ? entries : entries.filter((entry) => usableSlugs.includes(entry.slug));
   if (selected.length === 0) return null;
   const body = JSON.stringify({ models: selected.map(renderEntry) });
   return { status: 200, body, etag: etagFromBody(body) };
 }
 
 /** Strong ETag: quoted sha1 of the exact response body. */
-export function codexModelsManifestEtag(entries: readonly CodexModelManifestEntry[], usableSlugs: readonly string[] | null): string | null {
+export function codexModelsManifestEtag(
+  entries: readonly CodexModelManifestEntry[],
+  usableSlugs: readonly string[] | null,
+): string | null {
   const rendered = renderCodexModelsManifestResponse(entries, usableSlugs);
   return rendered === null ? null : rendered.etag;
 }

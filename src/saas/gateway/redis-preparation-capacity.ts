@@ -412,7 +412,11 @@ export class RedisPreparationCapacity {
       for (const row of rows.rows) await this.complete(row.id, true);
     })();
     this.recoveryRun = operation;
-    void operation.finally(() => { this.recoveryRun = undefined; }).catch(() => {});
+    void operation
+      .finally(() => {
+        this.recoveryRun = undefined;
+      })
+      .catch(() => {});
     return operation;
   }
   close(): Promise<void> {

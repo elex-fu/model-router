@@ -183,7 +183,10 @@ test('state write failure during stop still waits for both actual child exits be
   }
 });
 
-test('generation-authenticated private control replaces persisted PID signaling', { timeout: 15000, skip: linuxOnlySkip }, async () => {
+test('generation-authenticated private control replaces persisted PID signaling', {
+  timeout: 15000,
+  skip: linuxOnlySkip,
+}, async () => {
   const directory = await mkdtemp(join(tmpdir(), 'mr-super-'));
   const deps = dependencies();
   let runtime: Awaited<ReturnType<typeof startBoundedGatewaySupervisor>> | undefined;
@@ -240,7 +243,10 @@ test('shutdown awaits in-progress control startup and closes it before releasing
   }
 });
 
-test('control post-bind permission failure closes its listener before rejecting', { timeout: 5000, skip: linuxOnlySkip }, async () => {
+test('control post-bind permission failure closes its listener before rejecting', {
+  timeout: 5000,
+  skip: linuxOnlySkip,
+}, async () => {
   const directory = await mkdtemp(join(tmpdir(), 'mr-control-'));
   const generation = randomUUID();
   try {

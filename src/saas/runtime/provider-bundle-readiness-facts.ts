@@ -25,10 +25,13 @@
  */
 
 import type { SqlExecutor } from '../db/types.js';
-import type { CodexFinancialCatalogScope, CodexWorkflowFinancialReadiness } from './codex-workflow-financial-readiness.js';
 import type {
-  GatewayCapabilityDispatchFacts,
+  CodexFinancialCatalogScope,
+  CodexWorkflowFinancialReadiness,
+} from './codex-workflow-financial-readiness.js';
+import type {
   CodexWorkflowReadiness,
+  GatewayCapabilityDispatchFacts,
   GatewayCapabilityFacts,
   GatewayCapabilityVerificationLevel,
   ProviderBundleReadinessFacts,
@@ -76,13 +79,26 @@ const CODEX_FINANCIAL_CATALOG_SQL = `
 `;
 
 function codexCatalogScopes(rows: readonly CodexCatalogScopeRow[]): readonly (CodexFinancialCatalogScope | null)[] {
-  return Object.freeze(rows.map((row): CodexFinancialCatalogScope | null => {
-    if (row.provider_id !== 'openai-codex' || row.product_id !== 'codex-chatgpt' ||
-      row.endpoint !== 'codex-responses' || row.protocol !== 'responses' ||
-      typeof row.model !== 'string' || !/\S/.test(row.model)) return null;
-    return Object.freeze({ providerId: row.provider_id, productId: row.product_id,
-      resolvedModel: row.model, catalogEndpoint: row.endpoint, protocol: row.protocol });
-  }));
+  return Object.freeze(
+    rows.map((row): CodexFinancialCatalogScope | null => {
+      if (
+        row.provider_id !== 'openai-codex' ||
+        row.product_id !== 'codex-chatgpt' ||
+        row.endpoint !== 'codex-responses' ||
+        row.protocol !== 'responses' ||
+        typeof row.model !== 'string' ||
+        !/\S/.test(row.model)
+      )
+        return null;
+      return Object.freeze({
+        providerId: row.provider_id,
+        productId: row.product_id,
+        resolvedModel: row.model,
+        catalogEndpoint: row.endpoint,
+        protocol: row.protocol,
+      });
+    }),
+  );
 }
 
 interface ProviderRow {
@@ -247,8 +263,12 @@ export async function collectGatewayCapabilityFacts(
     mediaStorages: Object.freeze([...deployment.mediaStorages]),
     tlsFingerprintProfiles: Object.freeze([...deployment.tlsFingerprintProfiles]),
     verification: Object.freeze({ ...deployment.verification }),
-    ...(deployment.codexWorkflowTransports ? { codexWorkflowTransports: Object.freeze([...deployment.codexWorkflowTransports]) } : {}),
-    ...(deployment.codexWorkflowFinancialReadiness ? { codexWorkflowFinancialReadiness: Object.freeze({ ...deployment.codexWorkflowFinancialReadiness }) } : {}),
+    ...(deployment.codexWorkflowTransports
+      ? { codexWorkflowTransports: Object.freeze([...deployment.codexWorkflowTransports]) }
+      : {}),
+    ...(deployment.codexWorkflowFinancialReadiness
+      ? { codexWorkflowFinancialReadiness: Object.freeze({ ...deployment.codexWorkflowFinancialReadiness }) }
+      : {}),
     ...(deployment.unavailableUsageBoundProviderIds
       ? { unavailableUsageBoundProviderIds: Object.freeze([...deployment.unavailableUsageBoundProviderIds]) }
       : {}),

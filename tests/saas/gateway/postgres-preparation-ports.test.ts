@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { SaasDatabase, SqlExecutor, SqlResult } from '../../../src/saas/db/types.js';
-import { SaasAdmissionAuthorizationError } from '../../../src/saas/gateway/authorization-prelock.js';
 import { PLATFORM_REQUEST_ADMISSION_UPPER_BOUNDS_KIND } from '../../../src/saas/gateway/admission.js';
+import { SaasAdmissionAuthorizationError } from '../../../src/saas/gateway/authorization-prelock.js';
 import {
   KeyBudgetAdmissionDeniedError,
   type KeyBudgetAdmissionFacts,
@@ -10,8 +10,8 @@ import {
 } from '../../../src/saas/gateway/postgres-preparation-budget.js';
 import {
   createPostgresPreparationPorts,
-  supportsPreparationTransactionFacts,
   type PostgresPreparationPortsOptions,
+  supportsPreparationTransactionFacts,
 } from '../../../src/saas/gateway/postgres-preparation-ports.js';
 import { PostgresRequestAdmissionGuard } from '../../../src/saas/gateway/postgres-request-admission-guard.js';
 import { GatewayRequestIdempotencyStore } from '../../../src/saas/gateway/request-idempotency.js';
@@ -270,7 +270,10 @@ function setup(
         authorizationEvents.push({ stage: 'clock', executor, observedAt: observedAt.toISOString() });
         return { rows: [{ observed_at: new Date(observedAt) } as Row], rowCount: 1 };
       }
-      if (normalizedSql === '/* postgres-request-admission:key-ip-policy */ SELECT mode, rules FROM saas_api_key_ip_policies WHERE tenant_id = $1 AND project_id = $2 AND key_id = $3 LIMIT 2') {
+      if (
+        normalizedSql ===
+        '/* postgres-request-admission:key-ip-policy */ SELECT mode, rules FROM saas_api_key_ip_policies WHERE tenant_id = $1 AND project_id = $2 AND key_id = $3 LIMIT 2'
+      ) {
         assert.deepEqual(values, [TENANT_ID, PROJECT_ID, PROXY_KEY_ID]);
         authorizationEvents.push({ stage: 'ip', executor });
         return { rows: [{ mode: 'disabled', rules: [] } as Row], rowCount: 1 };
@@ -567,10 +570,22 @@ function setup(
     async prelock(input: { executor: SqlExecutor; request: AnyRow }) {
       assert.equal(input.executor, executor);
       for (const field of [
-        'tenantId', 'projectId', 'proxyKeyId', 'projectPolicyVersion', 'entitlementId',
-        'supplyProfileId', 'supplyMode', 'principalKind', 'principalId', 'authzVersion',
-        'entitlementVersion', 'supplyProfileVersion', 'modelScopeVersion', 'publicModel',
-      ]) assert.ok(Object.hasOwn(input.request, field), `prelock requires ${field}`);
+        'tenantId',
+        'projectId',
+        'proxyKeyId',
+        'projectPolicyVersion',
+        'entitlementId',
+        'supplyProfileId',
+        'supplyMode',
+        'principalKind',
+        'principalId',
+        'authzVersion',
+        'entitlementVersion',
+        'supplyProfileVersion',
+        'modelScopeVersion',
+        'publicModel',
+      ])
+        assert.ok(Object.hasOwn(input.request, field), `prelock requires ${field}`);
       authorizationEvents.push({ stage: 'prelock', executor });
       if (fixtureOptions.prelockError !== undefined) throw fixtureOptions.prelockError;
     },
@@ -1018,33 +1033,46 @@ test('late existing claim revalidates natural entitlement expiry before returnin
     afterExistingClaimRead: () => advanceClock(),
   });
   assert.equal((await authorize(fixture)).decision, 'allow');
-  const snapshot = () => structuredClone({
-    requests: [...fixture.requests], attempts: [...fixture.attempts],
-    claims: [...fixture.gatewayIdempotency], capacity: [...fixture.capacityReservations],
-    hold: fixture.billingRow, calls: fixture.calls,
-    capacityIdempotencyKeys: fixture.capacityIdempotencyKeys,
-    financialEvents: fixture.executorEvents.map(({ stage }) => stage).filter(stage => stage !== 'idempotency_claim'),
-  });
+  const snapshot = () =>
+    structuredClone({
+      requests: [...fixture.requests],
+      attempts: [...fixture.attempts],
+      claims: [...fixture.gatewayIdempotency],
+      capacity: [...fixture.capacityReservations],
+      hold: fixture.billingRow,
+      calls: fixture.calls,
+      capacityIdempotencyKeys: fixture.capacityIdempotencyKeys,
+      financialEvents: fixture.executorEvents
+        .map(({ stage }) => stage)
+        .filter((stage) => stage !== 'idempotency_claim'),
+    });
   const before = snapshot();
   const beforeEvents = fixture.executorEvents.map(({ stage }) => stage);
   const eventStart = fixture.authorizationEvents.length;
   advanceClock = () => fixture.setObservedAt(expiresAt);
   const rollback = new Error('late existing authorization rollback');
   let captured: Awaited<ReturnType<typeof authorize>> | undefined;
-  await assert.rejects(fixture.database.transaction(async executor => {
-    captured = await fixture.ports.admission.authorizeAndReserve(
-      fixture.admissionInput(REQUEST_B_ID, 'attempt-b') as never, { executor },
-    );
-    assert.equal(captured.decision, 'reject');
-    if (captured.decision !== 'reject') throw new Error('expected expired entitlement rejection');
-    assert.equal(captured.code, 'entitlement_denied');
-    assert.equal(captured.canonicalRequest, undefined);
-    assert.deepEqual(snapshot(), before);
-    throw rollback;
-  }), error => error === rollback);
+  await assert.rejects(
+    fixture.database.transaction(async (executor) => {
+      captured = await fixture.ports.admission.authorizeAndReserve(
+        fixture.admissionInput(REQUEST_B_ID, 'attempt-b') as never,
+        { executor },
+      );
+      assert.equal(captured.decision, 'reject');
+      if (captured.decision !== 'reject') throw new Error('expected expired entitlement rejection');
+      assert.equal(captured.code, 'entitlement_denied');
+      assert.equal(captured.canonicalRequest, undefined);
+      assert.deepEqual(snapshot(), before);
+      throw rollback;
+    }),
+    (error) => error === rollback,
+  );
   assert.ok(captured);
   assert.deepEqual(snapshot(), before);
-  assert.deepEqual(fixture.executorEvents.map(({ stage }) => stage), [...beforeEvents, 'idempotency_claim']);
+  assert.deepEqual(
+    fixture.executorEvents.map(({ stage }) => stage),
+    [...beforeEvents, 'idempotency_claim'],
+  );
   assert.deepEqual(fixture.authorizationEvents.slice(eventStart), [
     { stage: 'prelock', executor: fixture.executor },
     { stage: 'clock', executor: fixture.executor, observedAt: NOW.toISOString() },
@@ -1267,34 +1295,72 @@ test('keyBudget denial rejects the admission as budget_exceeded', async () => {
   });
 });
 
-
 for (const [label, prelockError, expectedDecision, expectedCode] of [
-  ['typed authorization denial', new SaasAdmissionAuthorizationError('authorization_denied', 'private authorization detail'), 'reject', 'caller_denied'],
-  ['typed storage failure', new SaasAdmissionAuthorizationError('storage_failure', 'private storage detail'), 'block', 'storage_failure'],
-  ['typed unsupported policy', new SaasAdmissionAuthorizationError('project_policy_unsupported', 'private policy detail'), 'block', 'capability_unavailable'],
+  [
+    'typed authorization denial',
+    new SaasAdmissionAuthorizationError('authorization_denied', 'private authorization detail'),
+    'reject',
+    'caller_denied',
+  ],
+  [
+    'typed storage failure',
+    new SaasAdmissionAuthorizationError('storage_failure', 'private storage detail'),
+    'block',
+    'storage_failure',
+  ],
+  [
+    'typed unsupported policy',
+    new SaasAdmissionAuthorizationError('project_policy_unsupported', 'private policy detail'),
+    'block',
+    'capability_unavailable',
+  ],
   ['plain forged authorization code', { code: 'authorization_denied' }, 'block', 'storage_failure'],
-  ['SQL permission failure', Object.assign(new Error('private permission detail'), { code: '42501' }), 'block', 'storage_failure'],
-  ['SQL connection failure', Object.assign(new Error('private connection detail'), { code: '08006' }), 'block', 'storage_failure'],
+  [
+    'SQL permission failure',
+    Object.assign(new Error('private permission detail'), { code: '42501' }),
+    'block',
+    'storage_failure',
+  ],
+  [
+    'SQL connection failure',
+    Object.assign(new Error('private connection detail'), { code: '08006' }),
+    'block',
+    'storage_failure',
+  ],
 ] as const) {
   test(`${label} preserves precise admission mapping and fails before the HMAC claim without financial writes`, async () => {
     const fixture = setup('platform', { prelockError });
     const rollback = new Error('owned preparation rollback sentinel');
     const capture: { value: Awaited<ReturnType<typeof authorize>> | null } = { value: null };
-    await assert.rejects(fixture.database.transaction(async executor => {
-      capture.value = await fixture.ports.admission.authorizeAndReserve(fixture.admissionInput() as never, { executor });
-      assert.equal(fixture.gatewayIdempotency.size, 0, 'authorization fails before any HMAC claim is written');
-      assert.equal(capture.value.decision, expectedDecision);
-      throw rollback;
-    }), error => error === rollback);
+    await assert.rejects(
+      fixture.database.transaction(async (executor) => {
+        capture.value = await fixture.ports.admission.authorizeAndReserve(fixture.admissionInput() as never, {
+          executor,
+        });
+        assert.equal(fixture.gatewayIdempotency.size, 0, 'authorization fails before any HMAC claim is written');
+        assert.equal(capture.value.decision, expectedDecision);
+        throw rollback;
+      }),
+      (error) => error === rollback,
+    );
     const captured = capture.value;
     assert.ok(captured && captured.decision !== 'allow');
     assert.equal(captured.decision, expectedDecision);
     assert.equal(captured.code, expectedCode);
     if (expectedDecision === 'reject') assert.equal(captured.message, 'The request is not authorized.');
-    assert.equal(fixture.requests.size, 0); assert.equal(fixture.attempts.size, 0);
-    assert.equal(fixture.capacityReservations.size, 0); assert.equal(fixture.gatewayIdempotency.size, 0);
+    assert.equal(fixture.requests.size, 0);
+    assert.equal(fixture.attempts.size, 0);
+    assert.equal(fixture.capacityReservations.size, 0);
+    assert.equal(fixture.gatewayIdempotency.size, 0);
     assert.equal(fixture.billingRow, null);
-    assert.deepEqual(fixture.calls, { meter: 0, reserve: 0, capacityReserve: 0, capacityRelease: 0, walletRelease: 0, guard: 0 });
+    assert.deepEqual(fixture.calls, {
+      meter: 0,
+      reserve: 0,
+      capacityReserve: 0,
+      capacityRelease: 0,
+      walletRelease: 0,
+      guard: 0,
+    });
   });
 }
 
@@ -1307,7 +1373,10 @@ test('only exact native admission factory ports opt into transaction fact scopes
   });
   assert.equal(supportsPreparationTransactionFacts(native.admission), true);
   assert.equal(supportsPreparationTransactionFacts({ ...native.admission }), false);
-  assert.equal(supportsPreparationTransactionFacts({ authorizeAndReserve: native.admission.authorizeAndReserve }), false);
+  assert.equal(
+    supportsPreparationTransactionFacts({ authorizeAndReserve: native.admission.authorizeAndReserve }),
+    false,
+  );
 });
 
 test('factory binds its original guard even if configuration or its method is changed later', async () => {
@@ -1320,7 +1389,9 @@ test('factory binds its original guard even if configuration or its method is ch
   };
   options.guard = { revalidate: rejectSwapped };
   guard.revalidate = rejectSwapped;
-  const result = await ports.admission.authorizeAndReserve(fixture.admissionInput() as never, { executor: fixture.executor });
+  const result = await ports.admission.authorizeAndReserve(fixture.admissionInput() as never, {
+    executor: fixture.executor,
+  });
   assert.equal(result.decision, 'allow');
   assert.equal(fixture.guardInputs.length, 1);
 });

@@ -347,10 +347,19 @@ test('required bounded budget gate retains real restricted-role restart, legacy 
   for (const proof of [
     'initial global policy counts unrelated legacy retired liabilities, never adopts their identity',
     'restart cannot refill over old uncertainty; settlement reopens only proved headroom',
-    'old writers cannot bypass the cap, direct counter mutation is forbidden and rebalance is atomic',
+    'direct budget initialization takes the wallet fence before a concurrent legitimate backing writer',
+    'uncapped SQL writers cannot bypass the cap, direct counter mutation is forbidden and rebalance is atomic',
     'over-cap opt-in and wrong policy roll back; active epochs cannot be silently overwritten or reused',
   ])
     assert.ok(source.includes(proof), `missing bounded native proof: ${proof}`);
+  assert.match(
+    source,
+    /await writer;\s*assert\.deepEqual\(await census\(tenantId\), \{ actual: '100', counter: '100', cap: '100', retired: '0' \}\)/,
+  );
+  assert.match(
+    source,
+    /SET backing_minor_units=backing_minor_units\+1, available_minor_units=available_minor_units\+1[\s\S]*?code: '23514'/,
+  );
   assert.doesNotMatch(source, /\bt(?:est)?\.(?:skip|todo)\s*\(/);
   assert.doesNotMatch(source, /INSERT INTO saas_schema_migrations|DISABLE TRIGGER|session_replication_role/);
 });

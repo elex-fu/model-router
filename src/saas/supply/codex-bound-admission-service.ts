@@ -11,6 +11,10 @@ import {
 } from '../platform/governance/errors.js';
 import { appendGovernanceAudit } from '../platform/governance/users.js';
 import {
+  DEFAULT_CODEX_BOUND_APPROVAL_EXPIRY_MARGIN_MS,
+  validateCodexTrustedBoundProfile,
+} from '../runtime/codex-trusted-bound-profile-validation.js';
+import {
   type CodexTrustedBoundProfile,
   type CodexTrustedBoundScope,
   codexTrustedProfileDigest,
@@ -202,8 +206,7 @@ function normalizeProfile(input: unknown): CodexTrustedBoundProfile {
   };
   const validFromMs = epochMs(profile.validFromMs);
   const expiresAtMs = epochMs(profile.expiresAtMs);
-  if (validFromMs >= expiresAtMs) governanceInvalid();
-  return {
+  const normalized: CodexTrustedBoundProfile = {
     scope: normalizedScope,
     bounds: Object.freeze(envelope) as unknown as PreparedRequestUsageEnvelope,
     backendRevision: boundedText(profile.backendRevision, 256),
@@ -212,6 +215,8 @@ function normalizeProfile(input: unknown): CodexTrustedBoundProfile {
     validFromMs,
     expiresAtMs,
   };
+  if (!validateCodexTrustedBoundProfile(normalized).ok) governanceInvalid();
+  return normalized;
 }
 
 function digestInput(value: unknown): string {
@@ -256,6 +261,11 @@ function admissionView(row: AdmissionRow): CodexBoundAdmissionView {
   };
 }
 
+export interface CodexBoundAdmissionServiceOptions {
+  readonly now?: () => number;
+  readonly expiryMarginMs?: number;
+}
+
 /**
  * The operator-side approval workflow over saas_codex_trusted_bound_profiles
  * (migration 155). Every write re-verifies the actor against the live
@@ -264,7 +274,19 @@ function admissionView(row: AdmissionRow): CodexBoundAdmissionView {
  * validated profile; a wire-supplied digest is never accepted.
  */
 export class CodexBoundAdmissionService {
-  constructor(private readonly database: Pick<SaasDatabase, 'query' | 'transaction'>) {}
+  private readonly now: () => number;
+  private readonly expiryMarginMs: number;
+
+  constructor(
+    private readonly database: Pick<SaasDatabase, 'query' | 'transaction'>,
+    options: CodexBoundAdmissionServiceOptions = {},
+  ) {
+    this.now = options.now ?? Date.now;
+    this.expiryMarginMs = options.expiryMarginMs ?? DEFAULT_CODEX_BOUND_APPROVAL_EXPIRY_MARGIN_MS;
+    if (!Number.isSafeInteger(this.expiryMarginMs) || this.expiryMarginMs < 0) {
+      throw new TypeError('Invalid Codex bound approval expiry margin');
+    }
+  }
 
   async submit(actor: PlatformAdminActor, input: unknown): Promise<CodexBoundSubmissionResult> {
     if (input === null || typeof input !== 'object' || Array.isArray(input)) governanceInvalid();
@@ -410,6 +432,45 @@ export class CodexBoundAdmissionService {
     try {
       return await this.database.transaction(async (tx) => {
         await verifyGovernanceActor(tx, actor, CODEX_BOUND_WRITE_ROLES);
+        if (target === 'approved') {
+          const pending = await tx.query<AdmissionRow>(
+            `SELECT digest, endpoint, product_id, model, operation, transport, continuation_mode,
+                    bounds, backend_revision, evidence_version, evidence_reference,
+                    valid_from_ms::text, expires_at_ms::text
+               FROM saas_codex_trusted_bound_profiles
+              WHERE digest = $1 AND state = 'pending'
+              FOR UPDATE`,
+            [digest],
+          );
+          const pendingRow = pending.rows[0];
+          if (pendingRow) {
+            const candidate = normalizeProfile({
+              scope: {
+                endpoint: pendingRow.endpoint,
+                productId: pendingRow.product_id,
+                model: pendingRow.model,
+                operation: pendingRow.operation,
+                transport: pendingRow.transport,
+                continuationMode: pendingRow.continuation_mode,
+              },
+              backendRevision: pendingRow.backend_revision,
+              evidenceVersion: pendingRow.evidence_version,
+              evidenceReference: pendingRow.evidence_reference,
+              validFromMs: pendingRow.valid_from_ms,
+              expiresAtMs: pendingRow.expires_at_ms,
+              bounds: pendingRow.bounds,
+            });
+            if (codexTrustedProfileDigest(candidate) !== digest) governanceStorage();
+            if (
+              !validateCodexTrustedBoundProfile(candidate, {
+                nowMs: this.now(),
+                expiryMarginMs: this.expiryMarginMs,
+              }).ok
+            ) {
+              governanceInvalid();
+            }
+          }
+        }
         const now = new Date().toISOString();
         const updated = await tx.query<AdmissionRow>(
           `UPDATE saas_codex_trusted_bound_profiles

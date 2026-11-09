@@ -285,7 +285,7 @@ export function createResponsesWsServer(upgrade: ResponsesWsUpgrade): ResponsesW
       closePromise = (async () => {
         await Promise.allSettled([...pendingUpgradePromises]);
         await new Promise<void>((resolve, reject) => {
-          wss.close((error) => error ? reject(error) : resolve());
+          wss.close((error) => (error ? reject(error) : resolve()));
         });
         await Promise.all([...engines].map((engine) => engine.whenIdle()));
       })();

@@ -4,7 +4,10 @@ export class ManagedSaasRequestTracker {
 
   track(original: Promise<unknown>): void {
     this.pending.add(original);
-    void original.then(() => this.pending.delete(original), () => this.pending.delete(original));
+    void original.then(
+      () => this.pending.delete(original),
+      () => this.pending.delete(original),
+    );
   }
 
   async drain(): Promise<void> {
@@ -26,8 +29,15 @@ export async function closeManagedSaasResources(
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const result = await Promise.race([
-        Promise.resolve().then(close).then(() => 'closed' as const, () => 'failed' as const),
-        new Promise<'timeout'>((resolve) => { timer = setTimeout(() => resolve('timeout'), remaining); }),
+        Promise.resolve()
+          .then(close)
+          .then(
+            () => 'closed' as const,
+            () => 'failed' as const,
+          ),
+        new Promise<'timeout'>((resolve) => {
+          timer = setTimeout(() => resolve('timeout'), remaining);
+        }),
       ]);
       if (result === 'timeout') throw new Error('MANAGED_SAAS_SHUTDOWN_RESOURCE_TIMEOUT');
       if (result === 'failed') failed = true;
@@ -54,7 +64,9 @@ export async function drainManagedSaasShutdown(
     try {
       return await Promise.race([
         completion,
-        new Promise<undefined>((resolve) => { timer = setTimeout(() => resolve(undefined), duration); }),
+        new Promise<undefined>((resolve) => {
+          timer = setTimeout(() => resolve(undefined), duration);
+        }),
       ]);
     } finally {
       if (timer !== undefined) clearTimeout(timer);

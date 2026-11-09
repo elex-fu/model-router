@@ -175,7 +175,7 @@ export class FastGatewayExecutor implements FastGatewayExecutorPort {
         issued.validate();
         return issued.bound;
       },
-      resolveCredential: async (input, useCredential) => {
+      resolveCredential: async (input, withHeader) => {
         const context = this.#credentials.getStore();
         const candidate = context?.candidate;
         const a = candidate?.authority;
@@ -209,7 +209,7 @@ export class FastGatewayExecutor implements FastGatewayExecutorPort {
               (descriptor.headerName as string).toLowerCase() === 'authorization');
           const value = bearer ? Buffer.concat([Buffer.from('Bearer '), plain]) : Buffer.from(plain);
           try {
-            return await useCredential({ headerName: descriptor.headerName as string, value });
+            return await withHeader({ headerName: descriptor.headerName as string, value });
           } finally {
             value.fill(0);
           }

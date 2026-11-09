@@ -1,14 +1,34 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, symlink, rm } from 'node:fs/promises';
+import { mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { createPaymentCredentialReader, PaymentDeploymentError } from '../../../src/saas/runtime/payment-credentials.js';
-import { parsePaymentDeploymentDescriptor, paymentBindingDescriptorDigest, loadPaymentDeployment } from '../../../src/saas/runtime/payment-deployment.js';
 import type { ManagedSaasDeploymentConfig } from '../../../src/saas/deployment.js';
+import {
+  createPaymentCredentialReader,
+  PaymentDeploymentError,
+} from '../../../src/saas/runtime/payment-credentials.js';
+import {
+  loadPaymentDeployment,
+  parsePaymentDeploymentDescriptor,
+  paymentBindingDescriptorDigest,
+} from '../../../src/saas/runtime/payment-deployment.js';
 
-const binding = { id: 'merchant-v1', provider: 'alipay', appId: '2026000000000001', sellerId: '2088000000000001', currency: 'CNY', createMethod: 'precreate', merchantPrivateKeyCredential: 'private-v1', alipayPublicKeyCredential: 'public-v1' };
-const descriptor = () => ({ schemaVersion: 1, bindings: [{ ...binding }], walletTopUp: { currency: 'CNY', minimumMinorUnits: '100', maximumMinorUnits: '100000' } });
+const binding = {
+  id: 'merchant-v1',
+  provider: 'alipay',
+  appId: '2026000000000001',
+  sellerId: '2088000000000001',
+  currency: 'CNY',
+  createMethod: 'precreate',
+  merchantPrivateKeyCredential: 'private-v1',
+  alipayPublicKeyCredential: 'public-v1',
+};
+const descriptor = () => ({
+  schemaVersion: 1,
+  bindings: [{ ...binding }],
+  walletTopUp: { currency: 'CNY', minimumMinorUnits: '100', maximumMinorUnits: '100000' },
+});
 
 test('payment descriptor only accepts immutable Alipay declarations and bounded CNY policy', () => {
   const parsed = parsePaymentDeploymentDescriptor(descriptor());
@@ -21,13 +41,20 @@ test('payment descriptor only accepts immutable Alipay declarations and bounded 
     { ...descriptor(), bindings: [{ ...binding, merchantPrivateKeyCredential: '../private' }] },
     { ...descriptor(), bindings: [binding, binding] },
     { ...descriptor(), walletTopUp: { currency: 'CNY', minimumMinorUnits: '1000', maximumMinorUnits: '1' } },
-  ]) assert.throws(() => parsePaymentDeploymentDescriptor(input), PaymentDeploymentError);
+  ])
+    assert.throws(() => parsePaymentDeploymentDescriptor(input), PaymentDeploymentError);
 });
 
 test('descriptor digest includes environment and credential version reference', () => {
   const value = parsePaymentDeploymentDescriptor(descriptor()).bindings[0]!;
-  assert.notEqual(paymentBindingDescriptorDigest(value), paymentBindingDescriptorDigest({ ...value, merchantPrivateKeyCredential: 'private-v2' }));
-  assert.notEqual(paymentBindingDescriptorDigest(value), paymentBindingDescriptorDigest({ ...value, environment: 'sandbox' }));
+  assert.notEqual(
+    paymentBindingDescriptorDigest(value),
+    paymentBindingDescriptorDigest({ ...value, merchantPrivateKeyCredential: 'private-v2' }),
+  );
+  assert.notEqual(
+    paymentBindingDescriptorDigest(value),
+    paymentBindingDescriptorDigest({ ...value, environment: 'sandbox' }),
+  );
 });
 
 test('credential reader rejects traversal, symlinks, oversize and hides filesystem errors', async () => {
@@ -39,13 +66,32 @@ test('credential reader rejects traversal, symlinks, oversize and hides filesyst
     const reader = createPaymentCredentialReader(directory);
     assert.equal((await reader.read('valid-v1')).toString(), 'synthetic-secret');
     for (const name of ['../valid-v1', '/etc/passwd', 'linked', 'oversize', 'missing']) {
-      await assert.rejects(reader.read(name), (error: unknown) => error instanceof PaymentDeploymentError && error.message === 'PAYMENT_CREDENTIAL_UNAVAILABLE');
+      await assert.rejects(
+        reader.read(name),
+        (error: unknown) =>
+          error instanceof PaymentDeploymentError && error.message === 'PAYMENT_CREDENTIAL_UNAVAILABLE',
+      );
     }
-  } finally { await rm(directory, { recursive: true, force: true }); }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test('gateway role refuses payment loader before accessing descriptor or secret', async () => {
   let reads = 0;
-  await assert.rejects(loadPaymentDeployment({ workloadRole: 'gateway', paymentsConfigFile: '/not-opened' } as ManagedSaasDeploymentConfig, { credentialReader: { async read() { reads++; return Buffer.from('unused'); } } }), { code: 'PAYMENT_ROLE_FORBIDDEN' });
+  await assert.rejects(
+    loadPaymentDeployment(
+      { workloadRole: 'gateway', paymentsConfigFile: '/not-opened' } as ManagedSaasDeploymentConfig,
+      {
+        credentialReader: {
+          async read() {
+            reads++;
+            return Buffer.from('unused');
+          },
+        },
+      },
+    ),
+    { code: 'PAYMENT_ROLE_FORBIDDEN' },
+  );
   assert.equal(reads, 0);
 });

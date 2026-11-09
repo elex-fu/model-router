@@ -13,7 +13,11 @@ test('client-cancel observation keeps the platform cancel contract (no duplicate
   skip: !live ? 'Requires explicit platform CLI cancel live opt-in' : false,
   timeout: 300_000,
 }, async (t) => {
-  assert.equal(process.env.PLATFORM_ACCESS_CLI_WORKFLOW_RUNNER, 'platform-cli-cancel', 'Use the named disposable PG18 runner');
+  assert.equal(
+    process.env.PLATFORM_ACCESS_CLI_WORKFLOW_RUNNER,
+    'platform-cli-cancel',
+    'Use the named disposable PG18 runner',
+  );
   assert.equal(process.env.MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED, '1');
   assert.equal(process.env.RUN_PLATFORM_ACCESS_FIRST_REQUEST_LIVE, '1');
   assert.ok(process.env.KIMI_CODE_API_KEY, 'Ephemeral live provider material is required');
@@ -27,7 +31,10 @@ test('client-cancel observation keeps the platform cancel contract (no duplicate
   let rejected: unknown;
   try {
     await verifyPlatformAccessFirstRequest(pushDiagnostic, {
-      cliWorkflow: { kind: 'claude-two-read-client-cancel-observation', run: runPlatformAccessCliCancelObservationWorkflow },
+      cliWorkflow: {
+        kind: 'claude-two-read-client-cancel-observation',
+        run: runPlatformAccessCliCancelObservationWorkflow,
+      },
     });
   } catch (error) {
     rejected = error;
@@ -50,16 +57,31 @@ test('client-cancel observation keeps the platform cancel contract (no duplicate
     assert.ok(Number(financial.snapshots) >= 1, 'A retained hold must carry an explicit reconciliation snapshot');
     const requests = Array.isArray(durable!.requests) ? durable!.requests : [];
     for (const request of requests as Array<Record<string, any>>) {
-      assert.ok(request.executionState === 'unknown' || request.financialStatus === 'reconciliation_pending',
-        'A cancelled request must be classified honestly (unknown / reconciliation_pending), never settled');
+      assert.ok(
+        request.executionState === 'unknown' || request.financialStatus === 'reconciliation_pending',
+        'A cancelled request must be classified honestly (unknown / reconciliation_pending), never settled',
+      );
       const hold = request.hold as Record<string, unknown> | undefined;
-      assert.ok(hold === undefined || hold.state === 'reconciliation_pending',
-        'A retained hold must be labelled reconciliation_pending');
+      assert.ok(
+        hold === undefined || hold.state === 'reconciliation_pending',
+        'A retained hold must be labelled reconciliation_pending',
+      );
     }
   }
-  const observed = diagnostics.find((value) => value.failedStage === 'real-claude-cli-two-read-client-cancel-observation');
+  const observed = diagnostics.find(
+    (value) => value.failedStage === 'real-claude-cli-two-read-client-cancel-observation',
+  );
   assert.ok(observed, 'The failed stage diagnostic must be present');
-  t.diagnostic(JSON.stringify({ phase: 'cli-client-cancel-complete', scope: 'client-cancel/no-duplicate-dispatch/honest-hold',
-    requests: financial.requests, attempts: financial.attempts, hold: financial.hold,
-    snapshots: financial.snapshots, settlements: financial.settlements, productionGo: false }));
+  t.diagnostic(
+    JSON.stringify({
+      phase: 'cli-client-cancel-complete',
+      scope: 'client-cancel/no-duplicate-dispatch/honest-hold',
+      requests: financial.requests,
+      attempts: financial.attempts,
+      hold: financial.hold,
+      snapshots: financial.snapshots,
+      settlements: financial.settlements,
+      productionGo: false,
+    }),
+  );
 });

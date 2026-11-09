@@ -9,7 +9,6 @@ import { isServicePlanError } from '../plans/errors.js';
 import type { ServicePlanOrderRecord } from '../plans/types.js';
 import type { CustomerWebhookEventProducer } from '../webhooks/producers.js';
 import type { PaymentProviderAdapter } from './adapter.js';
-import { admitPaymentBinding, isPaymentBindingResolver, type PaymentBindingResolver, type LoadedPaymentBinding } from './merchant-binding.js';
 import {
   checkoutActionColumns,
   checkoutViewFromStored,
@@ -20,6 +19,12 @@ import {
   unavailableCheckout,
 } from './checkout.js';
 import { isPaymentError, PaymentError, type PaymentErrorCode } from './errors.js';
+import {
+  admitPaymentBinding,
+  isPaymentBindingResolver,
+  type LoadedPaymentBinding,
+  type PaymentBindingResolver,
+} from './merchant-binding.js';
 import type {
   CreateServicePlanPaymentInput,
   CreateWalletTopUpInput,
@@ -468,7 +473,8 @@ export class PaymentFulfillmentService {
     }
     this.providerKey = this.bindingResolver ? 'alipay' : normalizeText(options.providerKey);
     this.merchantId = this.bindingResolver ? '' : normalizeText(options.merchantId);
-    if (this.provider && this.provider.providerKey !== this.providerKey) throw new TypeError('provider.providerKey must match providerKey');
+    if (this.provider && this.provider.providerKey !== this.providerKey)
+      throw new TypeError('provider.providerKey must match providerKey');
     this.now = options.now ?? (() => new Date());
     this.idFactory = options.idFactory ?? randomUUID;
     this.walletFundingLedger =
@@ -537,10 +543,18 @@ export class PaymentFulfillmentService {
     const orderId = normalizeText(this.idFactory());
     const createdAt = this.currentDate().toISOString();
     const inserted = await this.runTransaction(async (executor) => {
-      if (this.bindingResolver) await executor.query(`SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))`, [JSON.stringify(['payment_wallet_order', normalized.tenantId, normalized.clientRequestId])]);
+      if (this.bindingResolver)
+        await executor.query(`SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))`, [
+          JSON.stringify(['payment_wallet_order', normalized.tenantId, normalized.clientRequestId]),
+        ]);
       const winner = await this.findOrderByClientRequest(normalized.tenantId, normalized.clientRequestId, executor);
-      if (winner) { this.assertCreateReplay(winner, normalized); return winner; }
-      const loaded = this.bindingResolver ? await admitPaymentBinding(executor, this.bindingResolver, normalized.currency) : null;
+      if (winner) {
+        this.assertCreateReplay(winner, normalized);
+        return winner;
+      }
+      const loaded = this.bindingResolver
+        ? await admitPaymentBinding(executor, this.bindingResolver, normalized.currency)
+        : null;
       // R1: a promo code is priced inside the order transaction (locked code
       // row + usage insert + discounted amount), never after the fact.
       let amountMinorUnits = normalized.amountMinorUnits;
@@ -594,13 +608,24 @@ export class PaymentFulfillmentService {
     let admissionError: unknown;
     let order: ServicePlanOrderRecord;
     try {
-      order = await servicePlan.createOrder(context, normalizedInput, this.bindingResolver ? async (executor, input) => {
-        try {
-          const { binding } = await admitPaymentBinding(executor, this.bindingResolver!, input.currency);
-          return { bindingId: binding.id, providerKey: binding.providerKey, merchantId: binding.merchantId };
-        } catch (error) { admissionError = error; throw error; }
-      } : undefined);
-    } catch (error) { throw admissionError ?? error; }
+      order = await servicePlan.createOrder(
+        context,
+        normalizedInput,
+        this.bindingResolver
+          ? async (executor, input) => {
+              try {
+                const { binding } = await admitPaymentBinding(executor, this.bindingResolver!, input.currency);
+                return { bindingId: binding.id, providerKey: binding.providerKey, merchantId: binding.merchantId };
+              } catch (error) {
+                admissionError = error;
+                throw error;
+              }
+            }
+          : undefined,
+      );
+    } catch (error) {
+      throw admissionError ?? error;
+    }
     return this.submitServicePlanProviderOrder(order, false);
   }
 
@@ -885,12 +910,18 @@ export class PaymentFulfillmentService {
     });
   }
 
-  async handleWebhook(headers: PaymentWebhookHeaders, rawBody: Buffer, bindingId?: string): Promise<PaymentWebhookResult> {
+  async handleWebhook(
+    headers: PaymentWebhookHeaders,
+    rawBody: Buffer,
+    bindingId?: string,
+  ): Promise<PaymentWebhookResult> {
     if (!Buffer.isBuffer(rawBody) || rawBody.length === 0 || rawBody.length > MAX_EVENT_BODY_BYTES) {
       throw new PaymentError('WEBHOOK_INVALID');
     }
 
-    const loaded = this.bindingResolver ? this.bindingResolver.require(normalizeText(bindingId, 'WEBHOOK_REJECTED')) : null;
+    const loaded = this.bindingResolver
+      ? this.bindingResolver.require(normalizeText(bindingId, 'WEBHOOK_REJECTED'))
+      : null;
     if (!this.bindingResolver && bindingId !== undefined) throw new PaymentError('WEBHOOK_REJECTED');
     const merchantId = loaded?.binding.merchantId ?? this.merchantId;
     const providerKey = loaded?.binding.providerKey ?? this.providerKey;
@@ -908,7 +939,12 @@ export class PaymentFulfillmentService {
 
     let event: NormalizedEvent;
     try {
-      event = this.normalizeEvent(provider.normalizeEvent(verified), providerKey, merchantId, loaded?.binding.id ?? null);
+      event = this.normalizeEvent(
+        provider.normalizeEvent(verified),
+        providerKey,
+        merchantId,
+        loaded?.binding.id ?? null,
+      );
       if (loaded && event.currency !== loaded.binding.currency) throw new PaymentError('WEBHOOK_REJECTED');
     } catch (error) {
       if (isPaymentError(error) && error.code === 'WEBHOOK_REJECTED') throw error;
@@ -950,14 +986,25 @@ export class PaymentFulfillmentService {
     return { claimed: claimed.length, processed, retrying, exhausted };
   }
 
-  private adapterFor(bindingId: string | null | undefined, providerKey: string | null, merchantId: string | null, currency: string): PaymentProviderAdapter {
+  private adapterFor(
+    bindingId: string | null | undefined,
+    providerKey: string | null,
+    merchantId: string | null,
+    currency: string,
+  ): PaymentProviderAdapter {
     if (this.bindingResolver) {
       if (!bindingId) throw new PaymentError('PAYMENT_BINDING_UNAVAILABLE');
       const loaded = this.bindingResolver.require(bindingId);
-      if (loaded.binding.providerKey !== providerKey || loaded.binding.merchantId !== merchantId || loaded.binding.currency !== currency) throw new PaymentError('ORDER_STATE_CONFLICT');
+      if (
+        loaded.binding.providerKey !== providerKey ||
+        loaded.binding.merchantId !== merchantId ||
+        loaded.binding.currency !== currency
+      )
+        throw new PaymentError('ORDER_STATE_CONFLICT');
       return loaded.adapter;
     }
-    if (!this.provider || providerKey !== this.providerKey || merchantId !== this.merchantId) throw new PaymentError('ORDER_STATE_CONFLICT');
+    if (!this.provider || providerKey !== this.providerKey || merchantId !== this.merchantId)
+      throw new PaymentError('ORDER_STATE_CONFLICT');
     return this.provider;
   }
 
@@ -1133,7 +1180,12 @@ export class PaymentFulfillmentService {
       return this.recordServicePlanProviderUnknown(order, claim.order, claim.leaseToken);
     }
 
-    const provider = this.adapterFor(claim.order.binding_id, claim.order.provider_key, claim.order.merchant_id, claim.order.snapshot_currency);
+    const provider = this.adapterFor(
+      claim.order.binding_id,
+      claim.order.provider_key,
+      claim.order.merchant_id,
+      claim.order.snapshot_currency,
+    );
     let providerResult: Awaited<ReturnType<PaymentProviderAdapter['createOrder']>>;
     try {
       providerResult = await provider.createOrder({
@@ -1195,9 +1247,12 @@ export class PaymentFulfillmentService {
   ): Promise<ServicePlanProviderAttemptClaim> {
     const current = await this.findServicePlanPaymentById(executor, order.tenantId, order.projectId, order.id, true);
     if (!current) throw new PaymentError('ORDER_NOT_FOUND');
-    if (this.bindingResolver) this.adapterFor(current.binding_id, current.provider_key, current.merchant_id, current.snapshot_currency);
-    else if ((current.provider_key !== null && current.provider_key !== this.providerKey) ||
-             (current.merchant_id !== null && current.merchant_id !== this.merchantId)) {
+    if (this.bindingResolver)
+      this.adapterFor(current.binding_id, current.provider_key, current.merchant_id, current.snapshot_currency);
+    else if (
+      (current.provider_key !== null && current.provider_key !== this.providerKey) ||
+      (current.merchant_id !== null && current.merchant_id !== this.merchantId)
+    ) {
       return { claimed: false, order: current, leaseToken: null };
     }
     if (current.state !== 'pending' || current.provider_order_id !== null) {
@@ -1336,7 +1391,12 @@ export class PaymentFulfillmentService {
     current: MappedServicePlanPaymentRow,
     leaseToken: string | null,
   ): Promise<ServicePlanPaymentOrderRecord> {
-    const provider = this.adapterFor(current.binding_id, current.provider_key, current.merchant_id, current.snapshot_currency);
+    const provider = this.adapterFor(
+      current.binding_id,
+      current.provider_key,
+      current.merchant_id,
+      current.snapshot_currency,
+    );
     if (current.merchant_id === null) {
       return this.recordServicePlanProviderUnknown(order, current, leaseToken);
     }
@@ -1481,7 +1541,12 @@ export class PaymentFulfillmentService {
     };
   }
 
-  private normalizeEvent(input: NormalizedPaymentProviderEvent, providerKey: string, expectedMerchantId: string, bindingId: string | null): NormalizedEvent {
+  private normalizeEvent(
+    input: NormalizedPaymentProviderEvent,
+    providerKey: string,
+    expectedMerchantId: string,
+    bindingId: string | null,
+  ): NormalizedEvent {
     if (!input || typeof input !== 'object') throw new PaymentError('WEBHOOK_INVALID');
     const merchantId = normalizeText(input.merchantId);
     if (merchantId !== expectedMerchantId) throw new PaymentError('WEBHOOK_REJECTED');
@@ -1508,8 +1573,25 @@ export class PaymentFulfillmentService {
     };
   }
 
-  private createRequestFingerprint(input: { readonly tenantId: string; readonly clientRequestId: string; readonly amountMinorUnits: bigint; readonly currency: string; readonly promoCode?: string | undefined }): string {
-    return createHash('sha256').update(JSON.stringify(['wallet_topup', input.tenantId, input.clientRequestId, input.amountMinorUnits.toString(), input.currency, input.promoCode ?? null])).digest('hex');
+  private createRequestFingerprint(input: {
+    readonly tenantId: string;
+    readonly clientRequestId: string;
+    readonly amountMinorUnits: bigint;
+    readonly currency: string;
+    readonly promoCode?: string | undefined;
+  }): string {
+    return createHash('sha256')
+      .update(
+        JSON.stringify([
+          'wallet_topup',
+          input.tenantId,
+          input.clientRequestId,
+          input.amountMinorUnits.toString(),
+          input.currency,
+          input.promoCode ?? null,
+        ]),
+      )
+      .digest('hex');
   }
 
   private assertCreateReplay(
@@ -1630,7 +1712,12 @@ export class PaymentFulfillmentService {
       return this.recordProviderUnknown(claim.order, claim.leaseToken);
     }
 
-    const provider = this.adapterFor(claim.order.bindingId, claim.order.providerKey, claim.order.merchantId, claim.order.currency);
+    const provider = this.adapterFor(
+      claim.order.bindingId,
+      claim.order.providerKey,
+      claim.order.merchantId,
+      claim.order.currency,
+    );
     let providerResult: Awaited<ReturnType<PaymentProviderAdapter['createOrder']>>;
     try {
       providerResult = await provider.createOrder({
@@ -2013,8 +2100,24 @@ export class PaymentFulfillmentService {
           event.providerOrderId,
           true,
         );
-    if (this.bindingResolver && order && (order.bindingId !== event.bindingId || order.tenantId !== event.tenantId || order.currency !== event.currency || BigInt(order.amountMinorUnits) !== event.amountMinorUnits)) throw new PaymentError('WEBHOOK_REJECTED');
-    if (this.bindingResolver && servicePlanOrder && (servicePlanOrder.binding_id !== event.bindingId || servicePlanOrder.tenant_id !== event.tenantId || servicePlanOrder.snapshot_currency !== event.currency || BigInt(servicePlanOrder.snapshot_price_minor_units) !== event.amountMinorUnits)) throw new PaymentError('WEBHOOK_REJECTED');
+    if (
+      this.bindingResolver &&
+      order &&
+      (order.bindingId !== event.bindingId ||
+        order.tenantId !== event.tenantId ||
+        order.currency !== event.currency ||
+        BigInt(order.amountMinorUnits) !== event.amountMinorUnits)
+    )
+      throw new PaymentError('WEBHOOK_REJECTED');
+    if (
+      this.bindingResolver &&
+      servicePlanOrder &&
+      (servicePlanOrder.binding_id !== event.bindingId ||
+        servicePlanOrder.tenant_id !== event.tenantId ||
+        servicePlanOrder.snapshot_currency !== event.currency ||
+        BigInt(servicePlanOrder.snapshot_price_minor_units) !== event.amountMinorUnits)
+    )
+      throw new PaymentError('WEBHOOK_REJECTED');
     const inboxId = normalizeText(this.idFactory());
     const inserted = await this.insertInbox(executor, inboxId, event, order ?? servicePlanOrder);
     if (!inserted) {

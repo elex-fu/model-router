@@ -347,13 +347,14 @@ test('4.2: the recording ceiling fails the task when the upstream exceeds the fa
   assert.equal(media.failures.length, 1);
 });
 
-test('4.2: the JSON keepalive stream writes whitespace heartbeats and passes late errors through', async () => {
+test('4.2: the JSON keepalive stream writes whitespace heartbeats and passes late errors through', (t) => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
   const request = new FakeRequest();
   const response = new FakeResponse();
   const stream = new JsonKeepaliveClientStream(request, asResponse(response), 'request-1', { intervalMs: 5 });
   try {
-    // Wait past two heartbeat intervals.
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    t.mock.timers.tick(5);
+    t.mock.timers.tick(5);
     assert.equal(response.headersSent, true);
     assert.equal(response.writeHeadCalls[0]?.status, 200);
     assert.equal(response.writeHeadCalls[0]?.headers['content-type'], 'application/json; charset=utf-8');
@@ -371,16 +372,21 @@ test('4.2: the JSON keepalive stream writes whitespace heartbeats and passes lat
 
     // A late upstream error before any body bytes: passed through as an
     // error JSON body appended to the heartbeat whitespace.
-    const late = new JsonKeepaliveClientStream(new FakeRequest(), asResponse(new FakeResponse()), 'request-2', {
+    const lateResponse = new FakeResponse();
+    const late = new JsonKeepaliveClientStream(new FakeRequest(), asResponse(lateResponse), 'request-2', {
       intervalMs: 5,
     });
-    await new Promise((resolve) => setTimeout(resolve, 15));
-    late.start(502, {});
-    late.abort(new Error('upstream failed'));
-    const lateResponse = (late as unknown as { response: FakeResponse }).response;
-    const lateText = lateResponse.bodyText();
-    assert.ok(lateText.trim().startsWith('{'));
-    assert.equal(JSON.parse(lateText).error.code, 'UPSTREAM_ERROR');
+    try {
+      t.mock.timers.tick(5);
+      assert.equal(lateResponse.writeHeadCalls[0]?.status, 200);
+      late.start(502, {});
+      late.abort(new Error('upstream failed'));
+      const lateText = lateResponse.bodyText();
+      assert.ok(lateText.trim().startsWith('{'));
+      assert.equal(JSON.parse(lateText).error.code, 'UPSTREAM_ERROR');
+    } finally {
+      late.dispose();
+    }
   } finally {
     stream.dispose();
   }

@@ -225,15 +225,21 @@ export const MANIFEST_CONTROL_PLANE_COLUMN_GROUPS: readonly SaasControlPlaneColu
     privilege: 'SELECT',
     columns: ['intent_id', 'state', 'ledger_transaction_id', 'completed_at'],
   },
-  { table: 'saas_fast_billing_jobs', privilege: 'INSERT', columns: ['intent_id', 'state'] },
-  { table: 'saas_fast_billing_jobs', privilege: 'UPDATE', columns: ['state'] },
+  {
+    table: 'saas_fast_billing_jobs',
+    privilege: 'INSERT',
+    columns: ['intent_id', 'state'],
+  },
+  {
+    table: 'saas_fast_billing_jobs',
+    privilege: 'UPDATE',
+    columns: ['state'],
+  },
   {
     table: 'saas_fast_credit_allocations',
     privilege: 'SELECT',
     columns: ['tenant_id', 'currency', 'backing_minor_units'],
   },
-  // Control-plane unknown-outcome non-execution resolution releases existing
-  // group holds only; it cannot reserve, settle usage, or rewrite charge_settled.
   {
     table: 'saas_billing_group_spend_reservations',
     privilege: 'SELECT',
@@ -588,8 +594,16 @@ export const MANIFEST_CONTROL_PLANE_COLUMN_GROUPS: readonly SaasControlPlaneColu
       'supplier_cost_version',
     ],
   },
-  { table: 'saas_payment_orders', privilege: 'SELECT', columns: ['create_request_fingerprint'] },
-  { table: 'saas_payment_orders', privilege: 'INSERT', columns: ['create_request_fingerprint'] },
+  {
+    table: 'saas_payment_orders',
+    privilege: 'SELECT',
+    columns: ['create_request_fingerprint'],
+  },
+  {
+    table: 'saas_payment_orders',
+    privilege: 'INSERT',
+    columns: ['create_request_fingerprint'],
+  },
   {
     table: 'saas_platform_inference_access_operations',
     privilege: 'SELECT',
@@ -644,7 +658,11 @@ export const MANIFEST_CONTROL_PLANE_COLUMN_GROUPS: readonly SaasControlPlaneColu
     privilege: 'INSERT',
     columns: ['tenant_id', 'id', 'supply_mode', 'status', 'model_scopes'],
   },
-  { table: 'saas_supply_profiles', privilege: 'UPDATE', columns: ['status', 'authz_version'] },
+  {
+    table: 'saas_supply_profiles',
+    privilege: 'UPDATE',
+    columns: ['status', 'authz_version'],
+  },
   {
     table: 'saas_payment_merchant_bindings',
     privilege: 'SELECT',
@@ -674,19 +692,66 @@ export const MANIFEST_CONTROL_PLANE_COLUMN_GROUPS: readonly SaasControlPlaneColu
     privilege: 'UPDATE',
     columns: ['mode', 'active_binding_id', 'revision', 'updated_by_user_id', 'updated_at'],
   },
-  { table: 'saas_payment_orders', privilege: 'SELECT', columns: ['binding_id'] },
-  { table: 'saas_payment_orders', privilege: 'INSERT', columns: ['binding_id'] },
-  { table: 'saas_payment_orders', privilege: 'UPDATE', columns: ['binding_id'] },
-  { table: 'saas_service_plan_orders', privilege: 'SELECT', columns: ['binding_id'] },
-  { table: 'saas_service_plan_orders', privilege: 'INSERT', columns: ['binding_id'] },
-  { table: 'saas_service_plan_orders', privilege: 'UPDATE', columns: ['binding_id'] },
-  { table: 'saas_payment_inbox', privilege: 'SELECT', columns: ['binding_id'] },
-  { table: 'saas_payment_inbox', privilege: 'INSERT', columns: ['binding_id'] },
-  { table: 'saas_payment_inbox', privilege: 'UPDATE', columns: ['binding_id'] },
-  { table: 'saas_refund_orders', privilege: 'SELECT', columns: ['binding_id'] },
-  { table: 'saas_refund_orders', privilege: 'INSERT', columns: ['binding_id'] },
-  { table: 'saas_refund_orders', privilege: 'UPDATE', columns: ['binding_id'] },
-
+  {
+    table: 'saas_payment_orders',
+    privilege: 'SELECT',
+    columns: ['binding_id'],
+  },
+  {
+    table: 'saas_payment_orders',
+    privilege: 'INSERT',
+    columns: ['binding_id'],
+  },
+  {
+    table: 'saas_payment_orders',
+    privilege: 'UPDATE',
+    columns: ['binding_id'],
+  },
+  {
+    table: 'saas_service_plan_orders',
+    privilege: 'SELECT',
+    columns: ['binding_id'],
+  },
+  {
+    table: 'saas_service_plan_orders',
+    privilege: 'INSERT',
+    columns: ['binding_id'],
+  },
+  {
+    table: 'saas_service_plan_orders',
+    privilege: 'UPDATE',
+    columns: ['binding_id'],
+  },
+  {
+    table: 'saas_payment_inbox',
+    privilege: 'SELECT',
+    columns: ['binding_id'],
+  },
+  {
+    table: 'saas_payment_inbox',
+    privilege: 'INSERT',
+    columns: ['binding_id'],
+  },
+  {
+    table: 'saas_payment_inbox',
+    privilege: 'UPDATE',
+    columns: ['binding_id'],
+  },
+  {
+    table: 'saas_refund_orders',
+    privilege: 'SELECT',
+    columns: ['binding_id'],
+  },
+  {
+    table: 'saas_refund_orders',
+    privilege: 'INSERT',
+    columns: ['binding_id'],
+  },
+  {
+    table: 'saas_refund_orders',
+    privilege: 'UPDATE',
+    columns: ['binding_id'],
+  },
   {
     table: 'saas_provider_account_runtime_health',
     privilege: 'SELECT',
@@ -5285,9 +5350,6 @@ export const MANIFEST_CONTROL_PLANE_COLUMN_GROUPS: readonly SaasControlPlaneColu
     privilege: 'SELECT',
     columns: ['window_cost_limit_minor_units', 'window_cost_sticky_reserve_minor_units', 'claude_session_window_start'],
   },
-  // M3-G user abuse controls: operator limit defaults and per-user overrides
-  // (the user-limit admin surface). NULL fields inherit defaults; NULL
-  // defaults mean unlimited.
   {
     table: 'saas_user_limit_defaults',
     privilege: 'SELECT',
@@ -5587,15 +5649,21 @@ export const MANIFEST_CONTROL_PLANE_COLUMN_SQL_ROWS: readonly SaasControlPlaneCo
     privilege: 'SELECT',
     columns: ['intent_id', 'state', 'ledger_transaction_id', 'completed_at'],
   },
-  { table: 'saas_fast_billing_jobs', privilege: 'INSERT', columns: ['intent_id', 'state'] },
-  { table: 'saas_fast_billing_jobs', privilege: 'UPDATE', columns: ['state'] },
+  {
+    table: 'saas_fast_billing_jobs',
+    privilege: 'INSERT',
+    columns: ['intent_id', 'state'],
+  },
+  {
+    table: 'saas_fast_billing_jobs',
+    privilege: 'UPDATE',
+    columns: ['state'],
+  },
   {
     table: 'saas_fast_credit_allocations',
     privilege: 'SELECT',
     columns: ['tenant_id', 'currency', 'backing_minor_units'],
   },
-  // Control-plane unknown-outcome non-execution resolution releases existing
-  // group holds only; it cannot reserve, settle usage, or rewrite charge_settled.
   {
     table: 'saas_billing_group_spend_reservations',
     privilege: 'SELECT',
@@ -5950,8 +6018,16 @@ export const MANIFEST_CONTROL_PLANE_COLUMN_SQL_ROWS: readonly SaasControlPlaneCo
       'supplier_cost_version',
     ],
   },
-  { table: 'saas_payment_orders', privilege: 'SELECT', columns: ['create_request_fingerprint'] },
-  { table: 'saas_payment_orders', privilege: 'INSERT', columns: ['create_request_fingerprint'] },
+  {
+    table: 'saas_payment_orders',
+    privilege: 'SELECT',
+    columns: ['create_request_fingerprint'],
+  },
+  {
+    table: 'saas_payment_orders',
+    privilege: 'INSERT',
+    columns: ['create_request_fingerprint'],
+  },
   {
     table: 'saas_platform_inference_access_operations',
     privilege: 'SELECT',
@@ -6006,7 +6082,11 @@ export const MANIFEST_CONTROL_PLANE_COLUMN_SQL_ROWS: readonly SaasControlPlaneCo
     privilege: 'INSERT',
     columns: ['tenant_id', 'id', 'supply_mode', 'status', 'model_scopes'],
   },
-  { table: 'saas_supply_profiles', privilege: 'UPDATE', columns: ['status', 'authz_version'] },
+  {
+    table: 'saas_supply_profiles',
+    privilege: 'UPDATE',
+    columns: ['status', 'authz_version'],
+  },
   {
     table: 'saas_payment_merchant_bindings',
     privilege: 'SELECT',
@@ -6036,19 +6116,66 @@ export const MANIFEST_CONTROL_PLANE_COLUMN_SQL_ROWS: readonly SaasControlPlaneCo
     privilege: 'UPDATE',
     columns: ['mode', 'active_binding_id', 'revision', 'updated_by_user_id', 'updated_at'],
   },
-  { table: 'saas_payment_orders', privilege: 'SELECT', columns: ['binding_id'] },
-  { table: 'saas_payment_orders', privilege: 'INSERT', columns: ['binding_id'] },
-  { table: 'saas_payment_orders', privilege: 'UPDATE', columns: ['binding_id'] },
-  { table: 'saas_service_plan_orders', privilege: 'SELECT', columns: ['binding_id'] },
-  { table: 'saas_service_plan_orders', privilege: 'INSERT', columns: ['binding_id'] },
-  { table: 'saas_service_plan_orders', privilege: 'UPDATE', columns: ['binding_id'] },
-  { table: 'saas_payment_inbox', privilege: 'SELECT', columns: ['binding_id'] },
-  { table: 'saas_payment_inbox', privilege: 'INSERT', columns: ['binding_id'] },
-  { table: 'saas_payment_inbox', privilege: 'UPDATE', columns: ['binding_id'] },
-  { table: 'saas_refund_orders', privilege: 'SELECT', columns: ['binding_id'] },
-  { table: 'saas_refund_orders', privilege: 'INSERT', columns: ['binding_id'] },
-  { table: 'saas_refund_orders', privilege: 'UPDATE', columns: ['binding_id'] },
-
+  {
+    table: 'saas_payment_orders',
+    privilege: 'SELECT',
+    columns: ['binding_id'],
+  },
+  {
+    table: 'saas_payment_orders',
+    privilege: 'INSERT',
+    columns: ['binding_id'],
+  },
+  {
+    table: 'saas_payment_orders',
+    privilege: 'UPDATE',
+    columns: ['binding_id'],
+  },
+  {
+    table: 'saas_service_plan_orders',
+    privilege: 'SELECT',
+    columns: ['binding_id'],
+  },
+  {
+    table: 'saas_service_plan_orders',
+    privilege: 'INSERT',
+    columns: ['binding_id'],
+  },
+  {
+    table: 'saas_service_plan_orders',
+    privilege: 'UPDATE',
+    columns: ['binding_id'],
+  },
+  {
+    table: 'saas_payment_inbox',
+    privilege: 'SELECT',
+    columns: ['binding_id'],
+  },
+  {
+    table: 'saas_payment_inbox',
+    privilege: 'INSERT',
+    columns: ['binding_id'],
+  },
+  {
+    table: 'saas_payment_inbox',
+    privilege: 'UPDATE',
+    columns: ['binding_id'],
+  },
+  {
+    table: 'saas_refund_orders',
+    privilege: 'SELECT',
+    columns: ['binding_id'],
+  },
+  {
+    table: 'saas_refund_orders',
+    privilege: 'INSERT',
+    columns: ['binding_id'],
+  },
+  {
+    table: 'saas_refund_orders',
+    privilege: 'UPDATE',
+    columns: ['binding_id'],
+  },
   {
     table: 'saas_provider_account_runtime_health',
     privilege: 'SELECT',
@@ -10758,21 +10885,48 @@ export const MANIFEST_CONTROL_PLANE_TABLE_SQL_ROWS: readonly SaasControlPlaneTab
 ];
 
 export const MANIFEST_GATEWAY_READ_TABLES: readonly SaasGatewayReadTableTsEntry[] = [
-  { table: 'saas_fast_gateway_deployments' },
-  { table: 'saas_fast_gateway_owner_slots' },
-  { table: 'saas_fast_gateway_owner_activations' },
-  { table: 'saas_fast_gateway_credit_budgets' },
-
-  { table: 'saas_fast_receipt_liability_releases' },
-  { table: 'saas_fast_gateway_resolutions' },
-  { table: 'saas_fast_gateway_owners' },
-  { table: 'saas_fast_credit_allocations' },
-  { table: 'saas_fast_gateway_intents' },
-  { table: 'saas_fast_gateway_receipts' },
-  { table: 'saas_fast_billing_jobs' },
-  { table: 'saas_responses_continuation_contexts' },
-  { table: 'saas_redis_quota_metadata' },
-  { table: 'saas_redis_quota_state' },
+  {
+    table: 'saas_fast_gateway_deployments',
+  },
+  {
+    table: 'saas_fast_gateway_owner_slots',
+  },
+  {
+    table: 'saas_fast_gateway_owner_activations',
+  },
+  {
+    table: 'saas_fast_gateway_credit_budgets',
+  },
+  {
+    table: 'saas_fast_receipt_liability_releases',
+  },
+  {
+    table: 'saas_fast_gateway_resolutions',
+  },
+  {
+    table: 'saas_fast_gateway_owners',
+  },
+  {
+    table: 'saas_fast_credit_allocations',
+  },
+  {
+    table: 'saas_fast_gateway_intents',
+  },
+  {
+    table: 'saas_fast_gateway_receipts',
+  },
+  {
+    table: 'saas_fast_billing_jobs',
+  },
+  {
+    table: 'saas_responses_continuation_contexts',
+  },
+  {
+    table: 'saas_redis_quota_metadata',
+  },
+  {
+    table: 'saas_redis_quota_state',
+  },
   {
     table: 'saas_tenants',
   },
@@ -11078,9 +11232,15 @@ export const MANIFEST_GATEWAY_READ_SQL_ROWS: readonly SaasGatewayReadSqlRow[] = 
       'saas_fast_gateway_credit_budgets',
     ],
   },
-  { tables: ['saas_user_limit_defaults', 'saas_user_limit_policies', 'saas_user_risk_markers'] },
-  { tables: ['saas_fast_receipt_liability_releases'] },
-  { tables: ['saas_fast_gateway_resolutions'] },
+  {
+    tables: ['saas_user_limit_defaults', 'saas_user_limit_policies', 'saas_user_risk_markers'],
+  },
+  {
+    tables: ['saas_fast_receipt_liability_releases'],
+  },
+  {
+    tables: ['saas_fast_gateway_resolutions'],
+  },
   {
     tables: [
       'saas_fast_gateway_owners',
@@ -11090,8 +11250,12 @@ export const MANIFEST_GATEWAY_READ_SQL_ROWS: readonly SaasGatewayReadSqlRow[] = 
       'saas_fast_billing_jobs',
     ],
   },
-  { tables: ['saas_responses_continuation_contexts'] },
-  { tables: ['saas_redis_quota_metadata', 'saas_redis_quota_state'] },
+  {
+    tables: ['saas_responses_continuation_contexts'],
+  },
+  {
+    tables: ['saas_redis_quota_metadata', 'saas_redis_quota_state'],
+  },
   {
     tables: ['saas_tenants', 'saas_projects', 'saas_project_inference_policy_versions'],
   },
@@ -11257,29 +11421,13 @@ export const MANIFEST_GATEWAY_READ_SQL_ROWS: readonly SaasGatewayReadSqlRow[] = 
   },
 ];
 
-const REDIS_QUOTA_GATEWAY_COLUMNS = [
-  { table: 'saas_redis_quota_metadata', privilege: 'INSERT', columns: ['namespace', 'identity'] },
-  { table: 'saas_redis_quota_metadata', privilege: 'UPDATE', columns: ['generation'] },
-  {
-    table: 'saas_redis_quota_state',
-    privilege: 'INSERT',
-    columns: ['namespace', 'key', 'generation', 'version', 'value', 'projection_pending'],
-  },
-  {
-    table: 'saas_redis_quota_state',
-    privilege: 'UPDATE',
-    columns: ['generation', 'version', 'value', 'projection_pending'],
-  },
-  {
-    table: 'saas_requests',
-    privilege: 'UPDATE',
-    columns: ['capacity_backend', 'redis_quota_reservation_id', 'redis_rate_reservation_id'],
-  },
-  { table: 'saas_gateway_capacity_reservations', privilege: 'INSERT', columns: ['state', 'reserved_at'] },
-] as const;
-
 export const MANIFEST_GATEWAY_COLUMN_GROUPS: readonly SaasGatewayColumnTsGroup[] = [
-  { table: 'saas_fast_gateway_owner_activations', privilege: 'INSERT', columns: ['owner', 'epoch'], tsStyle: 'inline' },
+  {
+    table: 'saas_fast_gateway_owner_activations',
+    privilege: 'INSERT',
+    columns: ['owner', 'epoch'],
+    tsStyle: 'inline',
+  },
   {
     table: 'saas_fast_gateway_deployments',
     privilege: 'INSERT',
@@ -11304,7 +11452,6 @@ export const MANIFEST_GATEWAY_COLUMN_GROUPS: readonly SaasGatewayColumnTsGroup[]
     columns: ['tenant_id', 'currency', 'deployment_id', 'credit_cap_minor_units', 'allocated_minor_units'],
     tsStyle: 'inline',
   },
-
   {
     table: 'saas_fast_receipt_liability_releases',
     privilege: 'INSERT',
@@ -11322,7 +11469,12 @@ export const MANIFEST_GATEWAY_COLUMN_GROUPS: readonly SaasGatewayColumnTsGroup[]
     ],
     tsStyle: 'inline',
   },
-  { table: 'saas_fast_gateway_owners', privilege: 'INSERT', columns: ['owner', 'epoch'], tsStyle: 'inline' },
+  {
+    table: 'saas_fast_gateway_owners',
+    privilege: 'INSERT',
+    columns: ['owner', 'epoch'],
+    tsStyle: 'inline',
+  },
   {
     table: 'saas_fast_credit_allocations',
     privilege: 'INSERT',
@@ -11389,7 +11541,12 @@ export const MANIFEST_GATEWAY_COLUMN_GROUPS: readonly SaasGatewayColumnTsGroup[]
     columns: ['intent_id', 'state', 'attempts', 'last_error', 'ledger_transaction_id', 'completed_at', 'created_at'],
     tsStyle: 'inline',
   },
-  { table: 'saas_fast_gateway_owners', privilege: 'UPDATE', columns: ['epoch'], tsStyle: 'inline' },
+  {
+    table: 'saas_fast_gateway_owners',
+    privilege: 'UPDATE',
+    columns: ['epoch'],
+    tsStyle: 'inline',
+  },
   {
     table: 'saas_fast_credit_allocations',
     privilege: 'UPDATE',
@@ -11427,7 +11584,42 @@ export const MANIFEST_GATEWAY_COLUMN_GROUPS: readonly SaasGatewayColumnTsGroup[]
     ],
     tsStyle: 'inline',
   },
-  ...REDIS_QUOTA_GATEWAY_COLUMNS.map((group) => ({ ...group, tsStyle: 'map-callback' as const })),
+  {
+    table: 'saas_redis_quota_metadata',
+    privilege: 'INSERT',
+    columns: ['namespace', 'identity'],
+    tsStyle: 'map-flat',
+  },
+  {
+    table: 'saas_redis_quota_metadata',
+    privilege: 'UPDATE',
+    columns: ['generation'],
+    tsStyle: 'map-flat',
+  },
+  {
+    table: 'saas_redis_quota_state',
+    privilege: 'INSERT',
+    columns: ['namespace', 'key', 'generation', 'version', 'value', 'projection_pending'],
+    tsStyle: 'map-callback',
+  },
+  {
+    table: 'saas_redis_quota_state',
+    privilege: 'UPDATE',
+    columns: ['generation', 'version', 'value', 'projection_pending'],
+    tsStyle: 'map-callback',
+  },
+  {
+    table: 'saas_requests',
+    privilege: 'UPDATE',
+    columns: ['capacity_backend', 'redis_quota_reservation_id', 'redis_rate_reservation_id'],
+    tsStyle: 'map-callback',
+  },
+  {
+    table: 'saas_gateway_capacity_reservations',
+    privilege: 'INSERT',
+    columns: ['state', 'reserved_at'],
+    tsStyle: 'map-callback',
+  },
   {
     tsComment: ['Startup schema verification reads only the registered migration identity and checksum.'],
     table: 'saas_schema_migrations',
@@ -11534,13 +11726,13 @@ export const MANIFEST_GATEWAY_COLUMN_GROUPS: readonly SaasGatewayColumnTsGroup[]
     table: 'saas_attempt_supplier_costs',
     privilege: 'INSERT',
     columns: ['id', 'tenant_id', 'attempt_id', 'supplier_cost_version', 'amount_minor_units', 'currency', 'created_at'],
-    tsStyle: 'map-paren-multi',
+    tsStyle: 'map-paren-single',
   },
   {
     table: 'saas_attempt_supplier_costs',
     privilege: 'SELECT',
     columns: ['id', 'tenant_id', 'attempt_id', 'supplier_cost_version', 'amount_minor_units', 'currency', 'created_at'],
-    tsStyle: 'map-paren-multi',
+    tsStyle: 'map-paren-single',
   },
   {
     tsComment: ['Health reads include filter predicates; the UPSERT reads current/EXCLUDED expressions and RETURNING.'],
@@ -12574,7 +12766,7 @@ export const MANIFEST_GATEWAY_COLUMN_GROUPS: readonly SaasGatewayColumnTsGroup[]
     table: 'saas_video_tasks',
     privilege: 'UPDATE',
     columns: ['lease_owner', 'lease_epoch', 'lease_until', 'next_poll_at', 'poll_failures'],
-    tsStyle: 'map-paren-multi',
+    tsStyle: 'map-callback',
   },
   {
     tsComment: [
@@ -12586,7 +12778,7 @@ export const MANIFEST_GATEWAY_COLUMN_GROUPS: readonly SaasGatewayColumnTsGroup[]
     table: 'saas_provider_account_model_cooldowns',
     privilege: 'INSERT',
     columns: ['owner_scope_key', 'account_id', 'model', 'cooled_until', 'updated_at'],
-    tsStyle: 'map-paren-multi',
+    tsStyle: 'map-callback',
   },
   {
     table: 'saas_provider_account_model_cooldowns',
@@ -12642,115 +12834,616 @@ export const MANIFEST_GATEWAY_COLUMN_GROUPS: readonly SaasGatewayColumnTsGroup[]
 ];
 
 export const MANIFEST_GATEWAY_COLUMN_SQL_ENTRIES: readonly SaasGatewayColumnSqlEntry[] = [
-  { table: 'saas_fast_gateway_owner_activations', column: 'owner', privilege: 'INSERT' },
-  { table: 'saas_fast_gateway_owner_activations', column: 'epoch', privilege: 'INSERT' },
-  { table: 'saas_fast_gateway_deployments', column: 'deployment_id', privilege: 'INSERT' },
-  { table: 'saas_fast_gateway_deployments', column: 'policy_digest', privilege: 'INSERT' },
-  { table: 'saas_fast_gateway_deployments', column: 'credit_cap_minor_units', privilege: 'INSERT' },
-  { table: 'saas_fast_gateway_owner_slots', column: 'owner', privilege: 'INSERT' },
-  { table: 'saas_fast_gateway_owner_slots', column: 'deployment_id', privilege: 'INSERT' },
-  { table: 'saas_fast_gateway_owner_slots', column: 'slot', privilege: 'INSERT' },
-  { table: 'saas_fast_gateway_owner_slots', column: 'epoch', privilege: 'INSERT' },
-  { table: 'saas_fast_gateway_owner_slots', column: 'active', privilege: 'INSERT' },
-  { table: 'saas_fast_gateway_owner_slots', column: 'retired_epoch', privilege: 'INSERT' },
-  { table: 'saas_fast_gateway_owner_slots', column: 'epoch', privilege: 'UPDATE' },
-  { table: 'saas_fast_gateway_owner_slots', column: 'active', privilege: 'UPDATE' },
-  { table: 'saas_fast_gateway_owner_slots', column: 'retired_epoch', privilege: 'UPDATE' },
-  { table: 'saas_fast_gateway_credit_budgets', column: 'tenant_id', privilege: 'INSERT' },
-  { table: 'saas_fast_gateway_credit_budgets', column: 'currency', privilege: 'INSERT' },
-  { table: 'saas_fast_gateway_credit_budgets', column: 'deployment_id', privilege: 'INSERT' },
-  { table: 'saas_fast_gateway_credit_budgets', column: 'credit_cap_minor_units', privilege: 'INSERT' },
-  { table: 'saas_fast_gateway_credit_budgets', column: 'allocated_minor_units', privilege: 'INSERT' },
-
-  { table: 'saas_fast_gateway_owners', column: 'owner', privilege: 'INSERT' },
-  { table: 'saas_fast_gateway_owners', column: 'epoch', privilege: 'INSERT' },
-  { table: 'saas_fast_credit_allocations', column: 'id', privilege: 'INSERT' },
-  { table: 'saas_fast_credit_allocations', column: 'tenant_id', privilege: 'INSERT' },
-  { table: 'saas_fast_credit_allocations', column: 'wallet_id', privilege: 'INSERT' },
-  { table: 'saas_fast_credit_allocations', column: 'currency', privilege: 'INSERT' },
-  { table: 'saas_fast_credit_allocations', column: 'owner', privilege: 'INSERT' },
-  { table: 'saas_fast_credit_allocations', column: 'epoch', privilege: 'INSERT' },
-  { table: 'saas_fast_credit_allocations', column: 'stripe', privilege: 'INSERT' },
-  { table: 'saas_fast_credit_allocations', column: 'state', privilege: 'INSERT' },
-  { table: 'saas_fast_credit_allocations', column: 'backing_minor_units', privilege: 'INSERT' },
-  { table: 'saas_fast_credit_allocations', column: 'available_minor_units', privilege: 'INSERT' },
-  { table: 'saas_fast_credit_allocations', column: 'created_at', privilege: 'INSERT' },
-  { table: 'saas_fast_gateway_intents', column: 'id', privilege: 'INSERT' },
-  { table: 'saas_fast_gateway_intents', column: 'request_id', privilege: 'INSERT' },
-  { table: 'saas_fast_gateway_intents', column: 'attempt_id', privilege: 'INSERT' },
-  { table: 'saas_fast_gateway_intents', column: 'tenant_id', privilege: 'INSERT' },
-  { table: 'saas_fast_gateway_intents', column: 'project_id', privilege: 'INSERT' },
-  { table: 'saas_fast_gateway_intents', column: 'proxy_key_id', privilege: 'INSERT' },
-  { table: 'saas_fast_gateway_intents', column: 'intent_digest', privilege: 'INSERT' },
-  { table: 'saas_fast_gateway_intents', column: 'request_fingerprint', privilege: 'INSERT' },
-  { table: 'saas_fast_gateway_intents', column: 'payload_sha256', privilege: 'INSERT' },
-  { table: 'saas_fast_gateway_intents', column: 'account_id', privilege: 'INSERT' },
-  { table: 'saas_fast_gateway_intents', column: 'currency', privilege: 'INSERT' },
-  { table: 'saas_fast_gateway_intents', column: 'max_cost_minor_units', privilege: 'INSERT' },
-  { table: 'saas_fast_gateway_intents', column: 'price_snapshot', privilege: 'INSERT' },
-  { table: 'saas_fast_gateway_intents', column: 'authority_snapshot', privilege: 'INSERT' },
-  { table: 'saas_fast_gateway_intents', column: 'allocation_id', privilege: 'INSERT' },
-  { table: 'saas_fast_gateway_intents', column: 'allocation_epoch', privilege: 'INSERT' },
-  { table: 'saas_fast_gateway_intents', column: 'send_deadline', privilege: 'INSERT' },
-  { table: 'saas_fast_gateway_intents', column: 'created_at', privilege: 'INSERT' },
-  { table: 'saas_fast_receipt_liability_releases', column: 'intent_id', privilege: 'INSERT' },
-  { table: 'saas_fast_receipt_liability_releases', column: 'tenant_id', privilege: 'INSERT' },
-  { table: 'saas_fast_receipt_liability_releases', column: 'request_id', privilege: 'INSERT' },
-  { table: 'saas_fast_receipt_liability_releases', column: 'allocation_id', privilege: 'INSERT' },
-  { table: 'saas_fast_receipt_liability_releases', column: 'allocation_epoch', privilege: 'INSERT' },
-  { table: 'saas_fast_receipt_liability_releases', column: 'currency', privilege: 'INSERT' },
-  { table: 'saas_fast_receipt_liability_releases', column: 'released_minor_units', privilege: 'INSERT' },
-  { table: 'saas_fast_receipt_liability_releases', column: 'retained_minor_units', privilege: 'INSERT' },
-  { table: 'saas_fast_receipt_liability_releases', column: 'receipt_digest', privilege: 'INSERT' },
-  { table: 'saas_fast_receipt_liability_releases', column: 'protocol_version', privilege: 'INSERT' },
-  { table: 'saas_fast_gateway_receipts', column: 'intent_id', privilege: 'INSERT' },
-  { table: 'saas_fast_gateway_receipts', column: 'tenant_id', privilege: 'INSERT' },
-  { table: 'saas_fast_gateway_receipts', column: 'request_id', privilege: 'INSERT' },
-  { table: 'saas_fast_gateway_receipts', column: 'outcome', privilege: 'INSERT' },
-  { table: 'saas_fast_gateway_receipts', column: 'charge_minor_units', privilege: 'INSERT' },
-  { table: 'saas_fast_gateway_receipts', column: 'usage', privilege: 'INSERT' },
-  { table: 'saas_fast_gateway_receipts', column: 'usage_digest', privilege: 'INSERT' },
-  { table: 'saas_fast_gateway_receipts', column: 'receipt_digest', privilege: 'INSERT' },
-  { table: 'saas_fast_gateway_receipts', column: 'http_status', privilege: 'INSERT' },
-  { table: 'saas_fast_gateway_receipts', column: 'created_at', privilege: 'INSERT' },
-  { table: 'saas_fast_billing_jobs', column: 'intent_id', privilege: 'INSERT' },
-  { table: 'saas_fast_billing_jobs', column: 'state', privilege: 'INSERT' },
-  { table: 'saas_fast_billing_jobs', column: 'attempts', privilege: 'INSERT' },
-  { table: 'saas_fast_billing_jobs', column: 'last_error', privilege: 'INSERT' },
-  { table: 'saas_fast_billing_jobs', column: 'ledger_transaction_id', privilege: 'INSERT' },
-  { table: 'saas_fast_billing_jobs', column: 'completed_at', privilege: 'INSERT' },
-  { table: 'saas_fast_billing_jobs', column: 'created_at', privilege: 'INSERT' },
-  { table: 'saas_fast_gateway_owners', column: 'epoch', privilege: 'UPDATE' },
-  { table: 'saas_fast_credit_allocations', column: 'state', privilege: 'UPDATE' },
-  { table: 'saas_fast_credit_allocations', column: 'backing_minor_units', privilege: 'UPDATE' },
-  { table: 'saas_fast_credit_allocations', column: 'available_minor_units', privilege: 'UPDATE' },
-  { table: 'saas_fast_billing_jobs', column: 'state', privilege: 'UPDATE' },
-  { table: 'saas_fast_billing_jobs', column: 'attempts', privilege: 'UPDATE' },
-  { table: 'saas_fast_billing_jobs', column: 'last_error', privilege: 'UPDATE' },
-  { table: 'saas_fast_billing_jobs', column: 'ledger_transaction_id', privilege: 'UPDATE' },
-  { table: 'saas_fast_billing_jobs', column: 'completed_at', privilege: 'UPDATE' },
-  { table: 'saas_responses_continuation_contexts', column: 'tenant_id', privilege: 'INSERT' },
-  { table: 'saas_responses_continuation_contexts', column: 'project_id', privilege: 'INSERT' },
-  { table: 'saas_responses_continuation_contexts', column: 'proxy_key_id', privilege: 'INSERT' },
-  { table: 'saas_responses_continuation_contexts', column: 'conversation_id', privilege: 'INSERT' },
-  { table: 'saas_responses_continuation_contexts', column: 'response_id', privilege: 'INSERT' },
-  { table: 'saas_responses_continuation_contexts', column: 'provider_id', privilege: 'INSERT' },
-  { table: 'saas_responses_continuation_contexts', column: 'product_id', privilege: 'INSERT' },
-  { table: 'saas_responses_continuation_contexts', column: 'account_id', privilege: 'INSERT' },
-  { table: 'saas_responses_continuation_contexts', column: 'credential_id', privilege: 'INSERT' },
-  { table: 'saas_responses_continuation_contexts', column: 'credential_version', privilege: 'INSERT' },
-  { table: 'saas_responses_continuation_contexts', column: 'credential_authz_version', privilege: 'INSERT' },
-  { table: 'saas_responses_continuation_contexts', column: 'public_model', privilege: 'INSERT' },
-  { table: 'saas_responses_continuation_contexts', column: 'resolved_model', privilege: 'INSERT' },
-  { table: 'saas_responses_continuation_contexts', column: 'canonical_context_digest', privilege: 'INSERT' },
-  { table: 'saas_responses_continuation_contexts', column: 'encryption_key_id', privilege: 'INSERT' },
-  { table: 'saas_responses_continuation_contexts', column: 'encrypted_context', privilege: 'INSERT' },
-  { table: 'saas_responses_continuation_contexts', column: 'created_at', privilege: 'INSERT' },
-  { table: 'saas_responses_continuation_contexts', column: 'expires_at', privilege: 'INSERT' },
-
-  ...REDIS_QUOTA_GATEWAY_COLUMNS.flatMap((group) =>
-    group.columns.map((column) => ({ table: group.table, column, privilege: group.privilege })),
-  ),
+  {
+    table: 'saas_fast_gateway_owner_activations',
+    column: 'owner',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_gateway_owner_activations',
+    column: 'epoch',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_gateway_deployments',
+    column: 'deployment_id',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_gateway_deployments',
+    column: 'policy_digest',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_gateway_deployments',
+    column: 'credit_cap_minor_units',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_gateway_owner_slots',
+    column: 'owner',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_gateway_owner_slots',
+    column: 'deployment_id',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_gateway_owner_slots',
+    column: 'slot',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_gateway_owner_slots',
+    column: 'epoch',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_gateway_owner_slots',
+    column: 'active',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_gateway_owner_slots',
+    column: 'retired_epoch',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_gateway_owner_slots',
+    column: 'epoch',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_fast_gateway_owner_slots',
+    column: 'active',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_fast_gateway_owner_slots',
+    column: 'retired_epoch',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_fast_gateway_credit_budgets',
+    column: 'tenant_id',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_gateway_credit_budgets',
+    column: 'currency',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_gateway_credit_budgets',
+    column: 'deployment_id',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_gateway_credit_budgets',
+    column: 'credit_cap_minor_units',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_gateway_credit_budgets',
+    column: 'allocated_minor_units',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_gateway_owners',
+    column: 'owner',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_gateway_owners',
+    column: 'epoch',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_credit_allocations',
+    column: 'id',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_credit_allocations',
+    column: 'tenant_id',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_credit_allocations',
+    column: 'wallet_id',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_credit_allocations',
+    column: 'currency',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_credit_allocations',
+    column: 'owner',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_credit_allocations',
+    column: 'epoch',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_credit_allocations',
+    column: 'stripe',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_credit_allocations',
+    column: 'state',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_credit_allocations',
+    column: 'backing_minor_units',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_credit_allocations',
+    column: 'available_minor_units',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_credit_allocations',
+    column: 'created_at',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_gateway_intents',
+    column: 'id',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_gateway_intents',
+    column: 'request_id',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_gateway_intents',
+    column: 'attempt_id',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_gateway_intents',
+    column: 'tenant_id',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_gateway_intents',
+    column: 'project_id',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_gateway_intents',
+    column: 'proxy_key_id',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_gateway_intents',
+    column: 'intent_digest',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_gateway_intents',
+    column: 'request_fingerprint',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_gateway_intents',
+    column: 'payload_sha256',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_gateway_intents',
+    column: 'account_id',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_gateway_intents',
+    column: 'currency',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_gateway_intents',
+    column: 'max_cost_minor_units',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_gateway_intents',
+    column: 'price_snapshot',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_gateway_intents',
+    column: 'authority_snapshot',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_gateway_intents',
+    column: 'allocation_id',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_gateway_intents',
+    column: 'allocation_epoch',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_gateway_intents',
+    column: 'send_deadline',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_gateway_intents',
+    column: 'created_at',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_receipt_liability_releases',
+    column: 'intent_id',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_receipt_liability_releases',
+    column: 'tenant_id',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_receipt_liability_releases',
+    column: 'request_id',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_receipt_liability_releases',
+    column: 'allocation_id',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_receipt_liability_releases',
+    column: 'allocation_epoch',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_receipt_liability_releases',
+    column: 'currency',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_receipt_liability_releases',
+    column: 'released_minor_units',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_receipt_liability_releases',
+    column: 'retained_minor_units',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_receipt_liability_releases',
+    column: 'receipt_digest',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_receipt_liability_releases',
+    column: 'protocol_version',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_gateway_receipts',
+    column: 'intent_id',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_gateway_receipts',
+    column: 'tenant_id',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_gateway_receipts',
+    column: 'request_id',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_gateway_receipts',
+    column: 'outcome',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_gateway_receipts',
+    column: 'charge_minor_units',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_gateway_receipts',
+    column: 'usage',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_gateway_receipts',
+    column: 'usage_digest',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_gateway_receipts',
+    column: 'receipt_digest',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_gateway_receipts',
+    column: 'http_status',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_gateway_receipts',
+    column: 'created_at',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_billing_jobs',
+    column: 'intent_id',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_billing_jobs',
+    column: 'state',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_billing_jobs',
+    column: 'attempts',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_billing_jobs',
+    column: 'last_error',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_billing_jobs',
+    column: 'ledger_transaction_id',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_billing_jobs',
+    column: 'completed_at',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_billing_jobs',
+    column: 'created_at',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_fast_gateway_owners',
+    column: 'epoch',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_fast_credit_allocations',
+    column: 'state',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_fast_credit_allocations',
+    column: 'backing_minor_units',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_fast_credit_allocations',
+    column: 'available_minor_units',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_fast_billing_jobs',
+    column: 'state',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_fast_billing_jobs',
+    column: 'attempts',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_fast_billing_jobs',
+    column: 'last_error',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_fast_billing_jobs',
+    column: 'ledger_transaction_id',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_fast_billing_jobs',
+    column: 'completed_at',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_responses_continuation_contexts',
+    column: 'tenant_id',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_responses_continuation_contexts',
+    column: 'project_id',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_responses_continuation_contexts',
+    column: 'proxy_key_id',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_responses_continuation_contexts',
+    column: 'conversation_id',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_responses_continuation_contexts',
+    column: 'response_id',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_responses_continuation_contexts',
+    column: 'provider_id',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_responses_continuation_contexts',
+    column: 'product_id',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_responses_continuation_contexts',
+    column: 'account_id',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_responses_continuation_contexts',
+    column: 'credential_id',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_responses_continuation_contexts',
+    column: 'credential_version',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_responses_continuation_contexts',
+    column: 'credential_authz_version',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_responses_continuation_contexts',
+    column: 'public_model',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_responses_continuation_contexts',
+    column: 'resolved_model',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_responses_continuation_contexts',
+    column: 'canonical_context_digest',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_responses_continuation_contexts',
+    column: 'encryption_key_id',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_responses_continuation_contexts',
+    column: 'encrypted_context',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_responses_continuation_contexts',
+    column: 'created_at',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_responses_continuation_contexts',
+    column: 'expires_at',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_redis_quota_metadata',
+    column: 'namespace',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_redis_quota_metadata',
+    column: 'identity',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_redis_quota_metadata',
+    column: 'generation',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_redis_quota_state',
+    column: 'namespace',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_redis_quota_state',
+    column: 'key',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_redis_quota_state',
+    column: 'generation',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_redis_quota_state',
+    column: 'version',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_redis_quota_state',
+    column: 'value',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_redis_quota_state',
+    column: 'projection_pending',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_redis_quota_state',
+    column: 'generation',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_redis_quota_state',
+    column: 'version',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_redis_quota_state',
+    column: 'value',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_redis_quota_state',
+    column: 'projection_pending',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_requests',
+    column: 'capacity_backend',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_requests',
+    column: 'redis_quota_reservation_id',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_requests',
+    column: 'redis_rate_reservation_id',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_gateway_capacity_reservations',
+    column: 'state',
+    privilege: 'INSERT',
+  },
+  {
+    table: 'saas_gateway_capacity_reservations',
+    column: 'reserved_at',
+    privilege: 'INSERT',
+  },
   {
     table: 'saas_schema_migrations',
     column: 'version',
@@ -16528,23 +17221,91 @@ export const MANIFEST_GATEWAY_COLUMN_SQL_ENTRIES: readonly SaasGatewayColumnSqlE
     column: 'digest',
     privilege: 'SELECT',
   },
-  { table: 'saas_codex_trusted_bound_profiles', column: 'endpoint', privilege: 'SELECT' },
-  { table: 'saas_codex_trusted_bound_profiles', column: 'product_id', privilege: 'SELECT' },
-  { table: 'saas_codex_trusted_bound_profiles', column: 'model', privilege: 'SELECT' },
-  { table: 'saas_codex_trusted_bound_profiles', column: 'operation', privilege: 'SELECT' },
-  { table: 'saas_codex_trusted_bound_profiles', column: 'transport', privilege: 'SELECT' },
-  { table: 'saas_codex_trusted_bound_profiles', column: 'continuation_mode', privilege: 'SELECT' },
-  { table: 'saas_codex_trusted_bound_profiles', column: 'bounds', privilege: 'SELECT' },
-  { table: 'saas_codex_trusted_bound_profiles', column: 'backend_revision', privilege: 'SELECT' },
-  { table: 'saas_codex_trusted_bound_profiles', column: 'evidence_version', privilege: 'SELECT' },
-  { table: 'saas_codex_trusted_bound_profiles', column: 'evidence_reference', privilege: 'SELECT' },
-  { table: 'saas_codex_trusted_bound_profiles', column: 'valid_from_ms', privilege: 'SELECT' },
-  { table: 'saas_codex_trusted_bound_profiles', column: 'expires_at_ms', privilege: 'SELECT' },
-  { table: 'saas_codex_trusted_bound_profiles', column: 'state', privilege: 'SELECT' },
-  { table: 'saas_authority_invalidation_events', column: 'id', privilege: 'SELECT' },
-  { table: 'saas_authority_invalidation_events', column: 'tenant_id', privilege: 'SELECT' },
-  { table: 'saas_authority_invalidation_events', column: 'kind', privilege: 'SELECT' },
-  { table: 'saas_authority_invalidation_events', column: 'reason', privilege: 'SELECT' },
+  {
+    table: 'saas_codex_trusted_bound_profiles',
+    column: 'endpoint',
+    privilege: 'SELECT',
+  },
+  {
+    table: 'saas_codex_trusted_bound_profiles',
+    column: 'product_id',
+    privilege: 'SELECT',
+  },
+  {
+    table: 'saas_codex_trusted_bound_profiles',
+    column: 'model',
+    privilege: 'SELECT',
+  },
+  {
+    table: 'saas_codex_trusted_bound_profiles',
+    column: 'operation',
+    privilege: 'SELECT',
+  },
+  {
+    table: 'saas_codex_trusted_bound_profiles',
+    column: 'transport',
+    privilege: 'SELECT',
+  },
+  {
+    table: 'saas_codex_trusted_bound_profiles',
+    column: 'continuation_mode',
+    privilege: 'SELECT',
+  },
+  {
+    table: 'saas_codex_trusted_bound_profiles',
+    column: 'bounds',
+    privilege: 'SELECT',
+  },
+  {
+    table: 'saas_codex_trusted_bound_profiles',
+    column: 'backend_revision',
+    privilege: 'SELECT',
+  },
+  {
+    table: 'saas_codex_trusted_bound_profiles',
+    column: 'evidence_version',
+    privilege: 'SELECT',
+  },
+  {
+    table: 'saas_codex_trusted_bound_profiles',
+    column: 'evidence_reference',
+    privilege: 'SELECT',
+  },
+  {
+    table: 'saas_codex_trusted_bound_profiles',
+    column: 'valid_from_ms',
+    privilege: 'SELECT',
+  },
+  {
+    table: 'saas_codex_trusted_bound_profiles',
+    column: 'expires_at_ms',
+    privilege: 'SELECT',
+  },
+  {
+    table: 'saas_codex_trusted_bound_profiles',
+    column: 'state',
+    privilege: 'SELECT',
+  },
+  {
+    table: 'saas_authority_invalidation_events',
+    column: 'id',
+    privilege: 'SELECT',
+  },
+  {
+    table: 'saas_authority_invalidation_events',
+    column: 'tenant_id',
+    privilege: 'SELECT',
+  },
+  {
+    table: 'saas_authority_invalidation_events',
+    column: 'kind',
+    privilege: 'SELECT',
+  },
+  {
+    table: 'saas_authority_invalidation_events',
+    column: 'reason',
+    privilege: 'SELECT',
+  },
 ];
 
 export const MANIFEST_GATEWAY_AUXILIARY: SaasGatewayAuxiliaryGrants = {
@@ -16559,10 +17320,26 @@ export const MANIFEST_GATEWAY_AUXILIARY: SaasGatewayAuxiliaryGrants = {
 };
 
 export const MANIFEST_WORKER_PROBE_GRANTS: readonly SaasWorkerProbeGrant[] = [
-  { table: 'saas_tenant_provider_accounts', column: 'claude_session_window_start', privilege: 'SELECT' },
-  { table: 'saas_tenant_provider_accounts', column: 'claude_session_window_end', privilege: 'SELECT' },
-  { table: 'saas_platform_provider_accounts', column: 'claude_session_window_start', privilege: 'SELECT' },
-  { table: 'saas_platform_provider_accounts', column: 'claude_session_window_end', privilege: 'SELECT' },
+  {
+    table: 'saas_tenant_provider_accounts',
+    column: 'claude_session_window_start',
+    privilege: 'SELECT',
+  },
+  {
+    table: 'saas_tenant_provider_accounts',
+    column: 'claude_session_window_end',
+    privilege: 'SELECT',
+  },
+  {
+    table: 'saas_platform_provider_accounts',
+    column: 'claude_session_window_start',
+    privilege: 'SELECT',
+  },
+  {
+    table: 'saas_platform_provider_accounts',
+    column: 'claude_session_window_end',
+    privilege: 'SELECT',
+  },
   {
     table: 'saas_tenant_provider_credential_validation_jobs',
     column: 'id',
@@ -20140,13 +20917,13 @@ export const MANIFEST_WORKER_PROBE_GRANTS: readonly SaasWorkerProbeGrant[] = [
 
 export const MANIFEST_WORKER_GRANT_STATEMENTS: readonly SaasWorkerGrantStatement[] = [
   {
-    table: 'saas_tenant_provider_accounts',
     privilege: 'SELECT',
+    table: 'saas_tenant_provider_accounts',
     columnLines: [['claude_session_window_start', 'claude_session_window_end']],
   },
   {
-    table: 'saas_platform_provider_accounts',
     privilege: 'SELECT',
+    table: 'saas_platform_provider_accounts',
     columnLines: [['claude_session_window_start', 'claude_session_window_end']],
   },
   {

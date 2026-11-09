@@ -43,7 +43,9 @@ test('managed process SIGTERM drains accepted platform SSE and durable financial
   try {
     const result = await Promise.race([
       exit,
-      new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('SIGTERM drill child deadline exceeded')), 150_000); }),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('SIGTERM drill child deadline exceeded')), 150_000);
+      }),
     ]);
     assert.equal(firstFrame, true, 'child must observe the actual client first SSE frame');
     assert.equal(draining, true, 'SIGTERM must reach installed managed runtime handler');

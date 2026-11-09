@@ -157,8 +157,12 @@ function validateLookupScope(input: GatewayRequestIdempotencyLookupScope): Gatew
   const tenantId = normalizeUuid(input.tenantId, 'tenantId');
   const projectId = normalizeUuid(input.projectId, 'projectId');
   const proxyKeyId = normalizeUuid(input.proxyKeyId, 'proxyKeyId');
-  if (typeof input.clientKey !== 'string' || Buffer.byteLength(input.clientKey, 'utf8') === 0 ||
-      Buffer.byteLength(input.clientKey, 'utf8') > MAX_CLIENT_KEY_BYTES) fail('Invalid clientKey');
+  if (
+    typeof input.clientKey !== 'string' ||
+    Buffer.byteLength(input.clientKey, 'utf8') === 0 ||
+    Buffer.byteLength(input.clientKey, 'utf8') > MAX_CLIENT_KEY_BYTES
+  )
+    fail('Invalid clientKey');
   return { tenantId, projectId, proxyKeyId, clientKey: input.clientKey };
 }
 
@@ -167,7 +171,8 @@ function compilationUnavailable(): never {
 }
 
 function storedText(value: unknown, maximum = 512): string {
-  if (typeof value !== 'string' || value.length === 0 || value.length > maximum || value.trim() !== value) compilationUnavailable();
+  if (typeof value !== 'string' || value.length === 0 || value.length > maximum || value.trim() !== value)
+    compilationUnavailable();
   return value;
 }
 
@@ -180,7 +185,8 @@ function storedVersion(value: unknown): string {
 }
 
 function storedProtocol(value: unknown): GatewayProtocol {
-  if (value !== 'openai' && value !== 'anthropic' && value !== 'gemini' && value !== 'responses') compilationUnavailable();
+  if (value !== 'openai' && value !== 'anthropic' && value !== 'gemini' && value !== 'responses')
+    compilationUnavailable();
   return value;
 }
 
@@ -311,7 +317,10 @@ export class GatewayRequestIdempotencyStore {
   }
 
   /** Read a committed mapping without reserving a provisional request or issuing a claim. */
-  async lookupExisting(tx: SqlExecutor, command: GatewayRequestIdempotencyClaimInput): Promise<GatewayRequestIdempotencyLookupResult> {
+  async lookupExisting(
+    tx: SqlExecutor,
+    command: GatewayRequestIdempotencyClaimInput,
+  ): Promise<GatewayRequestIdempotencyLookupResult> {
     if (!tx || typeof tx.query !== 'function') throw new TypeError('An existing SQL transaction executor is required');
     const input = validateClaimInput(command);
     const keyDigest = this.digestClientKey(input);
@@ -331,7 +340,10 @@ export class GatewayRequestIdempotencyStore {
   }
 
   /** Missing means no HMAC mapping. Legacy, incomplete or corrupt hits fail closed. */
-  async readCanonicalCompilation(tx: SqlExecutor, command: GatewayRequestIdempotencyLookupScope): Promise<GatewayRequestCanonicalCompilation | null> {
+  async readCanonicalCompilation(
+    tx: SqlExecutor,
+    command: GatewayRequestIdempotencyLookupScope,
+  ): Promise<GatewayRequestCanonicalCompilation | null> {
     if (!tx || typeof tx.query !== 'function') throw new TypeError('An existing SQL transaction executor is required');
     const input = validateLookupScope(command);
     const keyDigest = this.digestClientKey(input);
@@ -364,42 +376,85 @@ export class GatewayRequestIdempotencyStore {
     const fingerprint = storedText(row.request_fingerprint, 64);
     if (!FINGERPRINT_TEXT.test(fingerprint)) compilationUnavailable();
     const fingerprintVersion = storedText(row.request_fingerprint_version, MAX_FINGERPRINT_VERSION_LENGTH);
-    const binding = resolveExisting(row, { ...input, requestId: normalizeUuid(row.request_id, 'stored request id'),
-      requestFingerprint: fingerprint, requestFingerprintVersion: fingerprintVersion }, keyDigest);
-    if (binding.kind !== 'existing' || row.attempt_request_fingerprint !== fingerprint ||
-        row.attempt_request_fingerprint_version !== fingerprintVersion || storedVersion(row.attempt_ordinal) !== '1') compilationUnavailable();
+    const binding = resolveExisting(
+      row,
+      {
+        ...input,
+        requestId: normalizeUuid(row.request_id, 'stored request id'),
+        requestFingerprint: fingerprint,
+        requestFingerprintVersion: fingerprintVersion,
+      },
+      keyDigest,
+    );
+    if (
+      binding.kind !== 'existing' ||
+      row.attempt_request_fingerprint !== fingerprint ||
+      row.attempt_request_fingerprint_version !== fingerprintVersion ||
+      storedVersion(row.attempt_ordinal) !== '1'
+    )
+      compilationUnavailable();
     normalizeUuid(row.attempt_id, 'canonical first attempt id');
-    if (row.attempt_protocol !== row.request_protocol || row.attempt_endpoint !== row.request_endpoint ||
-        row.model_resolution_requested_model !== row.public_model || row.attempt_upstream_id !== row.route_upstream_id) compilationUnavailable();
+    if (
+      row.attempt_protocol !== row.request_protocol ||
+      row.attempt_endpoint !== row.request_endpoint ||
+      row.model_resolution_requested_model !== row.public_model ||
+      row.attempt_upstream_id !== row.route_upstream_id
+    )
+      compilationUnavailable();
     for (const [requestValue, attemptValue] of [
-      [row.route_config_id,row.attempt_route_config_id], [row.route_public_model_id,row.attempt_route_public_model_id],
-      [row.route_protocol,row.attempt_route_protocol], [row.route_target_mode,row.attempt_route_target_mode],
-    ]) if (storedText(requestValue) !== storedText(attemptValue)) compilationUnavailable();
+      [row.route_config_id, row.attempt_route_config_id],
+      [row.route_public_model_id, row.attempt_route_public_model_id],
+      [row.route_protocol, row.attempt_route_protocol],
+      [row.route_target_mode, row.attempt_route_target_mode],
+    ])
+      if (storedText(requestValue) !== storedText(attemptValue)) compilationUnavailable();
     for (const [requestValue, attemptValue] of [
-      [row.route_config_version,row.attempt_route_config_version], [row.route_public_model_version,row.attempt_route_public_model_version],
-    ]) if (storedVersion(requestValue) !== storedVersion(attemptValue)) compilationUnavailable();
-    if (row.route_protocol !== row.request_protocol || (row.route_target_mode !== 'tenant_account' && row.route_target_mode !== 'platform_pool')) compilationUnavailable();
+      [row.route_config_version, row.attempt_route_config_version],
+      [row.route_public_model_version, row.attempt_route_public_model_version],
+    ])
+      if (storedVersion(requestValue) !== storedVersion(attemptValue)) compilationUnavailable();
+    if (
+      row.route_protocol !== row.request_protocol ||
+      (row.route_target_mode !== 'tenant_account' && row.route_target_mode !== 'platform_pool')
+    )
+      compilationUnavailable();
     storedText(row.route_upstream_id);
-    const requestedModel = storedText(row.model_resolution_requested_model), mappedModel = storedText(row.model_resolution_mapped_model);
-    const resolvedModel = storedText(row.resolved_model), mappingSource = row.model_resolution_mapping_source;
+    const requestedModel = storedText(row.model_resolution_requested_model),
+      mappedModel = storedText(row.model_resolution_mapped_model);
+    const resolvedModel = storedText(row.resolved_model),
+      mappingSource = row.model_resolution_mapping_source;
     if (mappingSource !== 'none' && mappingSource !== 'alias' && mappingSource !== 'wildcard') compilationUnavailable();
     let mappingVersion: number | null = null;
     if (mappingSource === 'none') {
-      if (row.model_resolution_mapping_version !== null || requestedModel !== mappedModel || requestedModel !== resolvedModel) compilationUnavailable();
+      if (
+        row.model_resolution_mapping_version !== null ||
+        requestedModel !== mappedModel ||
+        requestedModel !== resolvedModel
+      )
+        compilationUnavailable();
     } else {
       mappingVersion = Number(storedVersion(row.model_resolution_mapping_version));
       if (!Number.isSafeInteger(mappingVersion)) compilationUnavailable();
     }
     if (!FINGERPRINT_TEXT.test(storedText(row.payload_sha256, 64))) compilationUnavailable();
     return {
-      canonicalRequestId: binding.canonicalRequestId, providerId: storedText(row.provider_id), productId: storedText(row.product_id),
-      resolvedModel, publicModel: storedText(row.public_model), endpoint: storedText(row.request_endpoint, 1024),
-      clientProtocol: storedProtocol(row.attempt_protocol), providerProtocol: storedProtocol(row.provider_protocol),
-      clientOperation: storedText(row.client_operation, 128), providerOperation: storedText(row.provider_operation, 128),
+      canonicalRequestId: binding.canonicalRequestId,
+      providerId: storedText(row.provider_id),
+      productId: storedText(row.product_id),
+      resolvedModel,
+      publicModel: storedText(row.public_model),
+      endpoint: storedText(row.request_endpoint, 1024),
+      clientProtocol: storedProtocol(row.attempt_protocol),
+      providerProtocol: storedProtocol(row.provider_protocol),
+      clientOperation: storedText(row.client_operation, 128),
+      providerOperation: storedText(row.provider_operation, 128),
       modelResolution: { requestedModel, mappedModel, resolvedModel, mappingSource, mappingVersion },
-      compilerVersion: storedText(row.payload_compiler_version, 128), usageEstimatorVersion: storedText(row.usage_estimator_version, 128),
-      routeConfigId: storedText(row.route_config_id), routeConfigVersion: storedVersion(row.route_config_version),
-      publicModelId: storedText(row.route_public_model_id), publicModelVersion: storedVersion(row.route_public_model_version),
+      compilerVersion: storedText(row.payload_compiler_version, 128),
+      usageEstimatorVersion: storedText(row.usage_estimator_version, 128),
+      routeConfigId: storedText(row.route_config_id),
+      routeConfigVersion: storedVersion(row.route_config_version),
+      publicModelId: storedText(row.route_public_model_id),
+      publicModelVersion: storedVersion(row.route_public_model_version),
     };
   }
 

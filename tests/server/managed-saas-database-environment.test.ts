@@ -142,11 +142,18 @@ test('the standard Redis gateway allocates 14 business slots and closes them on 
     originalOn.call(this, event, listener);
     return this;
   });
-  t.mock.method(Pool.prototype, 'end', async function (this: Pool) { closed.push(this); });
-  await assert.rejects(startManagedSaasServer(deployment, {
-    environment,
-    async pingDatabase() { throw new Error('stop before SQL'); },
-  }), /PostgreSQL ping failed/);
+  t.mock.method(Pool.prototype, 'end', async function (this: Pool) {
+    closed.push(this);
+  });
+  await assert.rejects(
+    startManagedSaasServer(deployment, {
+      environment,
+      async pingDatabase() {
+        throw new Error('stop before SQL');
+      },
+    }),
+    /PostgreSQL ping failed/,
+  );
   assert.equal(pools.length, 1, 'quota lane is constructed only after business schema readiness');
   assert.equal(pools[0]?.options.max, 14);
   assert.deepEqual(closed, pools);

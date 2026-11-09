@@ -4943,12 +4943,8 @@ export const SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS: readonly SaasGatewayColumnGrant
   ['saas_responses_continuation_contexts', 'encrypted_context', 'INSERT'],
   ['saas_responses_continuation_contexts', 'created_at', 'INSERT'],
   ['saas_responses_continuation_contexts', 'expires_at', 'INSERT'],
-  ...(['namespace', 'identity'] as const).map(
-    (column) => ['saas_redis_quota_metadata', column, 'INSERT'] as const,
-  ),
-  ...(['generation'] as const).map(
-    (column) => ['saas_redis_quota_metadata', column, 'UPDATE'] as const,
-  ),
+  ...(['namespace', 'identity'] as const).map((column) => ['saas_redis_quota_metadata', column, 'INSERT'] as const),
+  ...(['generation'] as const).map((column) => ['saas_redis_quota_metadata', column, 'UPDATE'] as const),
   ...(['namespace', 'key', 'generation', 'version', 'value', 'projection_pending'] as const).map(
     (column) => ['saas_redis_quota_state', column, 'INSERT'] as const,
   ),
@@ -5051,26 +5047,10 @@ export const SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS: readonly SaasGatewayColumnGrant
     ] as const
   ).map((column) => ['saas_attempt_supplier_cost_snapshots', column, 'INSERT'] as const),
   ...(
-    [
-      'id',
-      'tenant_id',
-      'attempt_id',
-      'supplier_cost_version',
-      'amount_minor_units',
-      'currency',
-      'created_at',
-    ] as const
+    ['id', 'tenant_id', 'attempt_id', 'supplier_cost_version', 'amount_minor_units', 'currency', 'created_at'] as const
   ).map((column) => ['saas_attempt_supplier_costs', column, 'INSERT'] as const),
   ...(
-    [
-      'id',
-      'tenant_id',
-      'attempt_id',
-      'supplier_cost_version',
-      'amount_minor_units',
-      'currency',
-      'created_at',
-    ] as const
+    ['id', 'tenant_id', 'attempt_id', 'supplier_cost_version', 'amount_minor_units', 'currency', 'created_at'] as const
   ).map((column) => ['saas_attempt_supplier_costs', column, 'SELECT'] as const),
   // Health reads include filter predicates; the UPSERT reads current/EXCLUDED expressions and RETURNING.
   ...(
@@ -5837,28 +5817,16 @@ export const SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS: readonly SaasGatewayColumnGrant
   // the six-class poll failure counter. INSERT never sets them (column
   // defaults); the billing-state columns above stay the only settlement
   // surface.
-  ...(
-    [
-      'lease_owner',
-      'lease_epoch',
-      'lease_until',
-      'next_poll_at',
-      'poll_failures',
-    ] as const
-  ).map((column) => ['saas_video_tasks', column, 'UPDATE'] as const),
+  ...(['lease_owner', 'lease_epoch', 'lease_until', 'next_poll_at', 'poll_failures'] as const).map(
+    (column) => ['saas_video_tasks', column, 'UPDATE'] as const,
+  ),
   // 133 (core-plan 9.1): the durable model-cooldown upsert — the row key
   // and the cooled-until/updated-at write surface. Reads are the
   // read-table SELECT above; the upsert GREATEST-merges cooled_until so a
   // shorter cooldown never shortens a longer one from another instance.
-  ...(
-    [
-      'owner_scope_key',
-      'account_id',
-      'model',
-      'cooled_until',
-      'updated_at',
-    ] as const
-  ).map((column) => ['saas_provider_account_model_cooldowns', column, 'INSERT'] as const),
+  ...(['owner_scope_key', 'account_id', 'model', 'cooled_until', 'updated_at'] as const).map(
+    (column) => ['saas_provider_account_model_cooldowns', column, 'INSERT'] as const,
+  ),
   ['saas_provider_account_model_cooldowns', 'cooled_until', 'UPDATE'],
   ['saas_provider_account_model_cooldowns', 'updated_at', 'UPDATE'],
   // M3-G user abuse controls: the admission-path observation recorder —
@@ -6312,6 +6280,7 @@ function isGatewayProbeRow(value: unknown): value is GatewayRuntimePrivilegeProb
 async function verifyGatewayRuntimeDatabasePrivileges(
   database: Pick<SqlExecutor, 'query'>,
   options: { readonly toleratePendingColumns?: boolean } = {},
+  beforeAuthorityEvents = false,
 ): Promise<void> {
   let row: GatewayRuntimePrivilegeProbeRow | undefined;
   try {
@@ -6352,7 +6321,9 @@ async function verifyGatewayRuntimeDatabasePrivileges(
             "  NOT EXISTS (SELECT 1 FROM application_privileges AS actual\n              WHERE actual.relname = 'saas_billing_spending_freezes' AND actual.table_delete)\n   AND EXISTS (SELECT 1 FROM pg_catalog.pg_class AS freeze_cls\n               JOIN pg_catalog.pg_namespace AS freeze_ns ON freeze_ns.oid = freeze_cls.relnamespace\n               WHERE freeze_ns.nspname = pg_catalog.current_schema() AND freeze_cls.relname = 'saas_billing_spending_freezes')\n    AS missing_spending_freeze_delete,",
           )
       : SAAS_GATEWAY_RUNTIME_PRIVILEGE_PROBE_SQL;
-    const result = await database.query<GatewayRuntimePrivilegeProbeRow>(sql);
+    const result = await database.query<GatewayRuntimePrivilegeProbeRow>(
+      beforeAuthorityEvents ? withoutAuthorityEventGrantRows(sql, gatewayColumnValues) : sql,
+    );
     if (result.rows.length !== 1 || !isGatewayProbeRow(result.rows[0])) throw new SaasRuntimePrivilegeError();
     row = result.rows[0];
   } catch (error) {
@@ -6447,10 +6418,16 @@ async function verifyGatewayRuntimeDatabasePrivileges(
   }
 }
 
-async function verifyControlPlaneRuntimeDatabasePrivileges(database: Pick<SqlExecutor, 'query'>): Promise<void> {
+async function verifyControlPlaneRuntimeDatabasePrivileges(
+  database: Pick<SqlExecutor, 'query'>,
+  beforeAuthorityEvents = false,
+): Promise<void> {
   let row: RuntimePrivilegeProbeRow | undefined;
   try {
-    const result = await database.query<RuntimePrivilegeProbeRow>(SAAS_RUNTIME_PRIVILEGE_PROBE_SQL);
+    const sql = beforeAuthorityEvents
+      ? withoutAuthorityEventGrantRows(SAAS_RUNTIME_PRIVILEGE_PROBE_SQL, controlPlaneColumnValues)
+      : SAAS_RUNTIME_PRIVILEGE_PROBE_SQL;
+    const result = await database.query<RuntimePrivilegeProbeRow>(sql);
     if (result.rows.length !== 1 || !isProbeRow(result.rows[0])) throw new SaasRuntimePrivilegeError();
     row = result.rows[0];
   } catch (error) {
@@ -6508,5 +6485,28 @@ export async function verifySaasRuntimeDatabasePrivileges(
 ): Promise<void> {
   if (role === 'gateway') return verifyGatewayRuntimeDatabasePrivileges(database, options);
   if (role === 'control_plane') return verifyControlPlaneRuntimeDatabasePrivileges(database);
+  throw new SaasRuntimePrivilegeError();
+}
+
+function withoutAuthorityEventGrantRows(sql: string, columnValues: string): string {
+  const separator = ',\n    ';
+  const baseline = columnValues
+    .split(separator)
+    .filter((row) => !row.startsWith("('saas_authority_invalidation_events', "))
+    .join(separator);
+  return sql.replace(columnValues, baseline);
+}
+
+/** Upgrade preflight only, after verifying the complete migration prefix through schema 155. */
+export async function verifySaasSchema155RuntimeDatabasePrivileges(
+  database: Pick<SqlExecutor, 'query'>,
+  role: SaasRuntimeWorkloadRole = 'control_plane',
+): Promise<void> {
+  const result = await database.query<{ absent: boolean }>(
+    "SELECT pg_catalog.to_regclass('saas_authority_invalidation_events') IS NULL AS absent",
+  );
+  if (result.rows.length !== 1 || result.rows[0]?.absent !== true) throw new SaasRuntimePrivilegeError();
+  if (role === 'gateway') return verifyGatewayRuntimeDatabasePrivileges(database, {}, true);
+  if (role === 'control_plane') return verifyControlPlaneRuntimeDatabasePrivileges(database, true);
   throw new SaasRuntimePrivilegeError();
 }

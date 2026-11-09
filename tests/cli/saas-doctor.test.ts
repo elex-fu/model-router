@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { createHash, generateKeyPairSync } from 'node:crypto';
-import { readFileSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
-import { test, after } from 'node:test';
+import { after, test } from 'node:test';
 import {
   type SaasDoctorDependencies,
   type SaasDoctorFilesystem,
@@ -20,7 +20,19 @@ import {
 
 const trustDirectory = mkdtempSync(resolve(tmpdir(), 'saas-doctor-commercial-trust-'));
 const trustFile = resolve(trustDirectory, 'public-trust.json');
-writeFileSync(trustFile, JSON.stringify({ version: 1, keys: [{ keyId: 'doctor-commercial-v1', publicKeyPem: generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' }).toString() }], testVectorDigests: [{ suiteVersion: 'doctor-suite-v1', sha256: 'a'.repeat(64) }] }));
+writeFileSync(
+  trustFile,
+  JSON.stringify({
+    version: 1,
+    keys: [
+      {
+        keyId: 'doctor-commercial-v1',
+        publicKeyPem: generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' }).toString(),
+      },
+    ],
+    testVectorDigests: [{ suiteVersion: 'doctor-suite-v1', sha256: 'a'.repeat(64) }],
+  }),
+);
 after(() => rmSync(trustDirectory, { recursive: true, force: true }));
 
 const CONTROL_PLANE_URL = 'postgresql://control_plane:fixture-secret-password@doctor.example.invalid:5432/doctor';
@@ -159,7 +171,8 @@ interface FakeDatabaseConfig {
 }
 
 function rowsFor(sql: string, config: FakeDatabaseConfig): unknown[] {
-  if (sql.trim().startsWith("SELECT (has_table_privilege(current_user,'saas_responses_continuation_contexts'")) return [{ allowed: true }];
+  if (sql.trim().startsWith("SELECT (has_table_privilege(current_user,'saas_responses_continuation_contexts'"))
+    return [{ allowed: true }];
   if (sql.includes('FROM saas_responses_continuation_contexts LIMIT 0')) return [];
   if (sql.trim() === 'SELECT 1') {
     if (config.selectOneError) throw new Error('connection refused');
@@ -357,8 +370,11 @@ test('control-plane scope includes dedicated commercial trust and reports all-pa
   assert.equal(result.checks.length, 10);
   assert.deepEqual(result.summary, { pass: 10, warn: 0, fail: 0 });
   assert.equal(result.exitCode, 0);
-  assert.match(check(result, 'commercial-attestation-trust').detail, /each Codex provisioning operation requires an exact scope match/u);
-  assert.ok(lines.some(line => line.startsWith('✓ pass  pg-migrations — server_version_num 160000')));
+  assert.match(
+    check(result, 'commercial-attestation-trust').detail,
+    /each Codex provisioning operation requires an exact scope match/u,
+  );
+  assert.ok(lines.some((line) => line.startsWith('✓ pass  pg-migrations — server_version_num 160000')));
   assert.ok(lines.at(-1)?.includes('10 pass, 0 warn, 0 fail (role: control-plane)'));
   const migrations = check(result, 'pg-migrations');
   assert.match(migrations.detail, new RegExp(`migrations ${SAAS_MIGRATIONS.length}/${SAAS_MIGRATIONS.length} applied`));
@@ -435,40 +451,82 @@ test('commercial trust missing blocks provisioning and invalid trust fails safel
   assert.match(check(missing.result, 'commercial-attestation-trust').detail, /provisioning is unavailable/u);
   const invalidFile = resolve(trustDirectory, 'invalid-trust.json');
   writeFileSync(invalidFile, JSON.stringify({ version: 1, privateKey: 'synthetic-private-secret-never-echo' }));
-  const invalid = await runDoctor({ json: true }, baseDependencies({ env: { ...env, MODEL_ROUTER_SAAS_COMMERCIAL_ATTESTATION_TRUST_FILE: invalidFile } }));
+  const invalid = await runDoctor(
+    { json: true },
+    baseDependencies({ env: { ...env, MODEL_ROUTER_SAAS_COMMERCIAL_ATTESTATION_TRUST_FILE: invalidFile } }),
+  );
   assert.equal(check(invalid.result, 'commercial-attestation-trust').level, 'fail');
   assert.equal(invalid.result.exitCode, 1);
-  assert.ok(invalid.lines.every(line => !line.includes('synthetic-private-secret-never-echo')));
+  assert.ok(invalid.lines.every((line) => !line.includes('synthetic-private-secret-never-echo')));
 });
 
 test('commercial provisioning checks the effective parsed CP pool maximum', async () => {
   for (const value of ['1', '01', ' 1 ']) {
-    const { result } = await runDoctor({}, baseDependencies({ env: { ...controlPlaneEnv(), MODEL_ROUTER_SAAS_DB_POOL_MAX: value } }));
+    const { result } = await runDoctor(
+      {},
+      baseDependencies({ env: { ...controlPlaneEnv(), MODEL_ROUTER_SAAS_DB_POOL_MAX: value } }),
+    );
     assert.equal(check(result, 'commercial-attestation-trust').level, 'warn');
     assert.match(check(result, 'commercial-attestation-trust').detail, /requires at least two connections/u);
   }
-  const { result } = await runDoctor({}, baseDependencies({ env: { ...controlPlaneEnv(), MODEL_ROUTER_SAAS_DB_POOL_MAX: '02' } }));
+  const { result } = await runDoctor(
+    {},
+    baseDependencies({ env: { ...controlPlaneEnv(), MODEL_ROUTER_SAAS_DB_POOL_MAX: '02' } }),
+  );
   assert.equal(check(result, 'commercial-attestation-trust').level, 'pass');
 });
 
 test('doctor validates validation-worker-only bounded max attempts without provider calls', async () => {
   for (const value of ['1', '20', '0', '21']) {
-    const { result } = await runDoctor({ role: 'credential-validation-worker' }, baseDependencies({ env: { MODEL_ROUTER_SAAS_VALIDATION_WORKER_DATABASE_URL: WORKER_URL, [MODEL_ROUTER_SAAS_VALIDATION_WORKER_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE]: './fixture-worker-kms.js', MODEL_ROUTER_SAAS_VALIDATION_WORKER_MAX_ATTEMPTS: value }, createPool: () => fakePool({ probeRow: WORKER_PROBE_PASS_ROW }), loadValidationWorkerKms: readyKmsLoader() }));
+    const { result } = await runDoctor(
+      { role: 'credential-validation-worker' },
+      baseDependencies({
+        env: {
+          MODEL_ROUTER_SAAS_VALIDATION_WORKER_DATABASE_URL: WORKER_URL,
+          [MODEL_ROUTER_SAAS_VALIDATION_WORKER_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE]: './fixture-worker-kms.js',
+          MODEL_ROUTER_SAAS_VALIDATION_WORKER_MAX_ATTEMPTS: value,
+        },
+        createPool: () => fakePool({ probeRow: WORKER_PROBE_PASS_ROW }),
+        loadValidationWorkerKms: readyKmsLoader(),
+      }),
+    );
     assert.equal(check(result, 'validation-worker-attempts').level, ['1', '20'].includes(value) ? 'pass' : 'fail');
   }
-  const { result } = await runDoctor({}, baseDependencies({ env: { ...controlPlaneEnv(), MODEL_ROUTER_SAAS_VALIDATION_WORKER_MAX_ATTEMPTS: '1' } }));
+  const { result } = await runDoctor(
+    {},
+    baseDependencies({ env: { ...controlPlaneEnv(), MODEL_ROUTER_SAAS_VALIDATION_WORKER_MAX_ATTEMPTS: '1' } }),
+  );
   assert.equal(check(result, 'validation-worker-attempts').level, 'fail');
 });
 
 test('history doctor keeps pilot explicitly nonproduction and rejects CP secret access', async () => {
   const file = resolve(trustDirectory, 'pilot-history-keyring.json');
-  writeFileSync(file, JSON.stringify({ version: 1, currentKeyId: 'pilot-v1', keys: { 'pilot-v1': 'a'.repeat(64) } }), { mode: 0o600 });
-  const historyEnv = { MODEL_ROUTER_SAAS_RESPONSES_HISTORY_MODE: 'pilot-file-keyring', MODEL_ROUTER_SAAS_RESPONSES_HISTORY_KEYRING_FILE: file };
-  const pilot = await runDoctor({ role: 'gateway', json: true }, baseDependencies({ env: { ...historyEnv, MODEL_ROUTER_SAAS_GATEWAY_DATABASE_URL: GATEWAY_URL, [SAAS_GATEWAY_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE]: './fixture-gateway-kms.js' }, createPool: () => fakePool({ probeRow: GATEWAY_PROBE_PASS_ROW }), loadGatewayUnsealingKms: readyKmsLoader() }));
+  writeFileSync(file, JSON.stringify({ version: 1, currentKeyId: 'pilot-v1', keys: { 'pilot-v1': 'a'.repeat(64) } }), {
+    mode: 0o600,
+  });
+  const historyEnv = {
+    MODEL_ROUTER_SAAS_RESPONSES_HISTORY_MODE: 'pilot-file-keyring',
+    MODEL_ROUTER_SAAS_RESPONSES_HISTORY_KEYRING_FILE: file,
+  };
+  const pilot = await runDoctor(
+    { role: 'gateway', json: true },
+    baseDependencies({
+      env: {
+        ...historyEnv,
+        MODEL_ROUTER_SAAS_GATEWAY_DATABASE_URL: GATEWAY_URL,
+        [SAAS_GATEWAY_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE]: './fixture-gateway-kms.js',
+      },
+      createPool: () => fakePool({ probeRow: GATEWAY_PROBE_PASS_ROW }),
+      loadGatewayUnsealingKms: readyKmsLoader(),
+    }),
+  );
   assert.equal(check(pilot.result, 'responses-history').level, 'warn');
   assert.match(check(pilot.result, 'responses-history').detail, /not production ready/u);
-  assert.ok(pilot.lines.every(line => !line.includes('a'.repeat(64))));
-  const forbidden = await runDoctor({ role: 'control-plane' }, baseDependencies({ env: { ...controlPlaneEnv(), ...historyEnv } }));
+  assert.ok(pilot.lines.every((line) => !line.includes('a'.repeat(64))));
+  const forbidden = await runDoctor(
+    { role: 'control-plane' },
+    baseDependencies({ env: { ...controlPlaneEnv(), ...historyEnv } }),
+  );
   assert.equal(check(forbidden.result, 'responses-history').level, 'fail');
 });
 

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { PlatformWalletLedgerService } from '../../../src/saas/billing/service.js';
 import { SaasBillingError } from '../../../src/saas/billing/errors.js';
+import type { PlatformWalletLedgerService } from '../../../src/saas/billing/service.js';
 import type { SaasDatabase, SqlExecutor, SqlResult } from '../../../src/saas/db/types.js';
 import type { SaasMeteringService } from '../../../src/saas/metering/service.js';
 import type { UnknownOutcomeProviderEvidenceObservation } from '../../../src/saas/metering/unknown-outcome-reconciliation-service.js';
@@ -1125,30 +1125,39 @@ test('postgres resolution terminally cancels never-dispatched attempts alongside
   assert.ok(crashedDispatch);
   assert.match(crashedDispatch.sql, /SET dispatch_state = 'unknown'/);
   assert.equal(crashedDispatch.values[3], 'operator_resolution_not_executed');
-  const auditIndex = calls.findIndex(call => call.sql.includes('INSERT INTO saas_audit_events'));
+  const auditIndex = calls.findIndex((call) => call.sql.includes('INSERT INTO saas_audit_events'));
   assert.ok(auditIndex >= 0);
   const auditId = calls[auditIndex]!.values[0];
   assert.equal(typeof auditId, 'string');
-  const observations = calls.filter(call => call.sql.includes('INSERT INTO saas_unknown_outcome_reconciliation_observations') && call.sql.includes("'operator_resolution'"));
+  const observations = calls.filter(
+    (call) =>
+      call.sql.includes('INSERT INTO saas_unknown_outcome_reconciliation_observations') &&
+      call.sql.includes("'operator_resolution'"),
+  );
   assert.equal(observations.length, input.coverage.length);
   for (const observation of observations) {
     // Bind the actual INSERT columns to its VALUES tokens. Inspecting only
     // the parameter array misses a literal/placeholder positional swap.
-    const insert = /INSERT INTO saas_unknown_outcome_reconciliation_observations\s*\(([\s\S]*?)\)\s*VALUES\s*\(([\s\S]*)\)\s*$/u.exec(observation.sql);
+    const insert =
+      /INSERT INTO saas_unknown_outcome_reconciliation_observations\s*\(([\s\S]*?)\)\s*VALUES\s*\(([\s\S]*)\)\s*$/u.exec(
+        observation.sql,
+      );
     assert.ok(insert);
-    const columns = insert[1]!.split(',').map(column => column.trim());
-    const tokens = insert[2]!.split(',').map(token => token.trim());
+    const columns = insert[1]!.split(',').map((column) => column.trim());
+    const tokens = insert[2]!.split(',').map((token) => token.trim());
     assert.equal(columns.length, tokens.length);
-    const bound = Object.fromEntries(columns.map((column, index) => {
-      const token = tokens[index]!;
-      const parameter = /^\$(\d+)$/u.exec(token);
-      const literal = /^'([^']*)'$/u.exec(token);
-      assert.ok(parameter || literal || token === 'clock_timestamp()', 'unexpected SQL value token');
-      return [column, parameter ? observation.values[Number(parameter[1]) - 1] : literal ? literal[1] : token];
-    }));
-    const coverage = input.coverage.find(item => item.attemptId === bound.attempt_id);
+    const bound = Object.fromEntries(
+      columns.map((column, index) => {
+        const token = tokens[index]!;
+        const parameter = /^\$(\d+)$/u.exec(token);
+        const literal = /^'([^']*)'$/u.exec(token);
+        assert.ok(parameter || literal || token === 'clock_timestamp()', 'unexpected SQL value token');
+        return [column, parameter ? observation.values[Number(parameter[1]) - 1] : literal ? literal[1] : token];
+      }),
+    );
+    const coverage = input.coverage.find((item) => item.attemptId === bound.attempt_id);
     assert.ok(coverage);
-    assert.deepEqual(Object.fromEntries(columns.slice(-9).map(column => [column, bound[column]])), {
+    assert.deepEqual(Object.fromEntries(columns.slice(-9).map((column) => [column, bound[column]])), {
       resolved_model: 'model-a',
       attempt_unknown_reason: null,
       evidence_reference: coverage.evidenceReference,
@@ -1160,7 +1169,11 @@ test('postgres resolution terminally cancels never-dispatched attempts alongside
       observed_at: 'clock_timestamp()',
     });
     assert.ok(auditIndex < calls.indexOf(observation), 'audit FK exists before its observation');
-    assert.ok(calls.indexOf(observation) < calls.findIndex(call => call.sql.includes('UPDATE saas_unknown_outcome_reconciliation_cases')), 'case resolution follows its observations');
+    assert.ok(
+      calls.indexOf(observation) <
+        calls.findIndex((call) => call.sql.includes('UPDATE saas_unknown_outcome_reconciliation_cases')),
+      'case resolution follows its observations',
+    );
   }
 });
 
@@ -1343,21 +1356,42 @@ test('coverage validator rejects missing, duplicate, and unexpected attempt evid
   );
 });
 
-function platformCaptureFixture(options: {
-  readonly financial?: 'pending' | 'reconciliation_pending';
-  readonly reservation?: Record<string, unknown> | null;
-  readonly billingPatch?: Record<string, unknown>;
-  readonly billingError?: Error;
-  readonly leaseLost?: boolean;
-} = {}) {
-  const claim: UnknownOutcomeRecoveryClaim = { caseId: 'case-a', tenantId: 'tenant-a', projectId: 'project-a', requestId: 'request-a', supplyMode: 'platform', leaseToken: 'lease-a', scanAttempt: 1 };
-  const durableRef = 'normal-success-unknown:request-a:attempt-a';
-  const reservation = options.reservation === null ? null : {
-    id: 'reservation-a', tenant_id: claim.tenantId, request_id: claim.requestId,
-    idempotency_namespace: 'saas.billing.reservation', business_key: `saas-request-admission:${claim.tenantId}:${claim.requestId}`,
-    wallet_id: 'wallet-a', currency: 'CNY', amount_minor_units: '9007199254740993', price_snapshot_ref: 'price-a',
-    state: 'reconciliation_pending', reconciliation_reference: durableRef, ...options.reservation,
+function platformCaptureFixture(
+  options: {
+    readonly financial?: 'pending' | 'reconciliation_pending';
+    readonly reservation?: Record<string, unknown> | null;
+    readonly billingPatch?: Record<string, unknown>;
+    readonly billingError?: Error;
+    readonly leaseLost?: boolean;
+  } = {},
+) {
+  const claim: UnknownOutcomeRecoveryClaim = {
+    caseId: 'case-a',
+    tenantId: 'tenant-a',
+    projectId: 'project-a',
+    requestId: 'request-a',
+    supplyMode: 'platform',
+    leaseToken: 'lease-a',
+    scanAttempt: 1,
   };
+  const durableRef = 'normal-success-unknown:request-a:attempt-a';
+  const reservation =
+    options.reservation === null
+      ? null
+      : {
+          id: 'reservation-a',
+          tenant_id: claim.tenantId,
+          request_id: claim.requestId,
+          idempotency_namespace: 'saas.billing.reservation',
+          business_key: `saas-request-admission:${claim.tenantId}:${claim.requestId}`,
+          wallet_id: 'wallet-a',
+          currency: 'CNY',
+          amount_minor_units: '9007199254740993',
+          price_snapshot_ref: 'price-a',
+          state: 'reconciliation_pending',
+          reconciliation_reference: durableRef,
+          ...options.reservation,
+        };
   const calls: Array<{ sql: string; values: readonly unknown[] }> = [];
   const billingCalls: Array<Record<string, unknown>> = [];
   let caseUpdates = 0;
@@ -1366,28 +1400,93 @@ function platformCaptureFixture(options: {
     async query<Row>(sql: string, values: readonly unknown[] = []) {
       calls.push({ sql, values });
       let rows: unknown[] = [];
-      if (sql.includes('FROM saas_requests')) rows = [{ id: claim.requestId, tenant_id: claim.tenantId, project_id: claim.projectId, supply_mode: 'platform', execution_state: 'unknown', reconciliation_state: 'pending', financial_status: options.financial ?? 'reconciliation_pending', state_version: 3 }];
+      if (sql.includes('FROM saas_requests'))
+        rows = [
+          {
+            id: claim.requestId,
+            tenant_id: claim.tenantId,
+            project_id: claim.projectId,
+            supply_mode: 'platform',
+            execution_state: 'unknown',
+            reconciliation_state: 'pending',
+            financial_status: options.financial ?? 'reconciliation_pending',
+            state_version: 3,
+          },
+        ];
       else if (sql.includes('FROM saas_attempts') || sql.includes('FROM saas_usage_events')) rows = [];
-      else if (sql.includes('FROM saas_unknown_outcome_reconciliation_cases')) rows = options.leaseLost ? [] : [{ id: claim.caseId, tenant_id: claim.tenantId, project_id: claim.projectId, request_id: claim.requestId, supply_mode: 'platform', case_state: 'open', scan_attempt_count: 1, lease_token: claim.leaseToken, last_error_code: null, created_at: '2026-10-24T00:00:00Z', resolution_idempotency_key: null, resolution_digest: null }];
+      else if (sql.includes('FROM saas_unknown_outcome_reconciliation_cases'))
+        rows = options.leaseLost
+          ? []
+          : [
+              {
+                id: claim.caseId,
+                tenant_id: claim.tenantId,
+                project_id: claim.projectId,
+                request_id: claim.requestId,
+                supply_mode: 'platform',
+                case_state: 'open',
+                scan_attempt_count: 1,
+                lease_token: claim.leaseToken,
+                last_error_code: null,
+                created_at: '2026-10-24T00:00:00Z',
+                resolution_idempotency_key: null,
+                resolution_digest: null,
+              },
+            ];
       else if (sql.includes('FROM saas_billing_reservations')) rows = reservation ? [reservation] : [];
-      else if (sql.includes('UPDATE saas_requests')) rows = [{ financial_status: 'reconciliation_pending', state_version: 4 }];
-      else if (sql.includes('UPDATE saas_unknown_outcome_reconciliation_cases')) { caseUpdates++; return { rows: [] as Row[], rowCount: 1 }; }
-      else if (sql.includes('INSERT INTO saas_unknown_outcome_reconciliation_observations')) return { rows: [] as Row[], rowCount: 1 };
+      else if (sql.includes('UPDATE saas_requests'))
+        rows = [{ financial_status: 'reconciliation_pending', state_version: 4 }];
+      else if (sql.includes('UPDATE saas_unknown_outcome_reconciliation_cases')) {
+        caseUpdates++;
+        return { rows: [] as Row[], rowCount: 1 };
+      } else if (sql.includes('INSERT INTO saas_unknown_outcome_reconciliation_observations'))
+        return { rows: [] as Row[], rowCount: 1 };
       else throw new Error('Unexpected platform capture fixture query');
       return { rows: rows as Row[], rowCount: rows.length };
     },
   };
-  const database = { query: tx.query, async transaction<T>(work: (executor: SqlExecutor) => Promise<T>) { const result = await work(tx); committed = true; return result; } } as unknown as SaasDatabase;
+  const database = {
+    query: tx.query,
+    async transaction<T>(work: (executor: SqlExecutor) => Promise<T>) {
+      const result = await work(tx);
+      committed = true;
+      return result;
+    },
+  } as unknown as SaasDatabase;
   const billing = {
     async markReconciliationPending(executor: SqlExecutor, input: Record<string, unknown>) {
-      assert.equal(executor, tx); billingCalls.push(input);
+      assert.equal(executor, tx);
+      billingCalls.push(input);
       if (options.billingError) throw options.billingError;
       assert.ok(reservation);
-      return { id: reservation.id, tenantId: reservation.tenant_id, requestId: reservation.request_id, idempotencyNamespace: reservation.idempotency_namespace, businessKey: reservation.business_key, walletId: reservation.wallet_id, currency: reservation.currency, amountMinorUnits: BigInt(String(reservation.amount_minor_units)), priceSnapshotRef: reservation.price_snapshot_ref, state: 'reconciliation_pending', reconciliationReference: input.evidenceRef, ...options.billingPatch };
+      return {
+        id: reservation.id,
+        tenantId: reservation.tenant_id,
+        requestId: reservation.request_id,
+        idempotencyNamespace: reservation.idempotency_namespace,
+        businessKey: reservation.business_key,
+        walletId: reservation.wallet_id,
+        currency: reservation.currency,
+        amountMinorUnits: BigInt(String(reservation.amount_minor_units)),
+        priceSnapshotRef: reservation.price_snapshot_ref,
+        state: 'reconciliation_pending',
+        reconciliationReference: input.evidenceRef,
+        ...options.billingPatch,
+      };
     },
   } as unknown as PlatformWalletLedgerService;
-  const repository = new PostgresUnknownOutcomeRecoveryRepository(database, {} as SaasMeteringService, billing, { idFactory: () => 'observation-id' });
-  return { claim, durableRef, calls, billingCalls, capture: () => repository.captureAndEscalate(claim), committed: () => committed, caseUpdates: () => caseUpdates };
+  const repository = new PostgresUnknownOutcomeRecoveryRepository(database, {} as SaasMeteringService, billing, {
+    idFactory: () => 'observation-id',
+  });
+  return {
+    claim,
+    durableRef,
+    calls,
+    billingCalls,
+    capture: () => repository.captureAndEscalate(claim),
+    committed: () => committed,
+    caseUpdates: () => caseUpdates,
+  };
 }
 
 test('platform capture preserves a durable HTTP reconciliation reference and still calls strict billing', async () => {
@@ -1396,44 +1495,93 @@ test('platform capture preserves a durable HTTP reconciliation reference and sti
     assert.equal((await fixture.capture()).status, 'operator_required');
     assert.equal(fixture.billingCalls.length, 1);
     assert.equal(fixture.billingCalls[0]?.evidenceRef, fixture.durableRef);
-    const read = fixture.calls.find(call => call.sql.includes('FROM saas_billing_reservations'));
+    const read = fixture.calls.find((call) => call.sql.includes('FROM saas_billing_reservations'));
     assert.ok(read);
     assert.doesNotMatch(read.sql, /FOR\s+UPDATE/iu, 'billing retains wallet-before-reservation locking');
-    assert.deepEqual(read.values, ['tenant-a', 'request-a', 'saas.billing.reservation', 'saas-request-admission:tenant-a:request-a']);
-    assert.equal(fixture.calls.some(call => call.sql.includes('UPDATE saas_requests')), financial === 'pending');
-    assert.equal(fixture.caseUpdates(), 1); assert.equal(fixture.committed(), true);
+    assert.deepEqual(read.values, [
+      'tenant-a',
+      'request-a',
+      'saas.billing.reservation',
+      'saas-request-admission:tenant-a:request-a',
+    ]);
+    assert.equal(
+      fixture.calls.some((call) => call.sql.includes('UPDATE saas_requests')),
+      financial === 'pending',
+    );
+    assert.equal(fixture.caseUpdates(), 1);
+    assert.equal(fixture.committed(), true);
   }
 });
 
 test('platform capture reserved/null admission keeps the existing case reference path', async () => {
-  const fixture = platformCaptureFixture({ financial: 'pending', reservation: { state: 'reserved', reconciliation_reference: null } });
+  const fixture = platformCaptureFixture({
+    financial: 'pending',
+    reservation: { state: 'reserved', reconciliation_reference: null },
+  });
   assert.equal((await fixture.capture()).status, 'operator_required');
   assert.equal(fixture.billingCalls[0]?.evidenceRef, 'unknown-outcome-case:case-a');
 });
 
 test('platform capture refuses missing, wrong-scope, invalid amount/state and pending without a legal durable reference', async () => {
-  for (const reservation of [null, { tenant_id: 'other-tenant' }, { request_id: 'other-request' }, { idempotency_namespace: 'other-namespace' }, { business_key: 'other-key' }, { wallet_id: '' }, { currency: 'INVALID' }, { amount_minor_units: '-1' }, { price_snapshot_ref: '' }, { state: 'settled' }, { state: 'reserved', reconciliation_reference: 'unexpected' }, { reconciliation_reference: null }, { reconciliation_reference: '' }, { reconciliation_reference: ' original ' }, { reconciliation_reference: 'bad\nreference' }]) {
+  for (const reservation of [
+    null,
+    { tenant_id: 'other-tenant' },
+    { request_id: 'other-request' },
+    { idempotency_namespace: 'other-namespace' },
+    { business_key: 'other-key' },
+    { wallet_id: '' },
+    { currency: 'INVALID' },
+    { amount_minor_units: '-1' },
+    { price_snapshot_ref: '' },
+    { state: 'settled' },
+    { state: 'reserved', reconciliation_reference: 'unexpected' },
+    { reconciliation_reference: null },
+    { reconciliation_reference: '' },
+    { reconciliation_reference: ' original ' },
+    { reconciliation_reference: 'bad\nreference' },
+  ]) {
     const fixture = platformCaptureFixture({ reservation });
     await assert.rejects(fixture.capture());
-    assert.equal(fixture.billingCalls.length, 0); assert.equal(fixture.caseUpdates(), 0); assert.equal(fixture.committed(), false);
+    assert.equal(fixture.billingCalls.length, 0);
+    assert.equal(fixture.caseUpdates(), 0);
+    assert.equal(fixture.committed(), false);
   }
 });
 
 test('platform capture rejects billing reread identity, amount, price, state or durable reference changes', async () => {
-  for (const billingPatch of [{ id: 'other' }, { tenantId: 'other' }, { requestId: 'other' }, { idempotencyNamespace: 'other' }, { businessKey: 'other' }, { walletId: 'other' }, { currency: 'USD' }, { amountMinorUnits: 9007199254740992n }, { priceSnapshotRef: 'other' }, { state: 'released' }, { reconciliationReference: 'other' }]) {
+  for (const billingPatch of [
+    { id: 'other' },
+    { tenantId: 'other' },
+    { requestId: 'other' },
+    { idempotencyNamespace: 'other' },
+    { businessKey: 'other' },
+    { walletId: 'other' },
+    { currency: 'USD' },
+    { amountMinorUnits: 9007199254740992n },
+    { priceSnapshotRef: 'other' },
+    { state: 'released' },
+    { reconciliationReference: 'other' },
+  ]) {
     const fixture = platformCaptureFixture({ billingPatch });
     await assert.rejects(fixture.capture());
-    assert.equal(fixture.billingCalls.length, 1); assert.equal(fixture.caseUpdates(), 0); assert.equal(fixture.committed(), false);
+    assert.equal(fixture.billingCalls.length, 1);
+    assert.equal(fixture.caseUpdates(), 0);
+    assert.equal(fixture.committed(), false);
   }
   const conflict = new SaasBillingError('IDEMPOTENCY_CONFLICT');
   const fixture = platformCaptureFixture({ billingError: conflict });
-  await assert.rejects(fixture.capture(), error => error === conflict);
-  assert.equal(fixture.caseUpdates(), 0); assert.equal(fixture.committed(), false);
+  await assert.rejects(fixture.capture(), (error) => error === conflict);
+  assert.equal(fixture.caseUpdates(), 0);
+  assert.equal(fixture.committed(), false);
 });
 
 test('platform capture with a lost or expired lease never reads the reservation or calls billing', async () => {
   const fixture = platformCaptureFixture({ leaseLost: true });
   assert.equal((await fixture.capture()).status, 'lease_lost');
-  assert.equal(fixture.billingCalls.length, 0); assert.equal(fixture.calls.some(call => call.sql.includes('FROM saas_billing_reservations')), false);
+  assert.equal(fixture.billingCalls.length, 0);
+  assert.equal(
+    fixture.calls.some((call) => call.sql.includes('FROM saas_billing_reservations')),
+    false,
+  );
   assert.equal(fixture.caseUpdates(), 0);
 });

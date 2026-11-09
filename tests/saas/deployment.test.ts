@@ -311,8 +311,18 @@ test('standard validation worker max attempts is role-scoped and bounded without
     if (config.mode !== 'managed-saas') throw new Error('expected managed-saas');
     assert.equal(config.validationWorkerMaxAttempts, Number(value));
   }
-  for (const value of ['', '0', '21', '-1', '1.5', '01', ' 1 ']) assertDeploymentError(() => parseDeploymentConfig(validationWorkerEnvironment({ [name]: value })), 'INVALID_PROVIDER_MODULE', /Validation worker max attempts must be an integer from 1 to 20/u);
-  for (const env of [managedEnvironment(), gatewayEnvironment()]) assertDeploymentError(() => parseDeploymentConfig({ ...env, [name]: '1' }), 'INVALID_PROVIDER_MODULE', /Validation worker max attempts must be an integer from 1 to 20/u);
+  for (const value of ['', '0', '21', '-1', '1.5', '01', ' 1 '])
+    assertDeploymentError(
+      () => parseDeploymentConfig(validationWorkerEnvironment({ [name]: value })),
+      'INVALID_PROVIDER_MODULE',
+      /Validation worker max attempts must be an integer from 1 to 20/u,
+    );
+  for (const env of [managedEnvironment(), gatewayEnvironment()])
+    assertDeploymentError(
+      () => parseDeploymentConfig({ ...env, [name]: '1' }),
+      'INVALID_PROVIDER_MODULE',
+      /Validation worker max attempts must be an integer from 1 to 20/u,
+    );
 });
 
 test('worker metadata module is an optional immutable standard deployment declaration, not a default target source', () => {

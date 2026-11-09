@@ -1,4 +1,3 @@
-import { PlatformInferenceAccessError, type PlatformInferenceAccessProvisioningService, type ProvisionPlatformInferenceAccessInput, type DisablePlatformInferenceAccessInput } from '../../supply/platform-inference-access-provisioning.js';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage, OutgoingHttpHeaders, ServerResponse } from 'node:http';
 import { isIP } from 'node:net';
@@ -23,6 +22,12 @@ import {
   type SaasPricingService,
 } from '../../pricing/index.js';
 import { ProviderSupplyError } from '../../supply/errors.js';
+import {
+  type DisablePlatformInferenceAccessInput,
+  PlatformInferenceAccessError,
+  type PlatformInferenceAccessProvisioningService,
+  type ProvisionPlatformInferenceAccessInput,
+} from '../../supply/platform-inference-access-provisioning.js';
 import type {
   PlatformProviderAccountCreateInput,
   PlatformProviderAccountLifecycleInput,
@@ -39,7 +44,6 @@ import type {
   ProviderCredentialWriteResult,
 } from '../../supply/types.js';
 import type { CustomerWebhookTenantPolicyService } from '../../webhooks/tenant-policy-service.js';
-import { createPlatformAdminBulkImportHttpHandler, type PlatformAdminBulkImportServices } from './bulk-import.js';
 import {
   hasPlatformRole,
   PLATFORM_ADMIN_ROLES,
@@ -72,6 +76,7 @@ import {
   type PlatformTenantLifecycleService,
   type PlatformUserGovernanceService,
 } from '../governance/index.js';
+import { createPlatformAdminBulkImportHttpHandler, type PlatformAdminBulkImportServices } from './bulk-import.js';
 
 export const PLATFORM_ADMIN_READ_PREFIX = '/admin/api/v1' as const;
 
@@ -234,7 +239,10 @@ export interface PlatformAdminReadHandlerOptions {
   readonly supply?: PlatformAdminSupplyService;
   /** Omitted until startup wires bulk account import and its metadata reader. */
   readonly bulkImport?: PlatformAdminBulkImportServices;
-  readonly platformInferenceAccess?: Pick<PlatformInferenceAccessProvisioningService, 'provision' | 'getOperation' | 'disable'>;
+  readonly platformInferenceAccess?: Pick<
+    PlatformInferenceAccessProvisioningService,
+    'provision' | 'getOperation' | 'disable'
+  >;
   /** Omitted until startup wires the audited bounded-capacity policy service. */
   readonly capacityPolicies?: PlatformAdminCapacityPolicyService;
   /** Omitted until startup wires the restricted, identifier-only target selectors. */
@@ -2281,7 +2289,11 @@ export function createPlatformAdminReadHandler(options: PlatformAdminReadHandler
         throw capacityPolicyTargetsUnavailable();
       }
 
-      if (route === 'platformAccessProvision' || route === 'platformAccessOperation' || route === 'platformAccessDisable') {
+      if (
+        route === 'platformAccessProvision' ||
+        route === 'platformAccessOperation' ||
+        route === 'platformAccessDisable'
+      ) {
         if (!hasPlatformRole(actor, ['operations'])) throw forbidden();
         const service = options.platformInferenceAccess;
         if (!service) throw writeUnavailable();
@@ -2293,14 +2305,24 @@ export function createPlatformAdminReadHandler(options: PlatformAdminReadHandler
           } else {
             const body = await readJson(req);
             const context = { actor, audit: requestAuditContext(req, actor, requestId) };
-            const result = route === 'platformAccessProvision'
-              ? await service.provision(body as ProvisionPlatformInferenceAccessInput, context)
-              : await service.disable(body as DisablePlatformInferenceAccessInput, context);
+            const result =
+              route === 'platformAccessProvision'
+                ? await service.provision(body as ProvisionPlatformInferenceAccessInput, context)
+                : await service.disable(body as DisablePlatformInferenceAccessInput, context);
             sendJson(res, route === 'platformAccessProvision' ? 201 : 200, requestId, result);
           }
         } catch (error) {
           if (!(error instanceof PlatformInferenceAccessError)) throw error;
-          const status = (error.code === 'INVALID_INPUT' || error.code === 'WORKFLOW_UNSUPPORTED') ? 400 : error.code === 'FORBIDDEN' ? 403 : error.code === 'NOT_FOUND' ? 404 : (error.code === 'VERSION_CONFLICT' || error.code === 'OPERATION_BUSY') ? 409 : 503;
+          const status =
+            error.code === 'INVALID_INPUT' || error.code === 'WORKFLOW_UNSUPPORTED'
+              ? 400
+              : error.code === 'FORBIDDEN'
+                ? 403
+                : error.code === 'NOT_FOUND'
+                  ? 404
+                  : error.code === 'VERSION_CONFLICT' || error.code === 'OPERATION_BUSY'
+                    ? 409
+                    : 503;
           throw new HttpError(status, `PLATFORM_ACCESS_${error.code}`, error.message);
         }
         return true;
@@ -2784,4 +2806,8 @@ export function createPlatformAdminReadHandler(options: PlatformAdminReadHandler
   };
 }
 
-export { createPaymentsControlHttpHandler, type PaymentsControlHttpOptions, type PaymentsControlHttpHandler } from '../payments-control-http.js';
+export {
+  createPaymentsControlHttpHandler,
+  type PaymentsControlHttpHandler,
+  type PaymentsControlHttpOptions,
+} from '../payments-control-http.js';

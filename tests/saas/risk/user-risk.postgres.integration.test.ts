@@ -165,7 +165,7 @@ test('user risk control drill: observation capture, rate-limit, suspend, ban, re
       });
     }
     const detector = new PostgresUserAnomalyDetector(control, { now: () => detectorWindow(0) });
-    const first = await phase('detect-1', () => detector.runBatch());
+    const first = await phase('terminal_transition', () => detector.runBatch());
     assert.deepEqual(first, { detected: 1, rateLimited: 1, keysSuspended: 0, accountsSuspended: 0 });
 
     const marker = await control.query<{ readonly stage: string; readonly requests_per_minute: string }>(
@@ -176,7 +176,7 @@ test('user risk control drill: observation capture, rate-limit, suspend, ban, re
     assert.equal(marker.rows[0]?.requests_per_minute, '10');
     await assertAuditActions(control, context, ['user_anomaly.detected', 'user_risk.rate_limited']);
 
-    const replay = await phase('detect-1-replay', () => detector.runBatch());
+    const replay = await phase('replay', () => detector.runBatch());
     assert.deepEqual(
       replay,
       { detected: 0, rateLimited: 0, keysSuspended: 0, accountsSuspended: 0 },
@@ -195,7 +195,7 @@ test('user risk control drill: observation capture, rate-limit, suspend, ban, re
       });
     }
     const detector = new PostgresUserAnomalyDetector(control, { now: () => detectorWindow(660) });
-    const second = await phase('detect-2', () => detector.runBatch());
+    const second = await phase('terminal_transition', () => detector.runBatch());
     assert.deepEqual(second, { detected: 1, rateLimited: 0, keysSuspended: 1, accountsSuspended: 0 });
 
     const key = await control.query<{
@@ -212,7 +212,9 @@ test('user risk control drill: observation capture, rate-limit, suspend, ban, re
     assert.equal(key.rows[0]?.revoked_at, null, 'suspension is not revocation');
 
     const store = new PostgresRiskControlAdminStore(control);
-    const resumed = await phase('resume', () => store.resumeApiKey(context.tenantId, context.projectId, context.keyId));
+    const resumed = await phase('terminal_transition', () =>
+      store.resumeApiKey(context.tenantId, context.projectId, context.keyId),
+    );
     assert.deepEqual(resumed, { status: 'resumed' });
     const afterResume = await control.query<{ readonly status: string; readonly authz_version: string }>(
       'SELECT status, authz_version::text AS authz_version FROM saas_api_keys WHERE id = $1',
@@ -233,7 +235,7 @@ test('user risk control drill: observation capture, rate-limit, suspend, ban, re
       });
     }
     const detector = new PostgresUserAnomalyDetector(control, { now: () => detectorWindow(1020) });
-    const third = await phase('detect-3', () => detector.runBatch());
+    const third = await phase('terminal_transition', () => detector.runBatch());
     assert.deepEqual(third, { detected: 1, rateLimited: 0, keysSuspended: 0, accountsSuspended: 1 });
 
     const user = await control.query<{ readonly disabled_at: string | null }>(
@@ -256,7 +258,7 @@ test('user risk control drill: observation capture, rate-limit, suspend, ban, re
 
   await t.test('revoke irreversibility: resume refuses, unban clears markers but restores nothing', async () => {
     const store = new PostgresRiskControlAdminStore(control);
-    const bannedRefusal = await phase('resume-while-banned', () =>
+    const bannedRefusal = await phase('conflict', () =>
       store.resumeApiKey(context.tenantId, context.projectId, context.keyId),
     );
     assert.deepEqual(bannedRefusal, {
@@ -264,7 +266,7 @@ test('user risk control drill: observation capture, rate-limit, suspend, ban, re
       reason: 'principal_disabled',
     });
 
-    const unbanned = await phase('unban', () => store.enableUser(context.userId));
+    const unbanned = await phase('terminal_transition', () => store.enableUser(context.userId));
     assert.equal(unbanned, true);
     const user = await control.query<{ readonly disabled_at: string | null }>(
       'SELECT disabled_at::text AS disabled_at FROM saas_users WHERE id = $1',
@@ -281,7 +283,7 @@ test('user risk control drill: observation capture, rate-limit, suspend, ban, re
     ]);
     assert.equal(key.rows[0]?.status, 'revoked', 'unban never restores revoked keys');
 
-    const revokedRefusal = await phase('resume-after-unban', () =>
+    const revokedRefusal = await phase('conflict', () =>
       store.resumeApiKey(context.tenantId, context.projectId, context.keyId),
     );
     assert.deepEqual(revokedRefusal, { status: 'unchanged', reason: 'revoked' });
@@ -297,7 +299,7 @@ test('user risk control drill: observation capture, rate-limit, suspend, ban, re
         [context.userId, context.tenantId, context.keyId],
       );
     });
-    const swept = await phase('retention', () => runRiskControlRetentionOnce(control));
+    const swept = await phase('cleanup', () => runRiskControlRetentionOnce(control));
     assert.ok(
       swept.deletedObservations >= 1,
       `the control-plane DELETE grant ages out observations (deleted ${swept.deletedObservations})`,
@@ -318,7 +320,7 @@ test('user risk control drill: observation capture, rate-limit, suspend, ban, re
         [context.userId],
       );
     });
-    const policy = await phase('user-limit-read', () =>
+    const policy = await phase('snapshot', () =>
       control.transaction((tx) => selectUserLimitPolicy(tx, context.userId)),
     );
     assert.equal(policy.requestsPerMinute, 10n, 'the per-user override wins over the NULL defaults');

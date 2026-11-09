@@ -236,8 +236,9 @@ test('real Redis authoritative fast admission', { skip: !enabled, timeout: 30000
       const namespace = randomUUID();
       const service = await f.open(namespace);
       const limits = { account: { tpm: 5 } };
-      const request = input({ limits });
-      // tokenUnits 7 exceeds tpm 5: deterministic quota denial, retry hint 1000ms.
+      const request = input({ limits, tokenUnits: 2 });
+      await admitted(await service.acquire(input({ limits, tokenUnits: 4 }))).release();
+      // Existing usage plus this request exceeds the limit.
       const denial = await service.acquire(request);
       assert.deepEqual(denial, { allowed: false, reason: 'quota_exceeded', retryAfterMs: 1000 });
       const rejectKeys = await f.inspector.keys(`${namespacePrefix(namespace)}:reject:*`);
@@ -272,6 +273,9 @@ test('real Redis authoritative fast admission', { skip: !enabled, timeout: 30000
     await admitted(await service.acquire(input({ limits }))).release();
     const first = await service.acquire(input({ limits }));
     assert.deepEqual(first, { allowed: false, reason: 'rate_limited', retryAfterMs: 1000 });
+    const [rejectKey] = await f.inspector.keys(`${namespacePrefix(namespace)}:reject:*`);
+    const [rateKey] = await f.inspector.keys(`${namespacePrefix(namespace)}:rate:*`);
+    assert.ok(rejectKey && rateKey);
     // The shared reject key short-circuits the retry storm: each identical
     // retry reports the remaining TTL instead of rescanning all rate keys.
     let last = first.retryAfterMs ?? 1001;
@@ -285,7 +289,10 @@ test('real Redis authoritative fast admission', { skip: !enabled, timeout: 30000
     // A different account scope is a different reject identity: it gets a
     // full scan and is admitted.
     admitted(await service.acquire(input({ accountId: 'account-other', limits })));
+    // Clear only this account's rate usage. The reject stamp has its own TTL.
+    await f.inspector.del(rateKey);
     await delay(1050);
+    assert.equal(await f.inspector.pTTL(rejectKey), -2);
     admitted(await service.acquire(input({ limits })));
   });
   await t.test('durable actual usage reconciles TPM once but never refunds RPM or unknown usage', async () => {

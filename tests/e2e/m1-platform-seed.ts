@@ -14,7 +14,7 @@ import type { RegistrationContractTestPort } from '../../dist/saas/identity/regi
 import { SaasIdentityService } from '../../dist/saas/identity/service.js';
 import { SaasPricingService } from '../../dist/saas/pricing/service.js';
 import { ProviderSupplyService } from '../../dist/saas/supply/service.js';
-import type { SaasDatabase } from '../src/saas/db/types.js';
+import type { SaasDatabase } from '../../src/saas/db/types.js';
 
 /**
  * M1 e2e platform-supply seeding: the ONE global chain every registered

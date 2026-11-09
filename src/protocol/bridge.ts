@@ -62,13 +62,13 @@ import {
 } from '../saas/gateway/responses-bridge/reverse-response.js';
 import { AnthToOpenAIBridge } from './anth-to-openai.js';
 import { AnthToGeminiBridge, GeminiToAnthBridge } from './gemini.js';
+import { GeminiToOpenAIBridge, OpenAIToGeminiBridge } from './openai-gemini.js';
 import { OpenAIToAnthBridge, type OpenAIToAnthBridgeOptions } from './openai-to-anth.js';
 import { PassthroughAnthropicBridge } from './passthrough-anthropic.js';
 import { PassthroughOpenAiBridge } from './passthrough-openai.js';
 import { AnthToResponsesBridge, OpenAIToResponsesBridge, ResponsesToAnthBridge } from './responses.js';
+import { GeminiToResponsesBridge, ResponsesToGeminiBridge } from './responses-gemini.js';
 import { parseSseStream } from './sse.js';
-import { OpenAIToGeminiBridge, GeminiToOpenAIBridge } from './openai-gemini.js';
-import { ResponsesToGeminiBridge, GeminiToResponsesBridge } from './responses-gemini.js';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);

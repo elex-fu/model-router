@@ -13,10 +13,13 @@ import { test } from 'node:test';
 // Dedicated parent launches this existing real commercial fixture in an IPC child.
 const shutdownDrill = process.env.MODEL_ROUTER_MANAGED_SIGTERM_DRILL === '1' && process.send !== undefined;
 let releaseShutdownTerminal: (() => void) | undefined;
-const shutdownTerminal = shutdownDrill ? new Promise<void>((resolve) => { releaseShutdownTerminal = resolve; }) : undefined;
+const shutdownTerminal = shutdownDrill
+  ? new Promise<void>((resolve) => {
+      releaseShutdownTerminal = resolve;
+    })
+  : undefined;
+
 import { fetch as undiciFetch } from 'undici';
-import { proveAuthorizationRevocationHttp } from './authorization-revocation-http-postgres-fixture.js';
-import { diagnoseEarlyRecoveryHttp, observeOperatorRecoveryWorkflow, proveOperatorRecoveryHttp } from './operator-recovery-http-postgres-fixture.js';
 import { SaasBillingGroupsService } from '../../../src/saas/billing/groups/service.js';
 import { PlatformWalletLedgerService } from '../../../src/saas/billing/service.js';
 import { SaasCatalogService } from '../../../src/saas/catalog/service.js';
@@ -41,6 +44,7 @@ import {
   parseDeploymentConfig,
   SAAS_GATEWAY_PROVIDER_CREDENTIAL_DECRYPT_KMS_MODULE,
 } from '../../../src/saas/deployment.js';
+import { CachedRequestPreparationAuthority } from '../../../src/saas/gateway/cached-request-preparation-authority.js';
 import {
   type CustomerMeteringPolicyDefinition,
   canonicalContractAttestationPayload,
@@ -51,7 +55,6 @@ import { DispatchUsageSettlementCoordinator } from '../../../src/saas/gateway/di
 import { PostgresProviderAccountRuntimeHealthStore } from '../../../src/saas/gateway/postgres-provider-account-runtime-health-store.js';
 import { PostgresProviderAccountScheduler } from '../../../src/saas/gateway/postgres-provider-account-scheduler.js';
 import { PostgresRequestPreparationAuthorityAdapter } from '../../../src/saas/gateway/postgres-request-preparation-authority-adapter.js';
-import { CachedRequestPreparationAuthority } from '../../../src/saas/gateway/cached-request-preparation-authority.js';
 import {
   type PreparedEvidenceDispatchErrorCode,
   type PreparedEvidenceLeaseProvider,
@@ -113,12 +116,18 @@ import { ProviderSupplyService } from '../../../src/saas/supply/service.js';
 import type { ProviderSupplyOwner } from '../../../src/saas/supply/types.js';
 import type { ManagedSaasRuntime } from '../../../src/server/managed-saas.js';
 import { SAAS_PLATFORM_AUDIT_CURSOR_SECRET, startManagedSaasServer } from '../../../src/server/managed-saas.js';
+import { proveAuthorizationRevocationHttp } from './authorization-revocation-http-postgres-fixture.js';
 import {
   createFinancialNetworkFaultFixture,
   INVALID_JSON_USAGE_VARIANTS,
   type InvalidJsonUsageVariant,
 } from './commercial-gateway-financial-fault-fixture.js';
 import { DispatchCompletionTracker } from './dispatch-completion-test-helper.js';
+import {
+  diagnoseEarlyRecoveryHttp,
+  observeOperatorRecoveryWorkflow,
+  proveOperatorRecoveryHttp,
+} from './operator-recovery-http-postgres-fixture.js';
 
 const REQUIRED_FLAG = 'MODEL_ROUTER_SAAS_GATEWAY_E2E_REQUIRED';
 const MIGRATOR_URL = 'MODEL_ROUTER_SAAS_GATEWAY_E2E_MIGRATOR_URL';
@@ -255,7 +264,11 @@ function observePreparationFailures(
     'dispatch_failed',
     'storage_failure',
   ]);
-  const observations = new AsyncLocalStorage<{ sqlStates: Set<string>; boundaries: SafePreparationBoundary[]; reservationOrder: string[] }>();
+  const observations = new AsyncLocalStorage<{
+    sqlStates: Set<string>;
+    boundaries: SafePreparationBoundary[];
+    reservationOrder: string[];
+  }>();
   let lastFailure: SafePreparationDiagnostic | null = null;
   const recordSqlState = (error: unknown) => {
     // Never inspect message/detail/context/stack, SQL text, parameters, caller
@@ -274,16 +287,22 @@ function observePreparationFailures(
     async query<Row>(sql: string, values?: readonly unknown[]) {
       // Test-only fixed labels prove the native runtime, not just the standalone
       // harness, stages fenced reads before its first shared mutable counter.
-      const stage = sql.includes('INSERT INTO saas_provider_account_rate_counters') ? 'account-counter'
-        : sql.includes('FROM saas_api_key_budget_policies') ? 'key-policy'
-        : sql.includes('SELECT billing_group_id, group_daily_limit_minor_units') ? 'group-terms'
-        : sql.includes('SELECT t.status AS tenant_status') ? 'capacity-authority'
-        : sql.includes('postgres-preparation-capacity:billing-group-terms') ? 'group-rate-terms'
-        : null;
+      const stage = sql.includes('INSERT INTO saas_provider_account_rate_counters')
+        ? 'account-counter'
+        : sql.includes('FROM saas_api_key_budget_policies')
+          ? 'key-policy'
+          : sql.includes('SELECT billing_group_id, group_daily_limit_minor_units')
+            ? 'group-terms'
+            : sql.includes('SELECT t.status AS tenant_status')
+              ? 'capacity-authority'
+              : sql.includes('postgres-preparation-capacity:billing-group-terms')
+                ? 'group-rate-terms'
+                : null;
       if (stage !== null) observations.getStore()?.reservationOrder.push(stage);
       try {
         if (sql.includes('provider-account-runtime-health:scheduling-batch')) observeCandidateRead?.('health');
-        if (sql.includes('postgres-provider-account-scheduler:concurrency-batch')) observeCandidateRead?.('concurrency');
+        if (sql.includes('postgres-provider-account-scheduler:concurrency-batch'))
+          observeCandidateRead?.('concurrency');
         return await executor.query<Row>(sql, values);
       } catch (error) {
         recordSqlState(error);
@@ -546,9 +565,10 @@ function observePreparationFailures(
         const order = observations.getStore()?.reservationOrder ?? [];
         const counterAt = order.indexOf('account-counter');
         assert.ok(counterAt >= 0, 'native successful preparation must persist account consumption');
-        const reads = result.authority.candidate.supplyMode === 'platform'
-          ? ['key-policy', 'group-terms', 'capacity-authority', 'group-rate-terms']
-          : ['key-policy', 'capacity-authority'];
+        const reads =
+          result.authority.candidate.supplyMode === 'platform'
+            ? ['key-policy', 'group-terms', 'capacity-authority', 'group-rate-terms']
+            : ['key-policy', 'capacity-authority'];
         for (const read of reads) {
           assert.equal(order.filter((stage) => stage === read).length, 1, `native ${read} must not silently fall back`);
           assert.ok(order.indexOf(read) < counterAt, `native ${read} must precede the account/wallet locks`);
@@ -2388,14 +2408,34 @@ test('real PostgreSQL commercial gateway E2E launches managed control-plane and 
       if (mode === 'platform' && kind === 'before_headers_cancel') {
         recoveryBillingGroupId = `p10-recovery-${randomUUID()}`;
         const groups = new SaasBillingGroupsService(database);
-        await groups.createBillingGroup({ id: recoveryBillingGroupId, displayName: label,
-          rateMultiplier: { numerator: 1n, denominator: 1n }, topupMultiplier: { numerator: 1n, denominator: 1n },
-          dailyLimitMinorUnits: 1000n, weeklyLimitMinorUnits: null, monthlyLimitMinorUnits: null,
-          peakEnabled: false, peakStart: null, peakEnd: null, peakMultiplier: null, modelPricing: null,
-          rpmLimit: null, profitMinMargin: null, profitSafetyBuffer: null, claudeCodeOnly: false,
-          fallbackGroupId: null, supportedModelScopes: null, composite: false, status: 'active' });
-        await groups.setKeyBillingGroup({ tenantId: scopedTenant.id, projectId: scopedProject.id,
-          keyId: scopedKey.id, billingGroupId: recoveryBillingGroupId });
+        await groups.createBillingGroup({
+          id: recoveryBillingGroupId,
+          displayName: label,
+          rateMultiplier: { numerator: 1n, denominator: 1n },
+          topupMultiplier: { numerator: 1n, denominator: 1n },
+          dailyLimitMinorUnits: 1000n,
+          weeklyLimitMinorUnits: null,
+          monthlyLimitMinorUnits: null,
+          peakEnabled: false,
+          peakStart: null,
+          peakEnd: null,
+          peakMultiplier: null,
+          modelPricing: null,
+          rpmLimit: null,
+          profitMinMargin: null,
+          profitSafetyBuffer: null,
+          claudeCodeOnly: false,
+          fallbackGroupId: null,
+          supportedModelScopes: null,
+          composite: false,
+          status: 'active',
+        });
+        await groups.setKeyBillingGroup({
+          tenantId: scopedTenant.id,
+          projectId: scopedProject.id,
+          keyId: scopedKey.id,
+          billingGroupId: recoveryBillingGroupId,
+        });
       }
       // Set previously absent limits once, to one concurrent request per
       // independent scope. Never increase capacity to admit a retained hold.
@@ -2672,7 +2712,9 @@ test('real PostgreSQL commercial gateway E2E launches managed control-plane and 
     controlPlaneRuntime = await startManagedSaasServer(controlPlaneDeployment, {
       environment: controlPlaneEnvironment,
       loadProviders: async () => providers,
-      createUnknownOutcomeRecoveryWorkflow: observeOperatorRecoveryWorkflow(code => t.diagnostic(`operator_recovery_${code}`)),
+      createUnknownOutcomeRecoveryWorkflow: observeOperatorRecoveryWorkflow((code) =>
+        t.diagnostic(`operator_recovery_${code}`),
+      ),
       installSignalHandlers: false,
     });
     assert.ok(controlPlaneRuntime, 'operator recovery requires the successfully started control-plane runtime');
@@ -2760,7 +2802,11 @@ test('real PostgreSQL commercial gateway E2E launches managed control-plane and 
       const entitlementResolver: RequestPreparationEntitlementPort = {
         async resolve({ caller, publicModel: requestedModel, protocol }) {
           // Only explicitly provisioned, server-resolved fixture principals.
-          const callerContext = [tenantContext, ...registeredFinancialFaultScopes.map((scope) => scope.context), ...authorizationContexts].find(
+          const callerContext = [
+            tenantContext,
+            ...registeredFinancialFaultScopes.map((scope) => scope.context),
+            ...authorizationContexts,
+          ].find(
             (context) =>
               caller.tenantId === context.tenantId &&
               caller.projectId === context.projectId &&
@@ -3147,12 +3193,17 @@ test('real PostgreSQL commercial gateway E2E launches managed control-plane and 
       // Signal handler has synchronously closed admission before this probe.
       try {
         const rejected = await fetch(`http://127.0.0.1:${gatewayPort}${ENDPOINT}`, {
-          method: 'POST', body: '{}', signal: AbortSignal.timeout(2000),
+          method: 'POST',
+          body: '{}',
+          signal: AbortSignal.timeout(2000),
         });
         assert.equal(rejected.status, 503);
         await rejected.text();
       } catch (error) {
-        assert.ok(error instanceof TypeError && error.message === 'fetch failed', 'new TCP must be refused or receive 503');
+        assert.ok(
+          error instanceof TypeError && error.message === 'fetch failed',
+          'new TCP must be refused or receive 503',
+        );
       }
       releaseShutdownTerminal?.();
       const chunks = [Buffer.from(first.value ?? [])];
@@ -3847,15 +3898,29 @@ test('real PostgreSQL commercial gateway E2E launches managed control-plane and 
           let requestId: string;
           try {
             let receiptObserved = false;
-            const receipt = network.waitFor('receipt').then(() => { receiptObserved = true; });
+            const receipt = network.waitFor('receipt').then(() => {
+              receiptObserved = true;
+            });
             if (scope.mode === 'platform' && scope.kind === 'before_headers_cancel') {
-              await Promise.race([receipt, http.then(async result => {
-                if (receiptObserved) return; // A later deliberate client abort is not an early response.
-                await diagnoseEarlyRecoveryHttp({ ...(result.kind === 'response' ? { response: result.response } : {}),
-                  observation: observationDatabase, tenantId: scope.context.tenantId, projectId: scope.context.projectId,
-                  keyId: scope.key.id, diagnostic: safe => t.diagnostic(`operator_recovery_early_http=${safe}`) });
-                throw new Error('operator recovery request completed before the required controlled-upstream receipt');
-              })]).finally(() => { receiptObserved = true; });
+              await Promise.race([
+                receipt,
+                http.then(async (result) => {
+                  if (receiptObserved) return; // A later deliberate client abort is not an early response.
+                  await diagnoseEarlyRecoveryHttp({
+                    ...(result.kind === 'response' ? { response: result.response } : {}),
+                    observation: observationDatabase,
+                    tenantId: scope.context.tenantId,
+                    projectId: scope.context.projectId,
+                    keyId: scope.key.id,
+                    diagnostic: (safe) => t.diagnostic(`operator_recovery_early_http=${safe}`),
+                  });
+                  throw new Error(
+                    'operator recovery request completed before the required controlled-upstream receipt',
+                  );
+                }),
+              ]).finally(() => {
+                receiptObserved = true;
+              });
             } else await receipt;
             requestId = dispatchCompletions.requestIdSince(checkpoint);
             assert.equal(network.snapshot().receipts, 1);
@@ -4030,20 +4095,47 @@ test('real PostgreSQL commercial gateway E2E launches managed control-plane and 
             // Test-only operator review of this exact controlled upstream branch.
             // Receipt/cancel alone is not real Provider proof of non-execution.
             assert.ok(scope.recoveryBillingGroupId, 'the operator recovery request must reserve nonempty group spend');
-            const reviewedRecord = Object.freeze({ requestId, attemptId: facts.attempt_id, branch: scope.kind, ...wire });
+            const reviewedRecord = Object.freeze({
+              requestId,
+              attemptId: facts.attempt_id,
+              branch: scope.kind,
+              ...wire,
+            });
             const evidenceReference = `test-only:controlled-no-execution:${requestId}:${facts.attempt_id}:${createHash('sha256').update(JSON.stringify(reviewedRecord)).digest('hex')}`;
             await proveOperatorRecoveryHttp({
-              diagnostic: stage => t.diagnostic(`operator_recovery_stage=${stage}`),
-              database: operatorRecoveryDatabase, observation: observationDatabase,
-              origin: `http://127.0.0.1:${platformPort}`, keys: providers.credentialKeyProvider,
-              email: `gateway-e2e-${ids.label}@example.test`, password: administratorPassword,
-              actorId: administrator.id, tenantId: scope.context.tenantId, wrongTenantId: tenant.id,
-              requestId, attemptId: facts.attempt_id, evidenceReference, billingGroupId: scope.recoveryBillingGroupId,
-              snapshot: async () => ({ facts: await readFinancialFaultFacts(scope, requestId), effects: await gatewayEffectSnapshot(observationDatabase, scope.context.tenantId) }),
+              diagnostic: (stage) => t.diagnostic(`operator_recovery_stage=${stage}`),
+              database: operatorRecoveryDatabase,
+              observation: observationDatabase,
+              origin: `http://127.0.0.1:${platformPort}`,
+              keys: providers.credentialKeyProvider,
+              email: `gateway-e2e-${ids.label}@example.test`,
+              password: administratorPassword,
+              actorId: administrator.id,
+              tenantId: scope.context.tenantId,
+              wrongTenantId: tenant.id,
+              requestId,
+              attemptId: facts.attempt_id,
+              evidenceReference,
+              billingGroupId: scope.recoveryBillingGroupId,
+              snapshot: async () => ({
+                facts: await readFinancialFaultFacts(scope, requestId),
+                effects: await gatewayEffectSnapshot(observationDatabase, scope.context.tenantId),
+              }),
               assertResolved: async () => {
                 const resolved = await readFinancialFaultFacts(scope, requestId);
-                assert.deepEqual(resolved, { ...facts, execution_state: 'failed', reconciliation_state: 'resolved', financial_status: 'released', result_state: 'failed', reservation_state: 'released' });
-                assert.deepEqual(await gatewayEffectSnapshot(observationDatabase, scope.context.tenantId), { ...after, effects: { ...after.effects, active_hold: '0' } }, 'operator resolution only releases the hold; no charge, usage, lease or dispatch is created');
+                assert.deepEqual(resolved, {
+                  ...facts,
+                  execution_state: 'failed',
+                  reconciliation_state: 'resolved',
+                  financial_status: 'released',
+                  result_state: 'failed',
+                  reservation_state: 'released',
+                });
+                assert.deepEqual(
+                  await gatewayEffectSnapshot(observationDatabase, scope.context.tenantId),
+                  { ...after, effects: { ...after.effects, active_hold: '0' } },
+                  'operator resolution only releases the hold; no charge, usage, lease or dispatch is created',
+                );
                 assert.equal(upstreamCallCount, callsBefore + 1);
                 assert.deepEqual(network.snapshot(), wire);
               },
@@ -4679,27 +4771,59 @@ test('real PostgreSQL commercial gateway E2E launches managed control-plane and 
       'all eight variants in both modes must reach every financial assertion',
     );
     const authorizationGatewayPort = await freeLocalPort(usedPorts);
-    const authorizationEnvironment = { ...gatewayEnvironment, ...listenerEnvironment('gateway', authorizationGatewayPort) };
+    const authorizationEnvironment = {
+      ...gatewayEnvironment,
+      ...listenerEnvironment('gateway', authorizationGatewayPort),
+    };
     const authorizationDeployment = parseDeploymentConfig(authorizationEnvironment);
     assert.equal(authorizationDeployment.mode, 'managed-saas');
-    if (authorizationDeployment.mode !== 'managed-saas') throw new Error('authorization gateway deployment did not parse');
+    if (authorizationDeployment.mode !== 'managed-saas')
+      throw new Error('authorization gateway deployment did not parse');
     authorizationGatewayRuntime = await startManagedSaasServer(authorizationDeployment, {
-      environment: authorizationEnvironment, installSignalHandlers: false,
-      gatewayRuntimeModuleImporter: async () => ({ createManagedSaasGatewayRuntime: async (options: ManagedSaasGatewayRuntimeModuleOptions) => ({
-        dependencies: createRuntimeDependencies(options.database), checkReady: async () => {}, close: async () => {} }) }),
-      gatewayProviderCredentialKmsImporter: async () => ({ createGatewayProviderCredentialUnsealingKms: () => ({
-        decryptDataKey: async () => Uint8Array.from(DEK), checkReady: async () => {}, close: async () => {} }) }),
+      environment: authorizationEnvironment,
+      installSignalHandlers: false,
+      gatewayRuntimeModuleImporter: async () => ({
+        createManagedSaasGatewayRuntime: async (options: ManagedSaasGatewayRuntimeModuleOptions) => ({
+          dependencies: createRuntimeDependencies(options.database),
+          checkReady: async () => {},
+          close: async () => {},
+        }),
+      }),
+      gatewayProviderCredentialKmsImporter: async () => ({
+        createGatewayProviderCredentialUnsealingKms: () => ({
+          decryptDataKey: async () => Uint8Array.from(DEK),
+          checkReady: async () => {},
+          close: async () => {},
+        }),
+      }),
     });
-    const authorizationDiagnostic = observePreparationFailures(authorizationGatewayRuntime,
-      diagnostic => t.diagnostic(`authorization_gateway_preparation ${JSON.stringify(diagnostic)}`), cleanup => t.after(cleanup), () => {});
+    const authorizationDiagnostic = observePreparationFailures(
+      authorizationGatewayRuntime,
+      (diagnostic) => t.diagnostic(`authorization_gateway_preparation ${JSON.stringify(diagnostic)}`),
+      (cleanup) => t.after(cleanup),
+      () => {},
+    );
     await proveAuthorizationRevocationHttp({
-      control: operatorRecoveryDatabase, observation: observationDatabase, administratorId: administrator.id,
-      poolId: platformPoolId, deploymentId, environmentId, publicModel, endpoint: ENDPOINT,
-      customer: platformCustomerDefinition, provider: platformProviderDefinition,
-      verifierKeyId: contractKeyId, publicKey: contractKeyPair.publicKey, privateKey: contractKeyPair.privateKey, testVectorDigest,
-      registerContext: context => authorizationContexts.push(context), upstreamCalls: () => upstreamCallCount,
-      gateways: [{ origin: `http://127.0.0.1:${gatewayPort}`, failure: preparationDiagnostic },
-        { origin: `http://127.0.0.1:${authorizationGatewayPort}`, failure: authorizationDiagnostic }],
+      control: operatorRecoveryDatabase,
+      observation: observationDatabase,
+      administratorId: administrator.id,
+      poolId: platformPoolId,
+      deploymentId,
+      environmentId,
+      publicModel,
+      endpoint: ENDPOINT,
+      customer: platformCustomerDefinition,
+      provider: platformProviderDefinition,
+      verifierKeyId: contractKeyId,
+      publicKey: contractKeyPair.publicKey,
+      privateKey: contractKeyPair.privateKey,
+      testVectorDigest,
+      registerContext: (context) => authorizationContexts.push(context),
+      upstreamCalls: () => upstreamCallCount,
+      gateways: [
+        { origin: `http://127.0.0.1:${gatewayPort}`, failure: preparationDiagnostic },
+        { origin: `http://127.0.0.1:${authorizationGatewayPort}`, failure: authorizationDiagnostic },
+      ],
       scenario: (name, work) => t.test(`authorization revocation: ${name}`, work),
     });
   } catch (error) {

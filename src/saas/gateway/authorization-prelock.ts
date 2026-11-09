@@ -10,7 +10,8 @@ import type { CreateRequestInput } from '../metering/types.js';
 export type SaasRequestAdmissionAuthenticatedKey = Pick<AuthenticatedApiKey, 'authorization'>;
 
 /** The authorization prelock needs no financial, route, payload or attempt facts. */
-export type SaasRequestAdmissionAuthorizationRequest = Pick<CreateRequestInput,
+export type SaasRequestAdmissionAuthorizationRequest = Pick<
+  CreateRequestInput,
   | 'tenantId'
   | 'projectId'
   | 'projectPolicyVersion'
@@ -272,7 +273,10 @@ export class PostgresSaasRequestAdmissionAuthorizationPrelock implements SaasReq
     }
   }
 
-  private assertSnapshotMatchesRequest(request: SaasRequestAdmissionAuthorizationRequest, authorization: ApiKeyAuthorizationSnapshot): void {
+  private assertSnapshotMatchesRequest(
+    request: SaasRequestAdmissionAuthorizationRequest,
+    authorization: ApiKeyAuthorizationSnapshot,
+  ): void {
     sameText(request.tenantId, authorization.tenantId, 'tenantId');
     sameText(request.projectId, authorization.projectId, 'projectId');
     requireVersion(request.projectPolicyVersion, 'projectPolicyVersion');
@@ -415,7 +419,11 @@ export class PostgresSaasRequestAdmissionAuthorizationPrelock implements SaasReq
     return { key: { row: key, scopes: key.model_scopes as string[] }, now: facts.now };
   }
 
-  private validateApiKeyRow(row: Row, request: SaasRequestAdmissionAuthorizationRequest, authorization: ApiKeyAuthorizationSnapshot): Row {
+  private validateApiKeyRow(
+    row: Row,
+    request: SaasRequestAdmissionAuthorizationRequest,
+    authorization: ApiKeyAuthorizationSnapshot,
+  ): Row {
     sameText(row.id, authorization.keyId, 'key.id');
     sameText(row.tenant_id, authorization.tenantId, 'key.tenant_id');
     sameText(row.project_id, authorization.projectId, 'key.project_id');

@@ -69,10 +69,7 @@ export function anthropicUsageDetailKeys(profile: ProviderUsageProfile): readonl
   return profile === null ? [] : KIMI_USAGE_DETAIL_KEYS;
 }
 
-export function validAnthropicUsageDetails(
-  profile: ProviderUsageProfile,
-  usage: Record<string, unknown>,
-): boolean {
+export function validAnthropicUsageDetails(profile: ProviderUsageProfile, usage: Record<string, unknown>): boolean {
   if (profile === null) return true;
   if (!Object.hasOwn(usage, 'output_tokens_details')) return true;
   const details = usage.output_tokens_details;

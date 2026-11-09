@@ -33,15 +33,12 @@ test('semverGte treats prereleases as older than their release and malformed inp
   assert.equal(semverGte('', CODEX_MIN_VERSION), false);
 });
 
-test('buildCanonicalIdentity returns a self-consistent default trio', () => {
+test('buildCanonicalIdentity returns the evidenced current default trio', () => {
   const identity = buildCanonicalIdentity();
+  assert.equal(CODEX_BASELINE_VERSION, '0.167.0');
   assert.equal(identity.originator, CODEX_DEFAULT_ORIGINATOR);
-  assert.equal(identity.version, CODEX_BASELINE_VERSION);
-  assert.equal(
-    identity.userAgent,
-    `${CODEX_DEFAULT_ORIGINATOR}/${CODEX_BASELINE_VERSION} (Mac OS X 10.15.7; arm64) Apple_Terminal`,
-  );
-  assert.match(identity.userAgent, /^codex_cli_rs\/0\.146\.0 \([^)]+; [^)]+\) .+$/);
+  assert.equal(identity.version, '0.167.0');
+  assert.equal(identity.userAgent, 'codex_cli_rs/0.167.0 (Mac OS X 10.15.7; arm64) Apple_Terminal');
 });
 
 test('buildCanonicalIdentity honors a valid version override but never emits below the minimum', () => {
@@ -89,20 +86,33 @@ test('updateSyncedCodexVersion stores only stable versions at or above the minim
   }
 });
 
-test('buildCanonicalIdentity resolution order: explicit override > synced slot > baseline', () => {
+test('buildCanonicalIdentity resolution order: explicit override > newer synced slot > baseline', () => {
   resetSyncedCodexVersionForTests();
   try {
-    updateSyncedCodexVersion('0.150.0');
-    // Synced slot beats the baseline for callers that pass no override.
-    assert.equal(buildCanonicalIdentity().version, '0.150.0');
-    // An explicit valid override always wins, even below the synced value.
+    updateSyncedCodexVersion('0.170.0');
+    // A synced slot newer than the baseline wins for callers with no override.
+    assert.equal(buildCanonicalIdentity().version, '0.170.0');
+    // An explicit valid override always wins, even below both synced and baseline.
     assert.equal(buildCanonicalIdentity('0.148.1').version, '0.148.1');
     // An ineligible override degrades to the synced slot, not the baseline.
-    assert.equal(buildCanonicalIdentity('0.100.0').version, '0.150.0');
-    assert.equal(buildCanonicalIdentity('garbage').version, '0.150.0');
+    assert.equal(buildCanonicalIdentity('0.100.0').version, '0.170.0');
+    assert.equal(buildCanonicalIdentity('garbage').version, '0.170.0');
     resetSyncedCodexVersionForTests();
     // With no synced slot and no override, the baseline stands.
     assert.equal(buildCanonicalIdentity().version, CODEX_BASELINE_VERSION);
+  } finally {
+    resetSyncedCodexVersionForTests();
+  }
+});
+
+test('buildCanonicalIdentity never lets a stale synced version undercut the baseline', () => {
+  resetSyncedCodexVersionForTests();
+  try {
+    assert.equal(updateSyncedCodexVersion('0.146.0'), true);
+    assert.equal(buildCanonicalIdentity().version, '0.167.0');
+    assert.equal(buildCanonicalIdentity().userAgent, 'codex_cli_rs/0.167.0 (Mac OS X 10.15.7; arm64) Apple_Terminal');
+    // The baseline floor applies only to sync; explicit override semantics stay unchanged.
+    assert.equal(buildCanonicalIdentity('0.146.0').version, '0.146.0');
   } finally {
     resetSyncedCodexVersionForTests();
   }

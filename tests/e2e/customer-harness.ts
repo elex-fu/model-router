@@ -61,7 +61,7 @@ function observeDatabase(database: SaasDatabase): SaasDatabase {
 async function postgresCommand(command: string, args: string[]) {
   // All PostgreSQL commands target the fresh cluster below. Never consume a
   // developer's configured database URL or change the service on port 5432.
-  return execute('rtk', ['proxy', command, ...args], { timeout: 30_000, maxBuffer: 2 * 1024 * 1024 });
+  return execute(command, args, { timeout: 30_000, maxBuffer: 2 * 1024 * 1024 });
 }
 
 async function freePort() {

@@ -106,6 +106,9 @@ class AdmissionFake implements SqlExecutor {
           },
         ];
       }
+    } else if (sql.includes('FROM saas_codex_trusted_bound_profiles') && sql.includes('FOR UPDATE')) {
+      const row = this.rows.get(String(values[0]));
+      rows = row && row.state === 'pending' ? [{ ...row, bounds: JSON.parse(row.bounds) }] : [];
     } else if (sql.includes('SELECT state FROM saas_codex_trusted_bound_profiles')) {
       const row = this.rows.get(String(values[0]));
       rows = row ? [{ state: row.state }] : [];
@@ -136,7 +139,7 @@ const WIRE_PROFILE = {
     model: 'gpt-5.2-codex',
     operation: 'responses',
     transport: 'http',
-    continuationMode: 'canonical-replay',
+    continuationMode: 'full',
   },
   backendRevision: 'backend-rev-1',
   evidenceVersion: 'proof-v1',
@@ -170,9 +173,13 @@ const CANONICAL_BOUNDS = {
   sizeTier: null,
 };
 
+function admissionService(fake: AdmissionFake): CodexBoundAdmissionService {
+  return new CodexBoundAdmissionService(fake, { now: () => 1000, expiryMarginMs: 100 });
+}
+
 test('submit normalizes wire forms and recomputes the digest server-side', async () => {
   const fake = new AdmissionFake();
-  const service = new CodexBoundAdmissionService(fake);
+  const service = admissionService(fake);
   const result = await service.submit(actor, WIRE_PROFILE);
   assert.equal(result.status, 'created');
   assert.equal(result.state, 'pending');
@@ -199,7 +206,7 @@ test('submit normalizes wire forms and recomputes the digest server-side', async
 
 test('duplicate submissions return the existing state without a second audit', async () => {
   const fake = new AdmissionFake();
-  const service = new CodexBoundAdmissionService(fake);
+  const service = admissionService(fake);
   const first = await service.submit(actor, WIRE_PROFILE);
   const second = await service.submit(actor, WIRE_PROFILE);
   assert.equal(second.status, 'duplicate');
@@ -211,12 +218,18 @@ test('duplicate submissions return the existing state without a second audit', a
 
 test('invalid submissions fail closed without any insert', async () => {
   const fake = new AdmissionFake();
-  const service = new CodexBoundAdmissionService(fake);
+  const service = admissionService(fake);
   const invalid = [
     { ...WIRE_PROFILE, extra: 1 },
     { ...WIRE_PROFILE, scope: { ...WIRE_PROFILE.scope, transport: 'grpc' } },
     { ...WIRE_PROFILE, scope: { ...WIRE_PROFILE.scope, continuationMode: 'lazy' } },
+    { ...WIRE_PROFILE, scope: { ...WIRE_PROFILE.scope, continuationMode: 'canonical-replay' } },
+    { ...WIRE_PROFILE, scope: { ...WIRE_PROFILE.scope, endpoint: 'https://example.invalid/responses' } },
     { ...WIRE_PROFILE, validFromMs: 2000, expiresAtMs: 1000 },
+    { ...WIRE_PROFILE, validFromMs: 1000, expiresAtMs: 1000 + 24 * 60 * 60 * 1000 + 1 },
+    { ...WIRE_PROFILE, bounds: { ...WIRE_PROFILE.bounds, cacheReadUpperBound: 101 } },
+    { ...WIRE_PROFILE, bounds: { ...WIRE_PROFILE.bounds, reasoningOutputUpperBound: 21 } },
+    { ...WIRE_PROFILE, bounds: { ...WIRE_PROFILE.bounds, feasibleInputBuckets: ['input', 'input'] } },
     { ...WIRE_PROFILE, bounds: { ...WIRE_PROFILE.bounds, cacheReadUpperBound: undefined } },
     { ...WIRE_PROFILE, bounds: { ...WIRE_PROFILE.bounds, feasibleInputBuckets: 'input' } },
     { ...WIRE_PROFILE, bounds: { ...WIRE_PROFILE.bounds, extra: 1 } },
@@ -236,9 +249,33 @@ test('invalid submissions fail closed without any insert', async () => {
   assert.deepEqual(fake.audits, []);
 });
 
+test('approve revalidates stored semantics and the remaining expiry margin', async () => {
+  const corrupted = new AdmissionFake();
+  const corruptedService = admissionService(corrupted);
+  const { digest } = await corruptedService.submit(actor, WIRE_PROFILE);
+  const pending = corrupted.rows.get(digest);
+  assert.ok(pending);
+  pending.bounds = JSON.stringify({ ...CANONICAL_BOUNDS, cacheReadUpperBound: '101' });
+  await assert.rejects(
+    () => corruptedService.approve(actor, { digest }),
+    (error: unknown) => error instanceof PlatformGovernanceError && error.code === 'GOVERNANCE_INVALID_INPUT',
+  );
+  assert.equal(corrupted.rows.get(digest)?.state, 'pending');
+  assert.deepEqual(corrupted.audits, ['codex_bound_profile.submitted']);
+
+  const expiring = new AdmissionFake();
+  await admissionService(expiring).submit(actor, WIRE_PROFILE);
+  const expiringService = new CodexBoundAdmissionService(expiring, { now: () => 1900, expiryMarginMs: 100 });
+  await assert.rejects(
+    () => expiringService.approve(actor, { digest }),
+    (error: unknown) => error instanceof PlatformGovernanceError && error.code === 'GOVERNANCE_INVALID_INPUT',
+  );
+  assert.equal(expiring.rows.get(digest)?.state, 'pending');
+});
+
 test('approval is the only path from pending to the admitted state', async () => {
   const fake = new AdmissionFake();
-  const service = new CodexBoundAdmissionService(fake);
+  const service = admissionService(fake);
   const { digest } = await service.submit(actor, WIRE_PROFILE);
 
   const approved = await service.approve(actor, { digest });
@@ -256,7 +293,7 @@ test('approval is the only path from pending to the admitted state', async () =>
 
 test('reject lands rejected without lineage; retire only withdraws approved profiles', async () => {
   const fake = new AdmissionFake();
-  const service = new CodexBoundAdmissionService(fake);
+  const service = admissionService(fake);
   const { digest } = await service.submit(actor, WIRE_PROFILE);
 
   await assert.rejects(() => service.retire(actor, { digest }), PlatformGovernanceError);
@@ -278,7 +315,7 @@ test('reject lands rejected without lineage; retire only withdraws approved prof
 
 test('unknown digests are not found and malformed digests are invalid', async () => {
   const fake = new AdmissionFake();
-  const service = new CodexBoundAdmissionService(fake);
+  const service = admissionService(fake);
   await assert.rejects(
     () => service.approve(actor, { digest: '0'.repeat(64) }),
     (error: unknown) => error instanceof PlatformGovernanceError && error.code === 'GOVERNANCE_NOT_FOUND',
@@ -292,7 +329,7 @@ test('unknown digests are not found and malformed digests are invalid', async ()
 test('actors without an operations-capable role are forbidden', async () => {
   const fake = new AdmissionFake();
   fake.assignedRoles = ['support-readonly'];
-  const service = new CodexBoundAdmissionService(fake);
+  const service = admissionService(fake);
   await assert.rejects(
     () => service.submit(actor, WIRE_PROFILE),
     (error: unknown) => error instanceof PlatformGovernanceError && error.code === 'GOVERNANCE_FORBIDDEN',
@@ -302,7 +339,7 @@ test('actors without an operations-capable role are forbidden', async () => {
 
 test('list returns the ledger with the state filter and lineage columns', async () => {
   const fake = new AdmissionFake();
-  const service = new CodexBoundAdmissionService(fake);
+  const service = admissionService(fake);
   const first = await service.submit(actor, WIRE_PROFILE);
   const second = await service.submit(actor, { ...WIRE_PROFILE, backendRevision: 'backend-rev-2' });
   await service.approve(actor, { digest: second.digest });

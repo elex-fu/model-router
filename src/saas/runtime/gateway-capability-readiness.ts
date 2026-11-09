@@ -24,7 +24,10 @@
  * ids and TLS profile ids — all bounded extension ids validated by the loader.
  */
 
-import type { CodexFinancialCatalogScope, CodexWorkflowFinancialReadiness } from './codex-workflow-financial-readiness.js';
+import type {
+  CodexFinancialCatalogScope,
+  CodexWorkflowFinancialReadiness,
+} from './codex-workflow-financial-readiness.js';
 import { declaredCodexFinancialWorkflows } from './codex-workflow-financial-readiness.js';
 import type { GatewayRuntimeModuleExtensionsV2, ProviderBundleConfiguration } from './gateway-runtime-module.js';
 import { type ProviderBundleManifest, providerBundleManifest } from './provider-bundles.js';
@@ -243,9 +246,11 @@ function projectBundle(
   const credentials = config.enabled && includes(facts.bundles.credentialProviderIds, manifest.providerId);
   if (config.enabled && !credentials) pushReason(reasonCodes, 'CREDENTIALS_NOT_PROVISIONED');
   const declaredCodexWorkflows = declaredCodexFinancialWorkflows(config.parameters?.nativeCompact === true);
-  const usageBoundAvailable = !(facts.unavailableUsageBoundProviderIds ?? []).includes(manifest.providerId) &&
-    (manifest.providerId !== 'openai-codex' || (declaredCodexWorkflows.length > 0 &&
-      declaredCodexWorkflows.every((workflow) => facts.codexWorkflowFinancialReadiness?.[workflow] === true)));
+  const usageBoundAvailable =
+    !(facts.unavailableUsageBoundProviderIds ?? []).includes(manifest.providerId) &&
+    (manifest.providerId !== 'openai-codex' ||
+      (declaredCodexWorkflows.length > 0 &&
+        declaredCodexWorkflows.every((workflow) => facts.codexWorkflowFinancialReadiness?.[workflow] === true)));
   if (config.enabled && !usageBoundAvailable) pushReason(reasonCodes, 'USAGE_BOUNDS_UNAVAILABLE');
 
   const verified = level === 'live';
@@ -359,15 +364,26 @@ export function projectGatewayCapabilityReadiness(input: GatewayCapabilityReadin
     configurationValid: fatalReasonCodes.length === 0,
     fatalReasonCodes: Object.freeze(fatalReasonCodes),
     capabilities: Object.freeze(capabilities),
-    ...(capabilities.some((capability) => capability.providerId === 'openai-codex') ? {
-      codexWorkflows: Object.freeze((['responses-http-full', 'responses-ws-full', 'responses-ws-continuation', 'responses-compact'] as const).map((workflow) => Object.freeze({
-        workflow,
-        transportAssembled: (facts.codexWorkflowTransports ?? []).includes(workflow) || (workflow === 'responses-http-full' && facts.dispatch.routedEndpointScopes.includes('codex-responses')),
-        credentialVerified: facts.bundles.credentialProviderIds.includes('openai-codex'),
-        financiallyAdmissible: facts.codexWorkflowFinancialReadiness?.[workflow] === true,
-        workflowVerified: facts.verification[`codex-workflow:${workflow}`] === 'live',
-      }))),
-    } : {}),
+    ...(capabilities.some((capability) => capability.providerId === 'openai-codex')
+      ? {
+          codexWorkflows: Object.freeze(
+            (
+              ['responses-http-full', 'responses-ws-full', 'responses-ws-continuation', 'responses-compact'] as const
+            ).map((workflow) =>
+              Object.freeze({
+                workflow,
+                transportAssembled:
+                  (facts.codexWorkflowTransports ?? []).includes(workflow) ||
+                  (workflow === 'responses-http-full' &&
+                    facts.dispatch.routedEndpointScopes.includes('codex-responses')),
+                credentialVerified: facts.bundles.credentialProviderIds.includes('openai-codex'),
+                financiallyAdmissible: facts.codexWorkflowFinancialReadiness?.[workflow] === true,
+                workflowVerified: facts.verification[`codex-workflow:${workflow}`] === 'live',
+              }),
+            ),
+          ),
+        }
+      : {}),
   });
 }
 

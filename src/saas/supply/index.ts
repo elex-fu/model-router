@@ -8,6 +8,8 @@ export {
   ProviderCredentialAccessService,
   ProviderSupplyPersistenceService,
 } from './persistence-service.js';
+export * from './platform-inference-access-admission-readiness.js';
+export * from './platform-inference-access-provisioning.js';
 export type { ProviderSupplyRepository } from './repository.js';
 export type {
   AddPlatformPoolMemberInput,
@@ -29,7 +31,3 @@ export type {
 } from './service.js';
 export { ProviderSupplyService } from './service.js';
 export type * from './types.js';
-
-export * from './platform-inference-access-provisioning.js';
-
-export * from './platform-inference-access-admission-readiness.js';

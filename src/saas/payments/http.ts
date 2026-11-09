@@ -316,7 +316,12 @@ function findRoute(path: string): PaymentRoute | undefined {
     };
   }
   const webhook = new RegExp(`^${WEBHOOK_PREFIX}/([^/]+)(?:/([^/]+))?$`).exec(path);
-  if (webhook) return { route: 'webhook', providerKey: pathIdentifier(webhook[1], 'provider'), ...(webhook[2] ? { bindingId: pathIdentifier(webhook[2], 'binding') } : {}) };
+  if (webhook)
+    return {
+      route: 'webhook',
+      providerKey: pathIdentifier(webhook[1], 'provider'),
+      ...(webhook[2] ? { bindingId: pathIdentifier(webhook[2], 'binding') } : {}),
+    };
   return undefined;
 }
 

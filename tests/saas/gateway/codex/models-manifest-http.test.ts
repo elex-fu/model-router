@@ -1,14 +1,13 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { test } from 'node:test';
-
+import { DEFAULT_CODEX_MODEL_MANIFEST } from '../../../../src/saas/gateway/codex/models-manifest.js';
 import {
   codexModelsManifestEtag,
   isCodexModelsManifestRequest,
   matchesCodexModelsManifestEtag,
   renderCodexModelsManifestResponse,
 } from '../../../../src/saas/gateway/codex/models-manifest-http.js';
-import { DEFAULT_CODEX_MODEL_MANIFEST } from '../../../../src/saas/gateway/codex/models-manifest.js';
 
 /*
  * P1-4b: the ChatGPT Codex manifest serving shape for
@@ -40,11 +39,7 @@ test('rendering maps every manifest field into the upstream snake_case shape', (
   assert.equal(sol.max_context_window, 272000);
   assert.deepEqual(sol.input_modalities, ['text', 'image']);
   assert.equal(sol.default_reasoning_level, 'low');
-  assert.deepEqual(sol.supported_reasoning_levels, [
-    { effort: 'low' },
-    { effort: 'medium' },
-    { effort: 'high' },
-  ]);
+  assert.deepEqual(sol.supported_reasoning_levels, [{ effort: 'low' }, { effort: 'medium' }, { effort: 'high' }]);
   assert.equal(sol.apply_patch_tool_type, 'freeform');
   assert.equal(sol.web_search_tool_type, 'text_and_image');
   assert.equal(sol.tool_mode, 'code_mode_only');
@@ -90,7 +85,10 @@ test('usableSlugs intersects with the manifest and preserves manifest order', ()
   ]);
   assert.ok(rendered);
   const parsed = JSON.parse(rendered.body) as { models: Array<{ slug: string }> };
-  assert.deepEqual(parsed.models.map((entry) => entry.slug), ['gpt-5.6-sol', 'gpt-5.5', 'codex-auto-review']);
+  assert.deepEqual(
+    parsed.models.map((entry) => entry.slug),
+    ['gpt-5.6-sol', 'gpt-5.5', 'codex-auto-review'],
+  );
 });
 
 test('an empty intersection returns null so the caller falls back to the plain list', () => {

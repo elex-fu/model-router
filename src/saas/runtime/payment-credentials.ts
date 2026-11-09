@@ -23,7 +23,7 @@ export function createPaymentCredentialReader(directory: string): PaymentCredent
   return Object.freeze({
     async read(name: string): Promise<Buffer> {
       if (!validPaymentCredentialName(name)) throw new PaymentDeploymentError('PAYMENT_CREDENTIAL_UNAVAILABLE');
-      let handle;
+      let handle: Awaited<ReturnType<typeof open>> | undefined;
       try {
         const root = await realpath(directory);
         // A symlinked file is rejected even when its target happens to be in the mount.
@@ -39,7 +39,10 @@ export function createPaymentCredentialReader(directory: string): PaymentCredent
           if (result.bytesRead === 0) break;
           length += result.bytesRead;
         }
-        if (length < 1 || length > 64 * 1024) { value.fill(0); throw new Error(); }
+        if (length < 1 || length > 64 * 1024) {
+          value.fill(0);
+          throw new Error();
+        }
         return value.subarray(0, length);
       } catch {
         throw new PaymentDeploymentError('PAYMENT_CREDENTIAL_UNAVAILABLE');

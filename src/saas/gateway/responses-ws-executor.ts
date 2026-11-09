@@ -1,11 +1,13 @@
-import { createCodexNativeWsSessionHandle, closeCodexNativeWsSessionHandle, codexNativeWsSession, CodexNativeWsSessionError } from './codex/native-ws-session.js';
-import { markCodexNativeWsRequest, markCodexNativeWsRemoteReference } from './codex/continuation-metadata.js';
-import { ResponsesContinuationStore } from './responses-continuation.js';
-import { normalizeResponsesHistoryConversationId, type ResponsesHistoryIdentity } from './responses-continuation-history.js';
-import type { PersistentResponsesContinuationResolver, ResolvedResponsesHistory } from './responses-continuation-resolver.js';
 import { randomUUID } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
 import { resolveClientAddress } from './client-address.js';
+import { markCodexNativeWsRemoteReference, markCodexNativeWsRequest } from './codex/continuation-metadata.js';
+import {
+  CodexNativeWsSessionError,
+  closeCodexNativeWsSessionHandle,
+  codexNativeWsSession,
+  createCodexNativeWsSessionHandle,
+} from './codex/native-ws-session.js';
 import type {
   ContentModerationPort,
   PreparedEvidenceDispatchPort,
@@ -18,6 +20,15 @@ import type {
   RequestPreparationFailureResult,
   RequestPreparationPreparedResult,
 } from './request-preparation-service.js';
+import { ResponsesContinuationStore } from './responses-continuation.js';
+import {
+  normalizeResponsesHistoryConversationId,
+  type ResponsesHistoryIdentity,
+} from './responses-continuation-history.js';
+import type {
+  PersistentResponsesContinuationResolver,
+  ResolvedResponsesHistory,
+} from './responses-continuation-resolver.js';
 import {
   type ResponsesWsEvent,
   type ResponsesWsPinnedIdentity,
@@ -208,14 +219,25 @@ function pinFromPrepared(prepared: RequestPreparationPreparedResult, model: stri
 function historyIdentity(prepared: RequestPreparationPreparedResult, conversationId: string): ResponsesHistoryIdentity {
   const evidence = prepared.evidenceInput;
   if (!evidence.providerId || !evidence.productId || !evidence.resolvedModel || !evidence.credentialId) {
-    throw new ResponsesWsRoundError('full_context_required', 'the response history identity is unavailable; resend full context', 409);
+    throw new ResponsesWsRoundError(
+      'full_context_required',
+      'the response history identity is unavailable; resend full context',
+      409,
+    );
   }
   return {
-    tenantId: evidence.tenantId, projectId: evidence.projectId, proxyKeyId: evidence.proxyKeyId,
-    conversationId, providerId: evidence.providerId, productId: evidence.productId,
-    accountId: evidence.accountId, credentialId: evidence.credentialId,
-    credentialVersion: String(evidence.credentialVersion), credentialAuthzVersion: String(evidence.credentialAuthzVersion),
-    publicModel: evidence.publicModel, resolvedModel: evidence.resolvedModel,
+    tenantId: evidence.tenantId,
+    projectId: evidence.projectId,
+    proxyKeyId: evidence.proxyKeyId,
+    conversationId,
+    providerId: evidence.providerId,
+    productId: evidence.productId,
+    accountId: evidence.accountId,
+    credentialId: evidence.credentialId,
+    credentialVersion: String(evidence.credentialVersion),
+    credentialAuthzVersion: String(evidence.credentialAuthzVersion),
+    publicModel: evidence.publicModel,
+    resolvedModel: evidence.resolvedModel,
   };
 }
 
@@ -238,7 +260,9 @@ export function createResponsesWsRoundExecutor(options: ResponsesWsExecutorOptio
   const rawKey = responsesWsProxyKey(options.request);
   const continuations = new ResponsesContinuationStore(options.maxBodyBytes);
   const nativeSession = createCodexNativeWsSessionHandle();
-  options.request.socket.once?.('close', () => { void closeCodexNativeWsSessionHandle(nativeSession); });
+  options.request.socket.once?.('close', () => {
+    void closeCodexNativeWsSessionHandle(nativeSession);
+  });
   const sessionId = `responses-ws:${randomUUID()}`;
   const audit = {
     entryPoint: options.entryPoint,
@@ -257,7 +281,10 @@ export function createResponsesWsRoundExecutor(options: ResponsesWsExecutorOptio
           throw new ResponsesWsRoundError('REQUEST_CANCELLED', 'the request was cancelled', 400);
         const caller = rawKey === null ? null : await options.authenticator.authenticate(rawKey).catch(() => null);
         if (!caller) throw new ResponsesWsRoundError('UNAUTHENTICATED', 'the proxy credential is unavailable', 401);
-        const conversationId = normalizeResponsesHistoryConversationId(options.request.headers.conversation_id, input.body.conversation_id);
+        const conversationId = normalizeResponsesHistoryConversationId(
+          options.request.headers.conversation_id,
+          input.body.conversation_id,
+        );
         const originalBody: Record<string, unknown> = {
           ...input.body,
           model: input.body.model ?? input.pinned?.publicModel,
@@ -266,18 +293,51 @@ export function createResponsesWsRoundExecutor(options: ResponsesWsExecutorOptio
         delete originalBody.conversation_id;
         const previousId = originalBody.previous_response_id;
         if (previousId !== undefined && previousId !== null && !conversationId) {
-          throw new ResponsesWsRoundError('full_context_required', 'a stable conversation_id is required to continue a response', 409);
+          throw new ResponsesWsRoundError(
+            'full_context_required',
+            'a stable conversation_id is required to continue a response',
+            409,
+          );
         }
         let resolvedHistory: ResolvedResponsesHistory | null = null;
         let canonicalBody: Record<string, unknown>;
-        if (options.continuationHistoryResolver && conversationId && typeof previousId === 'string' && previousId !== '') {
+        if (
+          options.continuationHistoryResolver &&
+          conversationId &&
+          typeof previousId === 'string' &&
+          previousId !== ''
+        ) {
           // Durable lookup is authoritative even on a cache hit: TTL/deletion must take effect on a long-lived socket.
-          resolvedHistory = await options.continuationHistoryResolver.resolve({ tenantId: caller.metadata.tenantId, projectId: caller.metadata.projectId, proxyKeyId: caller.metadata.id, conversationId, responseId: previousId }, originalBody);
+          resolvedHistory = await options.continuationHistoryResolver.resolve(
+            {
+              tenantId: caller.metadata.tenantId,
+              projectId: caller.metadata.projectId,
+              proxyKeyId: caller.metadata.id,
+              conversationId,
+              responseId: previousId,
+            },
+            originalBody,
+          );
           canonicalBody = resolvedHistory.body;
-        } else canonicalBody = continuations.resolve(originalBody, { tenantId: caller.metadata.tenantId, projectId: caller.metadata.projectId, proxyKeyId: caller.metadata.id, conversationId, pinned: input.pinned });
-        const canUseNativeReference = typeof input.body.previous_response_id === 'string' &&
-          input.pinned?.providerId === 'openai-codex' && codexNativeWsSession(nativeSession).hasCompleted(input.body.previous_response_id);
-        const body: Record<string, unknown> = canUseNativeReference ? markCodexNativeWsRemoteReference({ ...canonicalBody, input: originalBody.input, previous_response_id: previousId }) : canonicalBody;
+        } else
+          canonicalBody = continuations.resolve(originalBody, {
+            tenantId: caller.metadata.tenantId,
+            projectId: caller.metadata.projectId,
+            proxyKeyId: caller.metadata.id,
+            conversationId,
+            pinned: input.pinned,
+          });
+        const canUseNativeReference =
+          typeof input.body.previous_response_id === 'string' &&
+          input.pinned?.providerId === 'openai-codex' &&
+          codexNativeWsSession(nativeSession).hasCompleted(input.body.previous_response_id);
+        const body: Record<string, unknown> = canUseNativeReference
+          ? markCodexNativeWsRemoteReference({
+              ...canonicalBody,
+              input: originalBody.input,
+              previous_response_id: previousId,
+            })
+          : canonicalBody;
         markCodexNativeWsRequest(body);
         const model = body.model;
         if (typeof model !== 'string' || model.trim() === '' || model.trim() !== model || model.length > 512) {
@@ -314,7 +374,9 @@ export function createResponsesWsRoundExecutor(options: ResponsesWsExecutorOptio
           clientAddress,
           scheduling: {
             sessionId,
-            ...(typeof input.body.previous_response_id === 'string' ? { previousResponseId: input.body.previous_response_id } : {}),
+            ...(typeof input.body.previous_response_id === 'string'
+              ? { previousResponseId: input.body.previous_response_id }
+              : {}),
           },
         });
         if (prepared.outcome !== 'prepared') throw preparationFailure(prepared);
@@ -328,8 +390,15 @@ export function createResponsesWsRoundExecutor(options: ResponsesWsExecutorOptio
           upstreamSessionId: input.pinned?.upstreamSessionId ?? null,
         };
         if (resolvedHistory && conversationId && options.continuationHistoryResolver) {
-          try { options.continuationHistoryResolver.assertPreparedIdentity(resolvedHistory, historyIdentity(prepared, conversationId)); }
-          catch (error) { await compensate('dispatch_failed'); throw error; }
+          try {
+            options.continuationHistoryResolver.assertPreparedIdentity(
+              resolvedHistory,
+              historyIdentity(prepared, conversationId),
+            );
+          } catch (error) {
+            await compensate('dispatch_failed');
+            throw error;
+          }
         }
         if (
           prepared.requestId !== input.requestId ||
@@ -371,7 +440,12 @@ export function createResponsesWsRoundExecutor(options: ResponsesWsExecutorOptio
           });
           if (input.cancelSignal.aborted) return cancelled();
           if (dispatched.kind !== 'sent') {
-            if (dispatched.error instanceof CodexNativeWsSessionError && dispatched.error.code !== 'native_ws_busy') throw new ResponsesWsRoundError('full_context_required', 'the native response context changed; resend full context on a new connection', 409);
+            if (dispatched.error instanceof CodexNativeWsSessionError && dispatched.error.code !== 'native_ws_busy')
+              throw new ResponsesWsRoundError(
+                'full_context_required',
+                'the native response context changed; resend full context on a new connection',
+                409,
+              );
             throw new ResponsesWsRoundError('DISPATCH_OUTCOME_UNKNOWN', 'the response outcome is unknown', 502);
           }
           const status = dispatched.transport.resultHttpStatus ?? sink.status;
@@ -385,10 +459,23 @@ export function createResponsesWsRoundExecutor(options: ResponsesWsExecutorOptio
             );
           if (dispatched.settlementOutcome === 'settled' && conversationId) {
             const response = record(sink.terminal.response) ? sink.terminal.response : null;
-            if (response && typeof response.id === 'string' && Array.isArray(response.output) && ['response.completed', 'response.incomplete'].includes(sink.terminal.type)) {
+            if (
+              response &&
+              typeof response.id === 'string' &&
+              Array.isArray(response.output) &&
+              ['response.completed', 'response.incomplete'].includes(sink.terminal.type)
+            ) {
               if (options.continuationHistoryResolver) {
                 // Persistence failure does not undo already-settled inference. The reference remains unavailable.
-                try { await options.continuationHistoryResolver.remember({ identity: historyIdentity(prepared, conversationId), responseId: response.id, request: canonicalBody, output: response.output, operation: 'responses' }); } catch {}
+                try {
+                  await options.continuationHistoryResolver.remember({
+                    identity: historyIdentity(prepared, conversationId),
+                    responseId: response.id,
+                    request: canonicalBody,
+                    output: response.output,
+                    operation: 'responses',
+                  });
+                } catch {}
                 continuations.forget(response.id);
               } else continuations.remember(canonicalBody, sink.terminal, pinned, conversationId);
             }

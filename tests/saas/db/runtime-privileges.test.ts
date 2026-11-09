@@ -64,18 +64,37 @@ test('control-plane runtime permits exact group hold release columns without gra
   const reservations = 'saas_billing_group_spend_reservations';
   const counters = 'saas_billing_group_spend_counters';
   const expected = [
-    ...['tenant_id', 'request_id', 'billing_group_id', 'window_kind', 'window_start', 'amount_minor_units', 'charge_currency', 'state'].map(column => `${reservations}\t${column}\tSELECT`),
-    ...['state', 'settled_amount_minor_units', 'updated_at'].map(column => `${reservations}\t${column}\tUPDATE`),
-    ...['billing_group_id', 'window_kind', 'window_start', 'charge_outstanding_reserved'].map(column => `${counters}\t${column}\tSELECT`),
-    ...['charge_outstanding_reserved', 'updated_at'].map(column => `${counters}\t${column}\tUPDATE`),
+    ...[
+      'tenant_id',
+      'request_id',
+      'billing_group_id',
+      'window_kind',
+      'window_start',
+      'amount_minor_units',
+      'charge_currency',
+      'state',
+    ].map((column) => `${reservations}\t${column}\tSELECT`),
+    ...['state', 'settled_amount_minor_units', 'updated_at'].map((column) => `${reservations}\t${column}\tUPDATE`),
+    ...['billing_group_id', 'window_kind', 'window_start', 'charge_outstanding_reserved'].map(
+      (column) => `${counters}\t${column}\tSELECT`,
+    ),
+    ...['charge_outstanding_reserved', 'updated_at'].map((column) => `${counters}\t${column}\tUPDATE`),
   ].sort();
-  const actual = SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS.filter(([table]) => table === reservations || table === counters);
-  assert.deepEqual(actual.map(grant => grant.join('\t')).sort(), expected);
-  assert.equal(SAAS_CONTROL_PLANE_RUNTIME_TABLE_GRANTS.some(([table]) => table === reservations || table === counters), false);
+  const actual = SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS.filter(
+    ([table]) => table === reservations || table === counters,
+  );
+  assert.deepEqual(actual.map((grant) => grant.join('\t')).sort(), expected);
+  assert.equal(
+    SAAS_CONTROL_PLANE_RUNTIME_TABLE_GRANTS.some(([table]) => table === reservations || table === counters),
+    false,
+  );
   for (const [table, column, privilege] of actual) {
     assert.ok(privilege === 'SELECT' || privilege === 'UPDATE');
     assert.notEqual(column, 'charge_settled');
-    assert.ok(SAAS_RUNTIME_PRIVILEGE_PROBE_SQL.includes(`('${table}', '${column}', '${privilege}')`), 'startup probe includes every release grant');
+    assert.ok(
+      SAAS_RUNTIME_PRIVILEGE_PROBE_SQL.includes(`('${table}', '${column}', '${privilege}')`),
+      'startup probe includes every release grant',
+    );
   }
 });
 
@@ -83,14 +102,23 @@ test('gateway group-spend UPDATE grants match reserve upsert and normal release/
   const counters = 'saas_billing_group_spend_counters';
   const reservations = 'saas_billing_group_spend_reservations';
   const expected = [
-    ...['charge_outstanding_reserved', 'charge_settled', 'charge_currency', 'updated_at'].map(column => `${counters}\t${column}\tUPDATE`),
-    ...['settled_amount_minor_units', 'state', 'updated_at'].map(column => `${reservations}\t${column}\tUPDATE`),
+    ...['charge_outstanding_reserved', 'charge_settled', 'charge_currency', 'updated_at'].map(
+      (column) => `${counters}\t${column}\tUPDATE`,
+    ),
+    ...['settled_amount_minor_units', 'state', 'updated_at'].map((column) => `${reservations}\t${column}\tUPDATE`),
   ].sort();
-  const actual = SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS.filter(([table, , privilege]) => [counters, reservations].includes(table) && privilege === 'UPDATE');
-  assert.deepEqual(actual.map(grant => grant.join('\t')).sort(), expected);
+  const actual = SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS.filter(
+    ([table, , privilege]) => [counters, reservations].includes(table) && privilege === 'UPDATE',
+  );
+  assert.deepEqual(actual.map((grant) => grant.join('\t')).sort(), expected);
   for (const [table, column, privilege] of actual) {
     assert.ok(SAAS_GATEWAY_RUNTIME_PRIVILEGE_PROBE_SQL.includes(`('${table}', '${column}', '${privilege}')`));
-    assert.equal(['tenant_id', 'request_id', 'billing_group_id', 'window_kind', 'window_start', 'amount_minor_units'].includes(column), false);
+    assert.equal(
+      ['tenant_id', 'request_id', 'billing_group_id', 'window_kind', 'window_start', 'amount_minor_units'].includes(
+        column,
+      ),
+      false,
+    );
   }
 });
 
@@ -726,11 +754,13 @@ test('role template mirrors the control-plane manifest and grants no broad table
     sql,
     /GRANT\s+(?:USAGE|SELECT|UPDATE)\s+ON\s+(?:ALL\s+)?SEQUENCES?[^;]*TO\s+model_router_saas_control_plane\b/is,
   );
-  const functionGrants=[...sql.matchAll(/GRANT\s+EXECUTE\s+ON\s+FUNCTION\s+([^;]+?)\s+TO\s+model_router_saas_control_plane\s*;/gis)].map(match=>match[1].trim());
-  assert.deepEqual(functionGrants,['model_router_saas.saas_metering_valid_dimensions(text[])']);
-  assert.doesNotMatch(sql,/GRANT\s+EXECUTE\s+ON\s+ALL\s+FUNCTIONS[^;]*TO\s+model_router_saas_control_plane\b/is);
-  assert.match(sql,/routine\.provolatile = 'i' AND NOT routine\.prosecdef/);
-  assert.match(SAAS_RUNTIME_PRIVILEGE_PROBE_SQL,/validator\.provolatile = 'i' AND NOT validator\.prosecdef/);
+  const functionGrants = [
+    ...sql.matchAll(/GRANT\s+EXECUTE\s+ON\s+FUNCTION\s+([^;]+?)\s+TO\s+model_router_saas_control_plane\s*;/gis),
+  ].map((match) => match[1].trim());
+  assert.deepEqual(functionGrants, ['model_router_saas.saas_metering_valid_dimensions(text[])']);
+  assert.doesNotMatch(sql, /GRANT\s+EXECUTE\s+ON\s+ALL\s+FUNCTIONS[^;]*TO\s+model_router_saas_control_plane\b/is);
+  assert.match(sql, /routine\.provolatile = 'i' AND NOT routine\.prosecdef/);
+  assert.match(SAAS_RUNTIME_PRIVILEGE_PROBE_SQL, /validator\.provolatile = 'i' AND NOT validator\.prosecdef/);
   // Bound the assertion to one SQL statement: an earlier comment mentions
   // ALTER DEFAULT PRIVILEGES and must not capture a later explicit pure-validator grant.
   assert.doesNotMatch(sql, /ALTER DEFAULT PRIVILEGES\b[^;]*\bGRANT\b[^;]*TO\s+model_router_saas_control_plane\b/is);

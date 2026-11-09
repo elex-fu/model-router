@@ -1349,8 +1349,13 @@ export class ByokServicePlanService implements ByokPlanEntitlementResolver {
     }
   }
 
-  async createOrder(context: TenantContext, input: CreateServicePlanOrderInput,
-    paymentAdmission?: (executor: SqlExecutor, input: { readonly orderId: string; readonly currency: string }) => Promise<{ readonly bindingId: string; readonly providerKey: string; readonly merchantId: string }>,
+  async createOrder(
+    context: TenantContext,
+    input: CreateServicePlanOrderInput,
+    paymentAdmission?: (
+      executor: SqlExecutor,
+      input: { readonly orderId: string; readonly currency: string },
+    ) => Promise<{ readonly bindingId: string; readonly providerKey: string; readonly merchantId: string }>,
   ): Promise<ServicePlanOrderRecord> {
     assertContext(context, true);
     const planVersionId = id(input?.planVersionId);
@@ -1363,7 +1368,10 @@ export class ByokServicePlanService implements ByokPlanEntitlementResolver {
 
     try {
       return await this.transaction(async (executor) => {
-        if (paymentAdmission) await executor.query(`SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))`, [JSON.stringify(['payment_service_plan_order', context.tenantId, clientRequestId])]);
+        if (paymentAdmission)
+          await executor.query(`SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))`, [
+            JSON.stringify(['payment_service_plan_order', context.tenantId, clientRequestId]),
+          ]);
         const existing = await this.findOrderByClientRequest(executor, context.tenantId, clientRequestId, true);
         if (existing) {
           const mapped = mapOrder(existing.order, existing.snapshot);
@@ -1410,7 +1418,9 @@ export class ByokServicePlanService implements ByokPlanEntitlementResolver {
           termDays: planVersion.termDays,
           policyVersion: planVersion.policyVersion,
         });
-        const payment = paymentAdmission ? await paymentAdmission(executor, { orderId, currency: planVersion.currency }) : null;
+        const payment = paymentAdmission
+          ? await paymentAdmission(executor, { orderId, currency: planVersion.currency })
+          : null;
         const orderResult = await this.query<OrderRow>(
           executor,
           `INSERT INTO saas_service_plan_orders

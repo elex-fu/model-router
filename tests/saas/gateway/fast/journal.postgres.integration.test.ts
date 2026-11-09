@@ -3812,8 +3812,7 @@ test('fast money journal real PostgreSQL: atomic reserve, durable completion, ex
       // far above cap - allocated = 10M. The unfixed journal would try to move
       // min(wallet free, 640M) = 640M of backing and fail every commit.
       const restart = new PostgresFastGatewayJournal(gateway, { allocationOwner: owner });
-      const cold = intentFixture(tenantId, owner, priceFixture('5000000'));
-      cold.allocationTargetConcurrency = 64;
+      const cold = { ...intentFixture(tenantId, owner, priceFixture('5000000')), allocationTargetConcurrency: 64 };
       const created = await restart.reserveIntent(cold);
       assert.equal(created.kind, 'created');
       const firstBudget = await budget();
@@ -3825,8 +3824,10 @@ test('fast money journal real PostgreSQL: atomic reserve, durable completion, ex
 
       // Further replenishes converge to a no-op instead of throwing 23514,
       // and remaining headroom still serves new reserves.
-      const secondInput = intentFixture(tenantId, owner, priceFixture('5000000'));
-      secondInput.allocationTargetConcurrency = 64;
+      const secondInput = {
+        ...intentFixture(tenantId, owner, priceFixture('5000000')),
+        allocationTargetConcurrency: 64,
+      };
       const second = await restart.reserveIntent(secondInput);
       assert.equal(second.kind, 'created');
       await restart.replenish(tenantId, 'USD');

@@ -324,7 +324,7 @@ export type VertexSaRefreshOutcome =
  *
  * - `refreshNext(rotator)`: the worker entry — one due credential per call
  *   (a deployment loop polls it exactly like the 094 worker's refreshNext);
- * - `resolveAccessToken(ref, useToken)`: the gateway hot path — reads the
+ * - `resolveAccessToken(ref, consumeToken)`: the gateway hot path — reads the
  *   sealed envelope, returns the fresh access token through the callback,
  *   and runs the same claim cycle when the stored token is stale (losing
  *   the SKIP LOCKED lease means another instance is mid-exchange: wait
@@ -470,7 +470,7 @@ export class PostgresVertexSaTokenRefresher {
       readonly accountId: string;
       readonly credentialId: string;
     },
-    useToken: (credential: {
+    consumeToken: (credential: {
       readonly accessToken: string;
       readonly projectId: string;
       readonly location: string | null;
@@ -481,11 +481,11 @@ export class PostgresVertexSaTokenRefresher {
     const scope = VERTEX_OWNER_SCOPES[ref.ownerKind];
     const read = await this.readSealedMaterial(scope, ref);
     if (read !== null && read.expiresAtMs !== null && read.expiresAtMs - VERTEX_TOKEN_CACHE_SKEW_MS > Date.now()) {
-      return useToken(read);
+      return consumeToken(read);
     }
     // Stale (or never exchanged): run the claim cycle for this credential.
     const forced = await this.forceRefresh(scope, ref, rotator);
-    if (forced !== null) return useToken(forced);
+    if (forced !== null) return consumeToken(forced);
     // Lost the lease — another instance is mid-exchange. Wait one lock
     // interval and re-read (sub2api vertexLockWaitTime semantics).
     await new Promise((resolve) => setTimeout(resolve, VERTEX_SA_LOCK_WAIT_MS));
@@ -495,7 +495,7 @@ export class PostgresVertexSaTokenRefresher {
       reread.expiresAtMs !== null &&
       reread.expiresAtMs - VERTEX_TOKEN_CACHE_SKEW_MS > Date.now()
     ) {
-      return useToken(reread);
+      return consumeToken(reread);
     }
     throw new VertexSaTokenError('CREDENTIAL_UNAVAILABLE', 'the vertex access token is not fresh');
   }

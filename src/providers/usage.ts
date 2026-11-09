@@ -11,11 +11,12 @@ const token = (value: unknown): number | undefined =>
   typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
 
 export function normalizeUsage(protocol: Protocol, body: any): NormalizedUsage {
-  if (protocol === 'gemini') return {
-    inputTokens: token(body?.usageMetadata?.promptTokenCount),
-    outputTokens: token(body?.usageMetadata?.candidatesTokenCount),
-    cacheReadTokens: token(body?.usageMetadata?.cachedContentTokenCount),
-  };
+  if (protocol === 'gemini')
+    return {
+      inputTokens: token(body?.usageMetadata?.promptTokenCount),
+      outputTokens: token(body?.usageMetadata?.candidatesTokenCount),
+      cacheReadTokens: token(body?.usageMetadata?.cachedContentTokenCount),
+    };
   const u = body?.usage;
   if (!u || typeof u !== 'object') return {};
   if (protocol === 'anthropic') {

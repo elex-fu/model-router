@@ -4,7 +4,6 @@ import type { LookupOptions } from 'node:dns';
 import { test } from 'node:test';
 import type { Dispatcher, HeadersInit } from 'undici';
 import { Agent } from 'undici';
-import { RequestDiagnosticTrace, withRequestDiagnosticTrace } from '../../../src/saas/gateway/request-diagnostic-trace.js';
 import type { PreparedEvidenceTransportRequest } from '../../../src/saas/gateway/prepared-evidence-dispatch-service.js';
 import type { PreparedRequestEvidenceRecord } from '../../../src/saas/gateway/prepared-request-evidence-service.js';
 import {
@@ -20,6 +19,10 @@ import {
   ProviderHttpTransport,
   ProviderHttpTransportError,
 } from '../../../src/saas/gateway/provider-http-transport.js';
+import {
+  RequestDiagnosticTrace,
+  withRequestDiagnosticTrace,
+} from '../../../src/saas/gateway/request-diagnostic-trace.js';
 
 const payload = new Uint8Array([0, 1, 2, 255, 10, 13]);
 const payloadSha256 = createHash('sha256').update(payload).digest('hex');
@@ -36,9 +39,12 @@ const fakeConnectorFactory: ProviderHttpPinnedConnectorFactory = () => ({
 test('request diagnostics record body byte and EOF separately from financial settlement', async () => {
   const trace = new RequestDiagnosticTrace();
   await withRequestDiagnosticTrace(trace, async () => {
-    const response = await transport(async () => new Response(streamFromChunks([encoder.encode('x')]), {
-      headers: { 'content-type': 'text/plain' },
-    })).send(request());
+    const response = await transport(
+      async () =>
+        new Response(streamFromChunks([encoder.encode('x')]), {
+          headers: { 'content-type': 'text/plain' },
+        }),
+    ).send(request());
     assert.ok(response.body);
     await drain(response.body);
   });
@@ -53,9 +59,17 @@ test('request diagnostics record body byte and EOF separately from financial set
 test('request diagnostics do not infer provider EOF from body cancellation', async () => {
   const trace = new RequestDiagnosticTrace();
   await withRequestDiagnosticTrace(trace, async () => {
-    const response = await transport(async () => new Response(new ReadableStream<Uint8Array>({
-      pull(controller) { controller.enqueue(encoder.encode('x')); },
-    }), { headers: { 'content-type': 'text/plain' } })).send(request());
+    const response = await transport(
+      async () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            pull(controller) {
+              controller.enqueue(encoder.encode('x'));
+            },
+          }),
+          { headers: { 'content-type': 'text/plain' } },
+        ),
+    ).send(request());
     assert.ok(response.body);
     const reader = response.body.getReader();
     await reader.read();
@@ -118,8 +132,8 @@ function transport(
     resolveAddresses: async () => [TEST_ADDRESS],
     createConnector: fakeConnectorFactory,
     resolveDispatchProfile: async () => ({ url: 'https://provider.example/v1/dispatch' }),
-    resolveCredential: async (_input, useCredential) =>
-      useCredential({ headerName: 'authorization', value: 'Bearer transient' }),
+    resolveCredential: async (_input, withHeader) =>
+      withHeader({ headerName: 'authorization', value: 'Bearer transient' }),
     ...overrides,
   });
 }
@@ -241,8 +255,7 @@ test('generic transport passes credential header values through without choosing
             return new Response(null, { status: 204 });
           },
           {
-            resolveCredential: async (_input, useCredential) =>
-              useCredential({ headerName: scenario.headerName, value }),
+            resolveCredential: async (_input, withHeader) => withHeader({ headerName: scenario.headerName, value }),
           },
         );
         try {
@@ -835,9 +848,9 @@ test('fails closed for private, special-use, and mixed DNS answers before creden
           destroy: async () => {},
         };
       },
-      resolveCredential: async (_input, useCredential) => {
+      resolveCredential: async (_input, withHeader) => {
         credentialCalls += 1;
-        return useCredential({ headerName: 'authorization', value: 'Bearer transient' });
+        return withHeader({ headerName: 'authorization', value: 'Bearer transient' });
       },
     });
     await assert.rejects(
@@ -1030,11 +1043,11 @@ test('uses manual redirect handling and rejects every 3xx response', async () =>
 
 test('requires a server-side credential resolver and never exposes raw credential material in the result', async () => {
   let callbackCalls = 0;
-  const credentialResolver: ProviderHttpCredentialResolver = async (_input, useCredential) => {
+  const credentialResolver: ProviderHttpCredentialResolver = async (_input, withHeader) => {
     callbackCalls += 1;
     const raw = Buffer.from('Bearer only-during-callback', 'utf8');
     try {
-      return await useCredential({ headerName: 'authorization', value: raw });
+      return await withHeader({ headerName: 'authorization', value: raw });
     } finally {
       raw.fill(0);
     }
@@ -1108,8 +1121,8 @@ test('does not permit a resolver to inject arbitrary request headers', async () 
   };
   await assert.rejects(
     transport(fakeFetch, {
-      resolveCredential: async (_input, useCredential) =>
-        useCredential({ headerName: 'x-forwarded-for', value: '127.0.0.1' }),
+      resolveCredential: async (_input, withHeader) =>
+        withHeader({ headerName: 'x-forwarded-for', value: '127.0.0.1' }),
     }).send(request()),
     (error: unknown) => error instanceof ProviderHttpTransportError && error.code === 'CREDENTIAL_INVALID',
   );

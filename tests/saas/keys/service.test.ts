@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { test } from 'node:test';
+import { saasAdvisoryKey } from '../../../src/saas/db/advisory-lock-keys.js';
 import type { SaasDatabase, SqlExecutor, SqlResult } from '../../../src/saas/db/types.js';
 import {
   CUSTOMER_KEY_MUTATION_CURRENT_SQL,
   CUSTOMER_KEY_MUTATION_ISSUE_SQL,
   type CustomerKeyMutationSessionHandle,
 } from '../../../src/saas/identity/customer-key-mutation-session.js';
-import { saasAdvisoryKey } from '../../../src/saas/db/advisory-lock-keys.js';
 import { revalidateCustomerKeyMutationSession, SaasIdentityService } from '../../../src/saas/identity/service.js';
 import type { TenantContext } from '../../../src/saas/identity/types.js';
 import { KeyService } from '../../../src/saas/keys/service.js';

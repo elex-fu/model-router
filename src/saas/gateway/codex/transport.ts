@@ -260,7 +260,10 @@ export class ResponsesUsageWatcher {
       this.acceptBlock(block);
     }
     // Bound the buffer so a malformed stream cannot grow it unbounded.
-    if (Buffer.byteLength(this.buffer, 'utf8') > 1_048_576) { this.buffer = ''; this.invalid = true; }
+    if (Buffer.byteLength(this.buffer, 'utf8') > 1_048_576) {
+      this.buffer = '';
+      this.invalid = true;
+    }
   }
 
   private acceptBlock(block: string): void {
@@ -279,7 +282,10 @@ export class ResponsesUsageWatcher {
       this.invalid = true;
       return;
     }
-    if (isRecord(parsed) && ['response.completed', 'response.incomplete', 'response.failed'].includes(String(parsed.type))) {
+    if (
+      isRecord(parsed) &&
+      ['response.completed', 'response.incomplete', 'response.failed'].includes(String(parsed.type))
+    ) {
       if (this.terminalSeen) this.invalid = true;
       this.terminalSeen = true;
       const response = isRecord(parsed.response) ? parsed.response : null;
@@ -592,7 +598,9 @@ export class CodexHttpTransport {
       headers: responseHeaders,
       body: relay.stream,
       usage: relay.usage,
-      get usageCompleteness(): UsageEvidenceCompleteness { return watcher.completeness; },
+      get usageCompleteness(): UsageEvidenceCompleteness {
+        return watcher.completeness;
+      },
       // Lazy: the watcher's tier is only complete after the drain finished.
       get serviceTier(): string | null {
         return watcher.serviceTier;
@@ -793,7 +801,11 @@ export class CodexPreparedEvidenceTransport implements PreparedEvidenceTransport
           serviceTier: { requested: null, observed: result.serviceTier },
           model: evidence.resolvedModel ?? null,
           operation: evidence.providerOperation ?? null,
-          completeness: result.usageCompleteness ?? (observedUsage === null || codexUsageToObservedUsage(observedUsage) === null ? 'incomplete-missing' : 'complete'),
+          completeness:
+            result.usageCompleteness ??
+            (observedUsage === null || codexUsageToObservedUsage(observedUsage) === null
+              ? 'incomplete-missing'
+              : 'complete'),
           adapterVersion: evidence.payloadCompilerVersion ?? null,
         });
       },

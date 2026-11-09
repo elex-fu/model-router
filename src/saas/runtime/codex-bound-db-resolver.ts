@@ -1,5 +1,6 @@
 import type { SaasDatabase } from '../db/types.js';
 import type { PreparedRequestUsageEnvelope } from '../gateway/prepared-request-evidence-service.js';
+import { validateCodexTrustedBoundProfile } from './codex-trusted-bound-profile-validation.js';
 import {
   type CodexTrustedBoundProfile,
   type CodexTrustedBoundProfileResolver,
@@ -123,7 +124,12 @@ export async function createDbCodexTrustedBoundProfileResolver(
             };
       // The digest is recomputed from the stored canonical form: any drift
       // between the recorded admission and the row being read fails closed.
-      if (profile !== null && typeof row.digest === 'string' && codexTrustedProfileDigest(profile) === row.digest) {
+      if (
+        profile !== null &&
+        validateCodexTrustedBoundProfile(profile).ok &&
+        typeof row.digest === 'string' &&
+        codexTrustedProfileDigest(profile) === row.digest
+      ) {
         profiles.push(profile);
       }
     }

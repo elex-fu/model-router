@@ -63,19 +63,41 @@ test('manifest control-plane views encode the same column grants in both mirrors
 test('control-plane group-spend grants permit only releasing existing holds in both generated views', () => {
   const tables = ['saas_billing_group_spend_reservations', 'saas_billing_group_spend_counters'];
   const expected = [
-    ...['tenant_id', 'request_id', 'billing_group_id', 'window_kind', 'window_start', 'amount_minor_units', 'charge_currency', 'state'].map(column => toGrant(tables[0]!, column, 'SELECT')),
-    ...['state', 'settled_amount_minor_units', 'updated_at'].map(column => toGrant(tables[0]!, column, 'UPDATE')),
-    ...['billing_group_id', 'window_kind', 'window_start', 'charge_outstanding_reserved'].map(column => toGrant(tables[1]!, column, 'SELECT')),
-    ...['charge_outstanding_reserved', 'updated_at'].map(column => toGrant(tables[1]!, column, 'UPDATE')),
+    ...[
+      'tenant_id',
+      'request_id',
+      'billing_group_id',
+      'window_kind',
+      'window_start',
+      'amount_minor_units',
+      'charge_currency',
+      'state',
+    ].map((column) => toGrant(tables[0]!, column, 'SELECT')),
+    ...['state', 'settled_amount_minor_units', 'updated_at'].map((column) => toGrant(tables[0]!, column, 'UPDATE')),
+    ...['billing_group_id', 'window_kind', 'window_start', 'charge_outstanding_reserved'].map((column) =>
+      toGrant(tables[1]!, column, 'SELECT'),
+    ),
+    ...['charge_outstanding_reserved', 'updated_at'].map((column) => toGrant(tables[1]!, column, 'UPDATE')),
   ];
   for (const view of [MANIFEST_CONTROL_PLANE_COLUMN_GROUPS, MANIFEST_CONTROL_PLANE_COLUMN_SQL_ROWS]) {
-    const grants = view.filter(group => tables.includes(group.table)).flatMap(group => group.columns.map(column => toGrant(group.table, column, group.privilege)));
+    const grants = view
+      .filter((group) => tables.includes(group.table))
+      .flatMap((group) => group.columns.map((column) => toGrant(group.table, column, group.privilege)));
     assert.deepEqual(sorted(grants), sorted(expected));
-    assert.equal(grants.some(grant => grant.endsWith(' INSERT') || grant.endsWith(' DELETE')), false);
+    assert.equal(
+      grants.some((grant) => grant.endsWith(' INSERT') || grant.endsWith(' DELETE')),
+      false,
+    );
     assert.equal(grants.includes(toGrant(tables[1]!, 'charge_settled', 'UPDATE')), false);
   }
-  assert.equal(MANIFEST_CONTROL_PLANE_TABLE_GRANTS.some(grant => tables.includes(grant.table)), false);
-  assert.equal(MANIFEST_CONTROL_PLANE_TABLE_SQL_ROWS.some(grant => tables.includes(grant.table)), false);
+  assert.equal(
+    MANIFEST_CONTROL_PLANE_TABLE_GRANTS.some((grant) => tables.includes(grant.table)),
+    false,
+  );
+  assert.equal(
+    MANIFEST_CONTROL_PLANE_TABLE_SQL_ROWS.some((grant) => tables.includes(grant.table)),
+    false,
+  );
 });
 
 test('manifest gateway views encode the same read tables and column grants in both mirrors', () => {
@@ -96,15 +118,27 @@ test('gateway group-spend updates cover reserve upsert and release timestamps wi
   const counters = 'saas_billing_group_spend_counters';
   const reservations = 'saas_billing_group_spend_reservations';
   const expected = [
-    ...['charge_outstanding_reserved', 'charge_settled', 'charge_currency', 'updated_at'].map(column => toGrant(counters, column, 'UPDATE')),
-    ...['settled_amount_minor_units', 'state', 'updated_at'].map(column => toGrant(reservations, column, 'UPDATE')),
+    ...['charge_outstanding_reserved', 'charge_settled', 'charge_currency', 'updated_at'].map((column) =>
+      toGrant(counters, column, 'UPDATE'),
+    ),
+    ...['settled_amount_minor_units', 'state', 'updated_at'].map((column) => toGrant(reservations, column, 'UPDATE')),
   ];
-  const groups = MANIFEST_GATEWAY_COLUMN_GROUPS.filter(group => [counters, reservations].includes(group.table) && group.privilege === 'UPDATE').flatMap(group => group.columns.map(column => toGrant(group.table, column, group.privilege)));
-  const sql = MANIFEST_GATEWAY_COLUMN_SQL_ENTRIES.filter(entry => [counters, reservations].includes(entry.table) && entry.privilege === 'UPDATE').map(entry => toGrant(entry.table, entry.column, entry.privilege));
+  const groups = MANIFEST_GATEWAY_COLUMN_GROUPS.filter(
+    (group) => [counters, reservations].includes(group.table) && group.privilege === 'UPDATE',
+  ).flatMap((group) => group.columns.map((column) => toGrant(group.table, column, group.privilege)));
+  const sql = MANIFEST_GATEWAY_COLUMN_SQL_ENTRIES.filter(
+    (entry) => [counters, reservations].includes(entry.table) && entry.privilege === 'UPDATE',
+  ).map((entry) => toGrant(entry.table, entry.column, entry.privilege));
   assert.deepEqual(sorted(groups), sorted(expected));
   assert.deepEqual(sorted(sql), sorted(expected));
-  assert.equal(MANIFEST_GATEWAY_AUXILIARY.fullInsertTables.some(table => [counters, reservations].includes(table)), false);
-  assert.equal(MANIFEST_GATEWAY_AUXILIARY.deleteTables.some(table => [counters, reservations].includes(table)), false);
+  assert.equal(
+    MANIFEST_GATEWAY_AUXILIARY.fullInsertTables.some((table) => [counters, reservations].includes(table)),
+    false,
+  );
+  assert.equal(
+    MANIFEST_GATEWAY_AUXILIARY.deleteTables.some((table) => [counters, reservations].includes(table)),
+    false,
+  );
 });
 
 test('manifest worker views encode the same column grants in probe and grant script', () => {
@@ -131,12 +165,14 @@ test('manifest gateway auxiliary facts match the runtime-privileges constants', 
   assert.equal(sequence[1], MANIFEST_GATEWAY_AUXILIARY.usageSequence);
 });
 
-
 test('fast console compatibility adds only bounded control-plane reads, never journal mutation authority', () => {
   for (const view of [MANIFEST_CONTROL_PLANE_COLUMN_GROUPS, MANIFEST_CONTROL_PLANE_COLUMN_SQL_ROWS]) {
     for (const table of ['saas_fast_gateway_intents', 'saas_fast_gateway_receipts']) {
       const groups = view.filter((group) => group.table === table);
-      assert.deepEqual(groups.map((group) => group.privilege), ['SELECT']);
+      assert.deepEqual(
+        groups.map((group) => group.privilege),
+        ['SELECT'],
+      );
       assert.equal(groups[0]?.columns.includes('account_id'), false);
       assert.equal(groups[0]?.columns.includes('payload_sha256'), false);
       assert.equal(groups[0]?.columns.includes('request_fingerprint'), false);
