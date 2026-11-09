@@ -121,7 +121,15 @@ export async function startManagedCustomerConsole(): Promise<ManagedCustomerCons
     try {
       await Promise.allSettled([
         gateway?.close(),
-        new Promise<void>((done) => (server ? server.close(() => done()) : done())),
+        new Promise<void>((done) => {
+          if (!server) {
+            done();
+            return;
+          }
+          // Playwright keeps the browser alive until the test returns.
+          server.close(() => done());
+          server.closeAllConnections();
+        }),
         paymentWorker?.stop(),
       ]);
     } finally {
