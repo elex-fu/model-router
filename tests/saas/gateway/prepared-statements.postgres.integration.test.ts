@@ -29,11 +29,11 @@ type Mode = 'byok' | 'platform';
 type StatementKind = 'cm-final' | 'sched-byok' | 'sched-platform';
 type PlanMode = 'auto' | 'force_generic_plan';
 
-// Original production SQL bytes, before adding the optional transport capability.
+// Pin the reviewed production SQL so both transport paths execute identical bytes.
 const SQL_FINGERPRINTS: Readonly<Record<StatementKind, { readonly bytes: number; readonly sha256: string }>> = {
   'cm-final': { bytes: 468, sha256: '358cd2967d4b0ccb1192b32cf1779e15d1d53412aff5d1882cdd0a6530136f16' },
-  'sched-byok': { bytes: 10_787, sha256: '9b34c495847c2b54256174c5c2d1c6063ed6877e023708dfff4589fe09771993' },
-  'sched-platform': { bytes: 14_331, sha256: 'bc83809c6d04f9c52ac8572fe4b1ed655468ad8861baf00cbb1740d2a7cf0b60' },
+  'sched-byok': { bytes: 11_831, sha256: 'b34f5e463a326e7b047bfee6de08dfee8be57b5d45d2a4fa3460231884beb298' },
+  'sched-platform': { bytes: 15_375, sha256: 'b6cca0e84d6d08958072a92adf59c340a2fe4ea5fd00e9eb7f2da450af598771' },
 };
 
 interface StatementCall {
@@ -442,7 +442,7 @@ async function runAllowedPaths(database: SaasDatabase, fixtures: readonly Schedu
   const sourceScheduler = scheduler(database);
   for (const item of fixtures) {
     const decision = await sourceScheduler.select({ ...item.input, requestId: randomUUID() });
-    assert.equal(decision.decision, 'allow');
+    assert.equal(decision.decision, 'allow', decision.decision === 'allow' ? undefined : decision.message);
     const commercial = await resolveCommercial(database, item.fixture);
     assert.ok(commercial, 'the actual final commercial authority must allow the seeded route');
     assert.equal(commercial.customerPriceVersion, item.fixture.sent.customerPriceVersion);

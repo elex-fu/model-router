@@ -4280,6 +4280,11 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'approved_at',
     'updated_at',
   ]),
+  // 152: the control plane reads account lifecycle records and persists audited bans.
+  ...columnGrants('saas_tenant_provider_accounts', 'SELECT', ['banned_at', 'ban_reason', 'ban_last_error']),
+  ...columnGrants('saas_tenant_provider_accounts', 'UPDATE', ['banned_at', 'ban_reason', 'ban_last_error']),
+  ...columnGrants('saas_platform_provider_accounts', 'SELECT', ['banned_at', 'ban_reason', 'ban_last_error']),
+  ...columnGrants('saas_platform_provider_accounts', 'UPDATE', ['banned_at', 'ban_reason', 'ban_last_error']),
   ...columnGrants('saas_authority_invalidation_events', 'INSERT', ['tenant_id', 'kind', 'reason']),
 ] as const;
 
@@ -6424,9 +6429,7 @@ async function verifyControlPlaneRuntimeDatabasePrivileges(
 ): Promise<void> {
   let row: RuntimePrivilegeProbeRow | undefined;
   try {
-    const sql = beforeAuthorityEvents
-      ? withoutAuthorityEventGrantRows(SAAS_RUNTIME_PRIVILEGE_PROBE_SQL, controlPlaneColumnValues)
-      : SAAS_RUNTIME_PRIVILEGE_PROBE_SQL;
+    const sql = beforeAuthorityEvents ? schema155ControlPlaneProbeSql() : SAAS_RUNTIME_PRIVILEGE_PROBE_SQL;
     const result = await database.query<RuntimePrivilegeProbeRow>(sql);
     if (result.rows.length !== 1 || !isProbeRow(result.rows[0])) throw new SaasRuntimePrivilegeError();
     row = result.rows[0];
@@ -6495,6 +6498,25 @@ function withoutAuthorityEventGrantRows(sql: string, columnValues: string): stri
     .filter((row) => !row.startsWith("('saas_authority_invalidation_events', "))
     .join(separator);
   return sql.replace(columnValues, baseline);
+}
+
+function schema155ControlPlaneProbeSql(): string {
+  // The role replay adds the account-ban grants for installations that have
+  // the 152 columns but an older template. Check column presence and keep the
+  // regular checks for unexpected grants and all other required permissions.
+  const deferAccountBanGrant = `
+     AND (actual.oid IS NULL
+       OR expected.table_name NOT IN ('saas_tenant_provider_accounts', 'saas_platform_provider_accounts')
+       OR expected.column_name NOT IN ('banned_at', 'ban_reason', 'ban_last_error'))`;
+  return withoutAuthorityEventGrantRows(SAAS_RUNTIME_PRIVILEGE_PROBE_SQL, controlPlaneColumnValues)
+    .replace(
+      "WHERE expected.privilege_type = 'SELECT'\n",
+      `WHERE expected.privilege_type = 'SELECT'${deferAccountBanGrant}\n`,
+    )
+    .replace(
+      "WHERE expected.privilege_type = 'UPDATE'\n",
+      `WHERE expected.privilege_type = 'UPDATE'${deferAccountBanGrant}\n`,
+    );
 }
 
 /** Upgrade preflight only, after verifying the complete migration prefix through schema 155. */

@@ -1147,6 +1147,11 @@ BEGIN
       ('saas_codex_trusted_bound_profiles', 'SELECT', 'id digest endpoint product_id model operation transport continuation_mode bounds backend_revision evidence_version evidence_reference valid_from_ms expires_at_ms state submitted_by_user_id approved_by_user_id approved_at created_at updated_at'),
       ('saas_codex_trusted_bound_profiles', 'INSERT', 'digest endpoint product_id model operation transport continuation_mode bounds backend_revision evidence_version evidence_reference valid_from_ms expires_at_ms state submitted_by_user_id'),
       ('saas_codex_trusted_bound_profiles', 'UPDATE', 'state approved_by_user_id approved_at updated_at'),
+      -- 152: the control plane owns the audited account-ban lifecycle.
+      ('saas_tenant_provider_accounts', 'SELECT', 'banned_at ban_reason ban_last_error'),
+      ('saas_tenant_provider_accounts', 'UPDATE', 'banned_at ban_reason ban_last_error'),
+      ('saas_platform_provider_accounts', 'SELECT', 'banned_at ban_reason ban_last_error'),
+      ('saas_platform_provider_accounts', 'UPDATE', 'banned_at ban_reason ban_last_error'),
       ('saas_authority_invalidation_events', 'INSERT', 'tenant_id kind reason')
     ) AS manifest(table_name, privilege_type, column_names)
   LOOP

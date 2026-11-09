@@ -5539,6 +5539,27 @@ export const MANIFEST_CONTROL_PLANE_COLUMN_GROUPS: readonly SaasControlPlaneColu
     columns: ['state', 'approved_by_user_id', 'approved_at', 'updated_at'],
   },
   {
+    tsComment: ['152: the control plane reads account lifecycle records and persists audited bans.'],
+    table: 'saas_tenant_provider_accounts',
+    privilege: 'SELECT',
+    columns: ['banned_at', 'ban_reason', 'ban_last_error'],
+  },
+  {
+    table: 'saas_tenant_provider_accounts',
+    privilege: 'UPDATE',
+    columns: ['banned_at', 'ban_reason', 'ban_last_error'],
+  },
+  {
+    table: 'saas_platform_provider_accounts',
+    privilege: 'SELECT',
+    columns: ['banned_at', 'ban_reason', 'ban_last_error'],
+  },
+  {
+    table: 'saas_platform_provider_accounts',
+    privilege: 'UPDATE',
+    columns: ['banned_at', 'ban_reason', 'ban_last_error'],
+  },
+  {
     table: 'saas_authority_invalidation_events',
     privilege: 'INSERT',
     columns: ['tenant_id', 'kind', 'reason'],
@@ -10666,6 +10687,27 @@ export const MANIFEST_CONTROL_PLANE_COLUMN_SQL_ROWS: readonly SaasControlPlaneCo
     table: 'saas_codex_trusted_bound_profiles',
     privilege: 'UPDATE',
     columns: ['state', 'approved_by_user_id', 'approved_at', 'updated_at'],
+  },
+  {
+    sqlComment: ['152: the control plane owns the audited account-ban lifecycle.'],
+    table: 'saas_tenant_provider_accounts',
+    privilege: 'SELECT',
+    columns: ['banned_at', 'ban_reason', 'ban_last_error'],
+  },
+  {
+    table: 'saas_tenant_provider_accounts',
+    privilege: 'UPDATE',
+    columns: ['banned_at', 'ban_reason', 'ban_last_error'],
+  },
+  {
+    table: 'saas_platform_provider_accounts',
+    privilege: 'SELECT',
+    columns: ['banned_at', 'ban_reason', 'ban_last_error'],
+  },
+  {
+    table: 'saas_platform_provider_accounts',
+    privilege: 'UPDATE',
+    columns: ['banned_at', 'ban_reason', 'ban_last_error'],
   },
   {
     table: 'saas_authority_invalidation_events',
