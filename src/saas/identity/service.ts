@@ -4,6 +4,7 @@ import {
   SAAS_PLATFORM_AUTHORIZATION_WRITER_TIMEOUTS_SQL,
 } from '../db/advisory-lock-keys.js';
 import type { SaasDatabase, SqlExecutor } from '../db/index.js';
+import { recordAuthorityInvalidation } from '../gateway/authority-invalidation-events.js';
 import {
   assertCustomerKeyMutationWrite,
   CUSTOMER_KEY_MUTATION_CURRENT_SQL,
@@ -1484,6 +1485,7 @@ export class SaasIdentityService {
         [tenantId, targetUserId, now],
       );
       await this.appendTenantMembershipAudit(tx, tenantId, actorUserId, 'tenant_member.removed', targetUserId, now);
+      await recordAuthorityInvalidation(tx, { tenantId, kind: 'membership.revoked' });
       return { userId: targetUserId, displayName: target.displayName, role: target.role, status: 'revoked' };
     });
   }

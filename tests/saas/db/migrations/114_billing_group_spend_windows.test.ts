@@ -12,9 +12,9 @@ test('114 remains registered after the 113 group rate counters', () => {
   assert.equal(migration.name, 'billing_group_spend_windows');
   assert.deepEqual(Object.keys(migration).sort(), ['name', 'sql', 'version']);
   const registered = SAAS_MIGRATIONS.map(({ version }) => version);
-  assert.equal(registered.at(-1), 155);
+  assert.equal(registered.at(-1), 156);
   assert.equal(SAAS_MIGRATIONS[registered.indexOf(114)], migration);
-  assert.deepEqual(registered.slice(-13), [143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155]);
+  assert.deepEqual(registered.slice(-14), [143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156]);
 });
 
 test('114 creates the KEY-BUD-shaped group spend counters and reservations', () => {

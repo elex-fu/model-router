@@ -1146,7 +1146,8 @@ BEGIN
       -- visibility (the gateway reads the approved-scope partial index).
       ('saas_codex_trusted_bound_profiles', 'SELECT', 'id digest endpoint product_id model operation transport continuation_mode bounds backend_revision evidence_version evidence_reference valid_from_ms expires_at_ms state submitted_by_user_id approved_by_user_id approved_at created_at updated_at'),
       ('saas_codex_trusted_bound_profiles', 'INSERT', 'digest endpoint product_id model operation transport continuation_mode bounds backend_revision evidence_version evidence_reference valid_from_ms expires_at_ms state submitted_by_user_id'),
-      ('saas_codex_trusted_bound_profiles', 'UPDATE', 'state approved_by_user_id approved_at updated_at')
+      ('saas_codex_trusted_bound_profiles', 'UPDATE', 'state approved_by_user_id approved_at updated_at'),
+      ('saas_authority_invalidation_events', 'INSERT', 'tenant_id kind reason')
     ) AS manifest(table_name, privilege_type, column_names)
   LOOP
     SELECT pg_catalog.string_agg(pg_catalog.format('%I', attribute.attname), ', ' ORDER BY attribute.attnum)
@@ -2178,7 +2179,11 @@ BEGIN
       ('saas_codex_trusted_bound_profiles', 'evidence_reference', 'SELECT'),
       ('saas_codex_trusted_bound_profiles', 'valid_from_ms', 'SELECT'),
       ('saas_codex_trusted_bound_profiles', 'expires_at_ms', 'SELECT'),
-      ('saas_codex_trusted_bound_profiles', 'state', 'SELECT')
+      ('saas_codex_trusted_bound_profiles', 'state', 'SELECT'),
+      ('saas_authority_invalidation_events', 'id', 'SELECT'),
+      ('saas_authority_invalidation_events', 'tenant_id', 'SELECT'),
+      ('saas_authority_invalidation_events', 'kind', 'SELECT'),
+      ('saas_authority_invalidation_events', 'reason', 'SELECT')
     ) AS manifest(table_name, column_name, privilege_type)
     GROUP BY manifest.table_name, manifest.privilege_type
   LOOP

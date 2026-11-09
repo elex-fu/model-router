@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { saasAdvisoryKey, sortAndDedupeAdvisoryKeys } from '../db/advisory-lock-keys.js';
 import type { SaasDatabase, SqlExecutor, SqlResult } from '../db/index.js';
+import { recordAuthorityInvalidation } from '../gateway/authority-invalidation-events.js';
 import type { SupplyMode } from '../gateway/contracts.js';
 import {
   CustomerKeyMutationSessionError,
@@ -1386,6 +1387,7 @@ export class KeyService {
       const revoked = updated.rows[0];
       if (!revoked) fail(404, 'KEY_NOT_FOUND', 'The API key was not found');
       await this.audit(tx, context, 'api_key.revoked', keyId, now);
+      await recordAuthorityInvalidation(tx, { tenantId: context.tenantId, kind: 'api_key.revoked' });
       return metadata(revoked);
     });
   }

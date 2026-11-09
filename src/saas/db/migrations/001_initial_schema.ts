@@ -133,6 +133,7 @@ import { ACCOUNT_BAN_LEDGER_SAAS_MIGRATION } from './152_account_ban_ledger.js';
 import { USER_RISK_CONTROLS_SAAS_MIGRATION } from './153_user_risk_controls.js';
 import { USER_KEY_SUSPENSION_SAAS_MIGRATION } from './154_user_key_suspension.js';
 import { CODEX_TRUSTED_BOUND_PROFILES_SAAS_MIGRATION } from './155_codex_trusted_bound_profiles.js';
+import { AUTHORITY_INVALIDATION_EVENTS_SAAS_MIGRATION } from './156_authority_invalidation_events.js';
 
 export interface SaasMigration {
   version: number;
@@ -840,4 +841,5 @@ export const SAAS_MIGRATIONS: readonly SaasMigration[] = [
   // profile ledger behind the resolver seam. The frozen in-code registry
   // stays empty; only control-plane approval admits a row.
   CODEX_TRUSTED_BOUND_PROFILES_SAAS_MIGRATION,
+  AUTHORITY_INVALIDATION_EVENTS_SAAS_MIGRATION,
 ];

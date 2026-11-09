@@ -49,7 +49,7 @@ test('strict source pin and opt-in leave ordinary module loader untouched', () =
   assert.match(transform(compiled()), /capacityProbe.reject\(httpInFlight, closing, currentRequestId\)/);
   assert.deepEqual(ALLOWED_COMPILED_SHA256, [
     'a98faa12c22e5283281af4e70b96c7153c0e57aacf12788de9afb3622aa9307f',
-    '728953dd0353abffe9661515581327d5b457c6329ccef1a44d7927fbbb8af001',
+    '21e7fd252f44f34bafada1f4d3cd97532a7925588dd6c082aea6e5cbbbf631bf',
   ]);
   assert.equal(COMPILED_SHA256, COMPILED_PINS.legacy);
   assert.equal(Object.isFrozen(ALLOWED_COMPILED_SHA256), true);

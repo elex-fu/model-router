@@ -2393,7 +2393,7 @@ test('dispatch-only PostgreSQL lease adapter classifies only a known provider st
   assert.equal(await dispatch.acquire(input), malformed, 'bad shape is left to the original dispatcher validation');
 });
 
-test('production builder binds the real database transaction and does not allocate IDs', async () => {
+test('production builder binds the real database transaction and does not allocate IDs', async (t) => {
   const healthWrites: Array<{ sql: string; values: readonly unknown[] }> = [];
   const database = {
     query: async () => ({ rows: [], rowCount: 0 }),
@@ -2920,6 +2920,48 @@ test('production builder binds the real database transaction and does not alloca
   assert.equal(downstreamAdmissionInputs.length, 1, 'a late authorization refusal never reaches financial admission');
   assert.deepEqual([...persisted.entries()], beforeLateDenial, 'the existing canonical mapping remains unchanged');
   await composition.close();
+
+  await t.test('authority invalidation broadcast is opt-in and drains on close', { timeout: 5000 }, async (t) => {
+    const flag = 'MODEL_ROUTER_PREPARATION_INVALIDATION_BROADCAST';
+    const previous = process.env[flag];
+    t.after(() => {
+      if (previous === undefined) delete process.env[flag];
+      else process.env[flag] = previous;
+    });
+    delete process.env[flag];
+    let headReads = 0;
+    let polls = 0;
+    const eventDatabase: SaasDatabase = {
+      ...database,
+      query: async <Row>(sql: string) => {
+        if (sql.includes('FROM saas_authority_invalidation_events')) {
+          if (sql.includes('MAX(id)')) {
+            headReads++;
+            return { rows: [{ max_id: '0' } as Row], rowCount: 1 };
+          }
+          polls++;
+        }
+        return { rows: [], rowCount: 0 };
+      },
+    };
+    const disabled = createManagedSaasGatewayProductionComposition(eventDatabase, options);
+    await disabled.close();
+    assert.equal(headReads, 0);
+
+    process.env[flag] = '1';
+    const enabled = createManagedSaasGatewayProductionComposition(eventDatabase, options);
+    try {
+      for (let attempt = 0; attempt < 100 && polls === 0; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      assert.equal(headReads, 1);
+      assert.equal(polls, 1);
+    } finally {
+      await enabled.close();
+    }
+    await new Promise((resolve) => setTimeout(resolve, 550));
+    assert.equal(polls, 1);
+  });
 });
 
 test('production composition rejects missing affinity or storage before readiness', () => {

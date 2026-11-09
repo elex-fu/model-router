@@ -5476,6 +5476,11 @@ export const MANIFEST_CONTROL_PLANE_COLUMN_GROUPS: readonly SaasControlPlaneColu
     privilege: 'UPDATE',
     columns: ['state', 'approved_by_user_id', 'approved_at', 'updated_at'],
   },
+  {
+    table: 'saas_authority_invalidation_events',
+    privilege: 'INSERT',
+    columns: ['tenant_id', 'kind', 'reason'],
+  },
 ];
 
 export const MANIFEST_CONTROL_PLANE_COLUMN_SQL_ROWS: readonly SaasControlPlaneColumnSqlRow[] = [
@@ -10535,6 +10540,11 @@ export const MANIFEST_CONTROL_PLANE_COLUMN_SQL_ROWS: readonly SaasControlPlaneCo
     privilege: 'UPDATE',
     columns: ['state', 'approved_by_user_id', 'approved_at', 'updated_at'],
   },
+  {
+    table: 'saas_authority_invalidation_events',
+    privilege: 'INSERT',
+    columns: ['tenant_id', 'kind', 'reason'],
+  },
 ];
 
 export const MANIFEST_CONTROL_PLANE_TABLE_GRANTS: readonly SaasControlPlaneTableGrant[] = [
@@ -12622,6 +12632,12 @@ export const MANIFEST_GATEWAY_COLUMN_GROUPS: readonly SaasGatewayColumnTsGroup[]
       'state',
     ],
     tsStyle: 'map-paren-multi',
+  },
+  {
+    table: 'saas_authority_invalidation_events',
+    privilege: 'SELECT',
+    columns: ['id', 'tenant_id', 'kind', 'reason'],
+    tsStyle: 'inline',
   },
 ];
 
@@ -16525,6 +16541,10 @@ export const MANIFEST_GATEWAY_COLUMN_SQL_ENTRIES: readonly SaasGatewayColumnSqlE
   { table: 'saas_codex_trusted_bound_profiles', column: 'valid_from_ms', privilege: 'SELECT' },
   { table: 'saas_codex_trusted_bound_profiles', column: 'expires_at_ms', privilege: 'SELECT' },
   { table: 'saas_codex_trusted_bound_profiles', column: 'state', privilege: 'SELECT' },
+  { table: 'saas_authority_invalidation_events', column: 'id', privilege: 'SELECT' },
+  { table: 'saas_authority_invalidation_events', column: 'tenant_id', privilege: 'SELECT' },
+  { table: 'saas_authority_invalidation_events', column: 'kind', privilege: 'SELECT' },
+  { table: 'saas_authority_invalidation_events', column: 'reason', privilege: 'SELECT' },
 ];
 
 export const MANIFEST_GATEWAY_AUXILIARY: SaasGatewayAuxiliaryGrants = {

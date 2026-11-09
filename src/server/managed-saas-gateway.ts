@@ -4,6 +4,7 @@ import { SaasBillingGroupsService } from '../saas/billing/groups/service.js';
 import { createBillingGroupSpendResolution } from '../saas/billing/groups/spend-resolution.js';
 import { SaasCatalogService } from '../saas/catalog/service.js';
 import type { SaasDatabase } from '../saas/db/index.js';
+import { AuthorityInvalidationPoller } from '../saas/gateway/authority-invalidation-events.js';
 import { BEDROCK_ENDPOINT } from '../saas/gateway/bedrock/catalog-identity.js';
 import { CachedRequestPreparationAuthority } from '../saas/gateway/cached-request-preparation-authority.js';
 import { CachedRequestPreparationEntitlement } from '../saas/gateway/cached-request-preparation-entitlement.js';
@@ -2461,6 +2462,10 @@ export function createManagedSaasGatewayProductionComposition(
     options.opencodeGoProtocolRouting,
     DEFAULT_OPENCODE_GO_PROTOCOL_RULES,
   );
+  const uncachedAuthority = new PostgresRequestPreparationAuthorityAdapter(authorityDependencies);
+  const authorityCache = preparationAuthorityCacheDisabled()
+    ? undefined
+    : new CachedRequestPreparationAuthority(uncachedAuthority);
   const authority: RequestPreparationAuthorityPort = createOpenCodeGoProtocolRoutingAuthority(
     // Batch-3: CN-provider adaptive routing wraps OUTSIDE the OpenCode Go
     // decorator (the provider sets are disjoint, so the two decorators
@@ -2473,9 +2478,7 @@ export function createManagedSaasGatewayProductionComposition(
       // so the cache can never bypass the final defense line. The pure
       // in-memory protocol-routing decorators stay outside the cache and run
       // per request. Disable with MODEL_ROUTER_PREPARATION_AUTHORITY_CACHE=0.
-      preparationAuthorityCacheDisabled()
-        ? new PostgresRequestPreparationAuthorityAdapter(authorityDependencies)
-        : new CachedRequestPreparationAuthority(new PostgresRequestPreparationAuthorityAdapter(authorityDependencies)),
+      authorityCache ?? uncachedAuthority,
       options.cnProvidersProtocolRouting,
     ),
     openCodeGoProtocolRules,
@@ -3016,14 +3019,29 @@ export function createManagedSaasGatewayProductionComposition(
     ...(options.modelPlazaSessionAuth ? { sessionAuth: options.modelPlazaSessionAuth } : {}),
   });
 
-  return createManagedSaasGatewayComposition({
+  const authenticator = new CachedKeyAuthenticator(keyService);
+  const uncachedEntitlement = new PostgresRequestPreparationEntitlementAdapter(options.entitlement, byokEntitlements);
+  const entitlementCache = preparationEntitlementCacheDisabled()
+    ? undefined
+    : new CachedRequestPreparationEntitlement(uncachedEntitlement);
+  const broadcastSetting = process.env.MODEL_ROUTER_PREPARATION_INVALIDATION_BROADCAST;
+  const invalidationBroadcast =
+    broadcastSetting === '1' || broadcastSetting === 'true' ? new AuthorityInvalidationPoller(database) : undefined;
+  if (invalidationBroadcast) {
+    invalidationBroadcast.register(authenticator);
+    if (entitlementCache) invalidationBroadcast.register(entitlementCache);
+    if (authorityCache) invalidationBroadcast.register(authorityCache);
+    if (scheduler.staticEligibilityCache) invalidationBroadcast.register(scheduler.staticEligibilityCache);
+  }
+
+  const composition = createManagedSaasGatewayComposition({
     ...(fastGateway ? { fastGateway } : {}),
     ...(options.fastGatewayDiagnostic ? { fastGatewayDiagnostic: options.fastGatewayDiagnostic } : {}),
     ...(options.continuationHistoryResolver
       ? { continuationHistoryResolver: options.continuationHistoryResolver }
       : {}),
     ...(options.requestDiagnostics ? { requestDiagnostics: options.requestDiagnostics } : {}),
-    authenticator: new CachedKeyAuthenticator(keyService),
+    authenticator,
     ...(options.capacityCompletion ? { capacityCompletion: options.capacityCompletion } : {}),
     capabilityReadiness,
     ...(options.preparationFailureObserver ? { preparationFailureObserver: options.preparationFailureObserver } : {}),
@@ -3040,11 +3058,7 @@ export function createManagedSaasGatewayProductionComposition(
       // executor-carrying (in-transaction) resolves bypass the cache
       // entirely inside the decorator. Disable with
       // MODEL_ROUTER_PREPARATION_ENTITLEMENT_CACHE=0.
-      entitlement: preparationEntitlementCacheDisabled()
-        ? new PostgresRequestPreparationEntitlementAdapter(options.entitlement, byokEntitlements)
-        : new CachedRequestPreparationEntitlement(
-            new PostgresRequestPreparationEntitlementAdapter(options.entitlement, byokEntitlements),
-          ),
+      entitlement: entitlementCache ?? uncachedEntitlement,
       authority,
       scheduler,
       payload,
@@ -3084,6 +3098,7 @@ export function createManagedSaasGatewayProductionComposition(
       close: async () => {
         // G-A1: stop the media recovery loops before the KMS (their PG
         // leases expire on their own; an in-flight cycle finishes first).
+        await invalidationBroadcast?.stop();
         await fastClose?.();
         await videoRecoveryHandle?.stop();
         await imageStuckSweeper?.stop();
@@ -3172,6 +3187,10 @@ export function createManagedSaasGatewayProductionComposition(
       ...(options.riskControl?.siteName ? { siteName: options.riskControl.siteName } : {}),
     }),
   });
+  void invalidationBroadcast?.start().catch(() => {
+    console.error('model-router authority invalidation poll failed');
+  });
+  return composition;
 }
 
 /** Type-only aliases make the composition contract easy to inspect in tests. */

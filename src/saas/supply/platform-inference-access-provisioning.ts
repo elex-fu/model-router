@@ -1,6 +1,7 @@
 import type { PlatformInferenceAccessAdmissionReadiness } from './platform-inference-access-admission-readiness.js';
 import { createHash, randomUUID } from 'node:crypto';
 import type { SaasDatabase, SqlExecutor } from '../db/types.js';
+import { recordAuthorityInvalidation } from '../gateway/authority-invalidation-events.js';
 import { saasAdvisoryKey, SAAS_PLATFORM_AUTHORIZATION_WRITER_FENCE_SQL, SAAS_PLATFORM_AUTHORIZATION_WRITER_TIMEOUTS_SQL } from '../db/advisory-lock-keys.js';
 import type { RouteConfigAuditContext, RouteConfigDefinition, SaasRouteConfigService } from '../gateway/route-config-service.js';
 import type { ContractTestAttestationInput, CustomerMeteringPolicyDefinition, ProviderMeteringPolicyDefinition, SaasCommercialMeteringPolicyService } from '../gateway/commercial-metering-policy-service.js';
@@ -370,6 +371,7 @@ export class PlatformInferenceAccessProvisioningService {
       if (activated.rows.length!==1) fail('VERSION_CONFLICT');
       await this.audit(tx,op,context,'platform_inference_access.activated');
       const completed=await tx.query<Row>(`UPDATE saas_platform_inference_access_operations SET phase='completed',last_error_code=NULL,updated_at=clock_timestamp() WHERE id=$1 RETURNING ${OP_COLUMNS}`,[op.id]);
+      await recordAuthorityInvalidation(tx, { tenantId: op.tenantId, kind: 'platform_inference_access.activated' });
       return {...record(completed.rows[0]),entitlementAuthzVersion:'2'};
     });
   }
@@ -387,6 +389,11 @@ export class PlatformInferenceAccessProvisioningService {
       if (changed.rows.length!==1) fail('VERSION_CONFLICT');
       await this.audit(tx,op,context,`platform_inference_access.disabled.${input.reason}`);
       const result=await tx.query<Row>(`UPDATE saas_platform_inference_access_operations SET phase='disabled',updated_at=clock_timestamp() WHERE id=$1 RETURNING ${OP_COLUMNS}`,[op.id]);
+      await recordAuthorityInvalidation(tx, {
+        tenantId: op.tenantId,
+        kind: 'platform_inference_access.disabled',
+        reason: input.reason,
+      });
       return {...record(result.rows[0]),entitlementAuthzVersion:String(changed.rows[0].authz_version)};
     });
   }

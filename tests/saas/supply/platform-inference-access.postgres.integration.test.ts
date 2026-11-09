@@ -134,6 +134,14 @@ test('real PG restricted control-plane provisions a fresh suspended project, res
   assert.equal(noCodexJournal.rows.length,0);
   const disabled=await service.disable({operationId:completed.id,expectedEntitlementVersion:'2',reason:'risk_control'},context);
   assert.equal(disabled.phase,'disabled');
+  const invalidations = await gateway.query<{ kind: string; reason: string | null }>(
+    'SELECT kind, reason FROM saas_authority_invalidation_events WHERE tenant_id = $1 ORDER BY id',
+    [tenantId],
+  );
+  assert.deepEqual(invalidations.rows, [
+    { kind: 'platform_inference_access.activated', reason: null },
+    { kind: 'platform_inference_access.disabled', reason: 'risk_control' },
+  ]);
   const retained=(await cp.query<Row>(`SELECT inference_policy_status FROM saas_projects WHERE tenant_id=$1 AND id=$2`,[tenantId,projectId])).rows[0];
   assert.equal(retained.inference_policy_status,'active','disabling this platform entitlement must not suspend shared project policy');
   await migrator.query(`UPDATE saas_platform_sessions SET revoked_at=clock_timestamp() WHERE id=$1`,[actor.sessionId]);

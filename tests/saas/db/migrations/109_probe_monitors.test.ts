@@ -15,12 +15,12 @@ test('109 remains directly after 108 as the R6a forward', () => {
   assert.equal(migration.name, 'probe_monitors');
   assert.deepEqual(Object.keys(migration).sort(), ['name', 'sql', 'version']);
   const registered = SAAS_MIGRATIONS.map(({ version }) => version);
-  assert.deepEqual(registered.slice(-13), [143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155]);
+  assert.deepEqual(registered.slice(-14), [143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156]);
   const index = registered.indexOf(109);
   assert.ok(index > 0, '109 is registered');
   assert.equal(registered[index - 1], 108, '109 lands directly after the 108 head');
   // Later forwards remain append-only through the current 153 user-risk head.
-  assert.equal(registered.at(-1), 155, 'the append-only registry ends at codex trusted-bound profiles 155');
+  assert.equal(registered.at(-1), 156);
   assert.equal(registered.indexOf(109), registered.lastIndexOf(109));
   assert.equal(SAAS_MIGRATIONS[index], migration);
 });

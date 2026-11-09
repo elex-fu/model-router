@@ -4,7 +4,7 @@ import { SAAS_MIGRATIONS } from '../../../../src/saas/db/migrations/001_initial_
 import { CODEX_TRUSTED_BOUND_PROFILES_SAAS_MIGRATION as migration } from '../../../../src/saas/db/migrations/155_codex_trusted_bound_profiles.js';
 
 test('155 creates the Codex trusted-bound admission ledger with fail-closed lifecycle checks', () => {
-  assert.equal(SAAS_MIGRATIONS.at(-1), migration);
+  assert.equal(SAAS_MIGRATIONS.at(-2), migration);
   assert.equal(migration.version, 155);
   assert.equal(migration.name, 'codex_trusted_bound_profiles');
   assert.match(migration.sql, /CREATE TABLE saas_codex_trusted_bound_profiles/);

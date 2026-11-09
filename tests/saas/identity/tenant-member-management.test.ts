@@ -221,6 +221,9 @@ test('removal revokes tenant and project memberships with audit; a revoked membe
     }
   }
   assert.deepEqual(auditActions(database), ['tenant_member.removed']);
+  assert.deepEqual(database.authorityInvalidations, [
+    { tenantId: ids.tenantId, kind: 'membership.revoked', reason: null },
+  ]);
 
   // The no-delete table keeps the row; the directory treats it as absent.
   await expectCode(service.removeTenantMember(ids.ownerId, ids.tenantId, ids.developerId), 'MEMBER_NOT_FOUND');

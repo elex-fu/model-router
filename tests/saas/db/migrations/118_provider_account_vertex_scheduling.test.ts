@@ -18,9 +18,9 @@ test('118 registers directly after 117 as the reserved Vertex slot', () => {
   assert.ok(index > 0, '118 is registered');
   assert.equal(registered[index - 1], 117, '118 lands directly after the bedrock 117');
   assert.equal(registered[index + 1], 119, 'the grok 119 follows the vertex 118');
-  assert.equal(registered.at(-1), 155, 'codex trusted-bound profiles 155 is the applied head');
+  assert.equal(registered.at(-1), 156);
   assert.equal(SAAS_MIGRATIONS[index], migration);
-  assert.deepEqual(registered.slice(-13), [143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155]);
+  assert.deepEqual(registered.slice(-14), [143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156]);
   // The assert-count guard: exactly one registration for the version.
   assert.equal(SAAS_MIGRATIONS.filter((m) => m.version === 118).length, 1);
 });

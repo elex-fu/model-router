@@ -4280,6 +4280,7 @@ export const SAAS_CONTROL_PLANE_RUNTIME_COLUMN_GRANTS: readonly SaasControlPlane
     'approved_at',
     'updated_at',
   ]),
+  ...columnGrants('saas_authority_invalidation_events', 'INSERT', ['tenant_id', 'kind', 'reason']),
 ] as const;
 
 /** Table-level DELETE is the narrowest PostgreSQL privilege for these SQL statements. */
@@ -5893,6 +5894,10 @@ export const SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS: readonly SaasGatewayColumnGrant
       'state',
     ] as const
   ).map((column) => ['saas_codex_trusted_bound_profiles', column, 'SELECT'] as const),
+  ['saas_authority_invalidation_events', 'id', 'SELECT'],
+  ['saas_authority_invalidation_events', 'tenant_id', 'SELECT'],
+  ['saas_authority_invalidation_events', 'kind', 'SELECT'],
+  ['saas_authority_invalidation_events', 'reason', 'SELECT'],
 ] as const;
 
 const GATEWAY_COLUMN_GRANTS = SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS;

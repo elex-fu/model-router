@@ -117,6 +117,7 @@ test('migration 034 registers after the immutable 033 history', () => {
       153,
       154,
       155,
+      156,
     ],
   );
 });

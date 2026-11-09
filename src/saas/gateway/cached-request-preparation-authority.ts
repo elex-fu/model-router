@@ -54,6 +54,13 @@ export class CachedRequestPreparationAuthority implements RequestPreparationAuth
   private readonly now: () => number;
   private readonly entries = new Map<string, { until: number; value: RequestPreparationAuthority }>();
   private readonly pending = new Map<string, Promise<AuthorityDecision>>();
+  /**
+   * §12.2 Phase A2b (D2): bumped by invalidateAll(). A resolution that
+   * started before an invalidation must not store its (now potentially
+   * stale) allow decision afterwards — the generation guard drops that
+   * store, keeping invalidation effective even against in-flight resolves.
+   */
+  private generation = 0;
 
   /** The wrapped PostgreSQL adapter; public read-only like the protocol decorators. */
   readonly underlyingAuthority: RequestPreparationAuthorityPort;
@@ -88,15 +95,33 @@ export class CachedRequestPreparationAuthority implements RequestPreparationAuth
       return this.underlyingAuthority.resolve(input);
     }
     const observedAt = this.now();
+    const generation = this.generation;
     const operation = this.underlyingAuthority
       .resolve(input)
       .then((decision) => {
-        if (decision.decision === 'allow') this.store(key, observedAt + this.ttlMs, decision.value);
+        if (decision.decision === 'allow' && generation === this.generation) {
+          this.store(key, observedAt + this.ttlMs, decision.value);
+        }
         return decision;
       })
       .finally(() => this.pending.delete(key));
     this.pending.set(key, operation);
     return structuredClone(await operation);
+  }
+
+  /**
+   * §12.2 Phase A2b (D2) invalidation broadcast hook: drop every cached
+   * allow immediately (control-plane revocation class changes). In-flight
+   * single-flight resolutions keep serving their awaiting caller — a
+   * request that already started preparation is no different from one that
+   * resolved a microsecond before the revocation — but their results are
+   * never stored (the generation guard above), so the very next resolve
+   * re-reads fresh authority. Pure availability optimization: the admission
+   * guard remains the fail-closed final defense line.
+   */
+  invalidateAll(): void {
+    this.generation += 1;
+    this.entries.clear();
   }
 
   private store(key: string, until: number, value: RequestPreparationAuthority): void {

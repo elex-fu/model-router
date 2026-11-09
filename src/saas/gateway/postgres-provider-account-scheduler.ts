@@ -6,6 +6,7 @@ import type { SaasDatabase } from '../db/index.js';
 import { createPreparedSqlStatement, queryPreparedOrAnonymous } from '../db/prepared-statements.js';
 import type { RedisConcurrencySlots } from '../runtime/redis-concurrency-slots.js';
 import {
+  CachedProviderAccountEligibility,
   type CachedProviderAccountEligibilityOptions,
   wrapProviderAccountEligibilityCache,
 } from './cached-provider-account-eligibility.js';
@@ -2270,6 +2271,7 @@ export class PostgresProviderAccountScheduler implements ProviderAccountSchedule
     reads: Map<string, InitialConcurrencyRead>;
   }>();
   private readonly scheduler: ProviderAccountScheduler;
+  readonly staticEligibilityCache: CachedProviderAccountEligibility | undefined;
   private readonly hintScope: PostgresProviderAccountSchedulerOptions['hintScope'];
   private readonly healthAuthorityConfigured: boolean;
   private readonly database: SaasDatabase;
@@ -2334,6 +2336,7 @@ export class PostgresProviderAccountScheduler implements ProviderAccountSchedule
       }),
       options.staticEligibilityCache,
     );
+    this.staticEligibilityCache = eligibility instanceof CachedProviderAccountEligibility ? eligibility : undefined;
     const nativeHealth = options.healthProbe?.store ?? options.health;
     const candidateReadScope =
       nativeHealth instanceof PostgresProviderAccountRuntimeHealthStore

@@ -118,6 +118,7 @@ class FakeKeyDatabase implements SaasDatabase {
   readonly ipPolicies: StoredIpPolicy[] = [];
   readonly budgetPolicies: StoredBudgetPolicy[] = [];
   readonly budgetCounters: StoredBudgetCounter[] = [];
+  readonly authorityInvalidations: Array<{ tenantId: string; kind: string; reason: string | null }> = [];
   walletCurrency: string | null = 'USD';
   readonly statements: string[] = [];
   readonly advisoryFenceKeys: string[] = [];
@@ -559,6 +560,15 @@ class FakeKeyDatabase implements SaasDatabase {
         tenantId: String(b),
         actorUserId: String(c),
       });
+      return result<Row>();
+    }
+
+    // §12.2 Phase A2b (D2): the revocation-class mutations append an authority
+    // invalidation event inside the same transaction so cache-flushing
+    // gateways observe the revocation; the fake only records it.
+    if (statement === 'select pg_catalog.pg_advisory_xact_lock(1396788563, 156)') return result<Row>();
+    if (statement.startsWith('insert into saas_authority_invalidation_events')) {
+      this.authorityInvalidations.push({ tenantId: String(a), kind: String(b), reason: c === null ? null : String(c) });
       return result<Row>();
     }
 
@@ -1333,6 +1343,9 @@ test('tenant/project selectors cannot cross boundaries, and revoke is idempotent
   );
   assert.deepEqual(repeated, revoked);
   assert.equal(database.audits.filter((audit) => audit.action === 'api_key.revoked').length, 1);
+  assert.deepEqual(database.authorityInvalidations, [
+    { tenantId: baseContext.tenantId, kind: 'api_key.revoked', reason: null },
+  ]);
 });
 
 test('rotate revokes the old key and creates a fixed-scope replacement atomically', async () => {
