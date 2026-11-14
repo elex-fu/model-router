@@ -1,6 +1,7 @@
-import { readdirSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join, relative, resolve, sep } from 'node:path';
+import { isManagedPostgresTest } from './ci/postgres-test-plan.mjs';
 
 const mode = process.argv[2];
 const provider = process.argv[3];
@@ -24,7 +25,7 @@ const testsRoot = join(root, 'tests');
 function discover(directory) {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
     const path = join(directory, entry.name);
-    return entry.isDirectory() ? discover(path) : entry.name.endsWith('.test.ts') ? [path] : [];
+    return entry.isDirectory() ? discover(path) : /\.test\.(?:ts|mjs)$/.test(entry.name) ? [path] : [];
   });
 }
 const paths = discover(testsRoot).sort();
@@ -49,10 +50,28 @@ if (!selected.length) {
 const env = { ...process.env };
 if (provider) env[`RUN_${provider.toUpperCase().replaceAll('-', '_')}_SMOKE`] = '1';
 console.log(`Running ${selected.length} ${mode} test files${provider ? ` (${provider})` : ''}${concurrency ? ` with concurrency ${concurrency}` : ''}.`);
-const result = spawnSync(process.execPath, ['--test', ...(concurrency ? [`--test-concurrency=${concurrency}`] : []), '--import', 'tsx', '--import', './scripts/test-css-stub.mjs', '--test-reporter=spec', ...selected], {
+const managedPostgres = mode === 'integration' ? selected.filter((path) =>
+  isManagedPostgresTest(relative(root, path).split(sep).join('/'), readFileSync(path, 'utf8'))) : [];
+const isolated = Boolean(process.env.MODEL_ROUTER_TEST_PG_BIN);
+if (managedPostgres.length && !isolated && Object.keys(process.env).some((name) =>
+  /^MODEL_ROUTER_SAAS_GATEWAY_E2E_.*_URL$/.test(name) && process.env[name])) {
+  console.error('Shared managed PostgreSQL URLs cannot run the full integration suite. Set MODEL_ROUTER_TEST_PG_BIN to use a fresh database per root.');
+  process.exit(2);
+}
+const ordinary = isolated ? selected.filter((path) => !managedPostgres.includes(path)) : selected;
+const result = spawnSync(process.execPath, ['--test', ...(concurrency ? [`--test-concurrency=${concurrency}`] : []), '--import', 'tsx', '--import', './scripts/test-css-stub.mjs', '--test-reporter=spec', ...ordinary], {
   cwd: root,
   env,
   stdio: 'inherit',
 });
 if (result.error) throw result.error;
-process.exit(result.status ?? 1);
+if (result.status !== 0) process.exit(result.status ?? 1);
+if (isolated && managedPostgres.length) {
+  const postgres = spawnSync(process.execPath, ['scripts/run-commercial-postgres-gate.mjs', '--worker-role', '--keep-going',
+    '--test-files', managedPostgres.map((path) => relative(root, path).split(sep).join('/')).join(',')], {
+    cwd: root, env, stdio: 'inherit',
+  });
+  if (postgres.error) throw postgres.error;
+  process.exit(postgres.status ?? 1);
+}
+process.exit(0);

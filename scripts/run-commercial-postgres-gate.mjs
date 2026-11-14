@@ -7,18 +7,23 @@
 // `all` runs the two deterministic gates. `kimi` requires the separate live
 // opt-in and credential; this runner never discovers or supplies credentials.
 import { spawn, spawnSync } from 'node:child_process';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { existsSync, realpathSync, statSync } from 'node:fs';
 import { mkdir, mkdtemp, open, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { postgresFixtureRoots, postgresRedisRequired, postgresSoftwareKmsRequired } from './ci/postgres-test-plan.mjs';
+import { sourceIdentity } from './ci/gate-evidence.mjs';
+import { startDisposableRedis } from './ci/disposable-redis.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 // Provider plaintext belongs only to the selected suite test process.
 const nonSuiteChildEnv = { ...process.env };
 delete nonSuiteChildEnv.KIMI_CODE_API_KEY;
+delete nonSuiteChildEnv.ROUTER_TEST_REDIS_URL;
+delete nonSuiteChildEnv.MODEL_ROUTER_NATIVE_FAST_HTTP_REDIS_URL;
 const suites = {
   commercial: 'tests/saas/gateway/managed-postgres-commercial-gateway.integration.test.ts',
   composite: 'tests/saas/gateway/composite-resolved-supply-billing.postgres.integration.test.ts',
@@ -29,8 +34,8 @@ const suites = {
   'platform-cli-thinking': 'tests/integration/platform-access-cli-thinking-live.test.ts',
   'platform-cli-cancel': 'tests/integration/platform-access-cli-cancel-live.test.ts',
 };
-const options = { pgBin: undefined, dockerImage: undefined, suite: 'commercial', outputDir: undefined,
-  testFile: undefined, workerRole: false };
+const options = { pgBin: undefined, dockerImage: undefined, redisBin: process.env.MODEL_ROUTER_TEST_REDIS_BIN ?? 'redis-server', suite: 'commercial', outputDir: undefined,
+  testFile: undefined, testFiles: undefined, workerRole: false, keepGoing: false };
 const argumentsList = process.argv.slice(2);
 for (let index = 0; index < argumentsList.length; index += 1) {
   const separator = argumentsList[index].indexOf('=');
@@ -40,14 +45,35 @@ for (let index = 0; index < argumentsList.length; index += 1) {
     options.workerRole = true;
     continue;
   }
-  const key = { '--pg-bin': 'pgBin', '--docker-image': 'dockerImage', '--suite': 'suite', '--output-dir': 'outputDir',
-    '--test-file': 'testFile' }[name];
+  if (name === '--keep-going' && inlineValue === undefined) {
+    options.keepGoing = true;
+    continue;
+  }
+  const key = { '--pg-bin': 'pgBin', '--docker-image': 'dockerImage', '--redis-bin': 'redisBin', '--suite': 'suite', '--output-dir': 'outputDir',
+    '--test-file': 'testFile', '--test-files': 'testFiles' }[name];
   if (!key || (!inlineValue && !argumentsList[index + 1])) {
     throw new Error('usage: --pg-bin /path/to/bin OR --docker-image postgres:15-alpine; --suite commercial|composite|all|kimi|platform-access|platform-cli|platform-cli-observation');
   }
   options[key] = inlineValue ?? argumentsList[++index];
 }
 options.pgBin ??= options.dockerImage ? undefined : process.env.MODEL_ROUTER_TEST_PG_BIN;
+if (options.testFiles && options.testFile) throw new Error('choose --test-file or --test-files');
+if (options.testFiles) {
+  if (options.suite !== 'commercial') throw new Error('--test-files cannot be combined with a named suite');
+  const paths = options.testFiles.split(',');
+  if (paths.length === 0 || paths.length > 256 || new Set(paths).size !== paths.length) {
+    throw new Error('--test-files requires 1..256 distinct test roots');
+  }
+  for (const [index, name] of paths.entries()) {
+    const path = realpathSync(resolve(root, name));
+    const testName = relative(root, path);
+    if (!testName.startsWith('tests/') || !/\.test\.(?:ts|mjs)$/.test(testName) || !statSync(path).isFile()) {
+      throw new Error('--test-files must name existing tests inside this repository');
+    }
+    suites[`isolated-${index + 1}`] = testName;
+  }
+  options.suite = 'isolated';
+}
 if (options.testFile) {
   if (!['commercial', 'custom'].includes(options.suite)) throw new Error('--test-file cannot be combined with a named suite');
   const path = realpathSync(resolve(root, options.testFile));
@@ -58,7 +84,7 @@ if (options.testFile) {
   options.suite = 'custom';
   suites.custom = testName;
 }
-if (Boolean(options.pgBin) === Boolean(options.dockerImage) || !Object.hasOwn(suites, options.suite) && options.suite !== 'all') {
+if (Boolean(options.pgBin) === Boolean(options.dockerImage) || !Object.hasOwn(suites, options.suite) && !['all', 'isolated'].includes(options.suite)) {
   throw new Error('exactly one PostgreSQL backend and a known suite are required');
 }
 if (options.suite === 'kimi' && (process.env.RUN_KIMI_COMMERCIAL_LIVE !== '1' || !process.env.KIMI_CODE_API_KEY)) {
@@ -96,7 +122,8 @@ if (cliLive && (docker
   : !/\(PostgreSQL\) 18(?:\.|\s|$)/.test(postgresVersion ?? ''))) {
   throw new Error('platform-cli acceptance requires an explicit PostgreSQL 18 backend');
 }
-const selectedSuites = options.suite === 'all' ? ['commercial', 'composite'] : [options.suite];
+const selectedSuites = options.suite === 'all' ? ['commercial', 'composite'] : options.suite === 'isolated'
+  ? Object.keys(suites).filter((name) => name.startsWith('isolated-')) : [options.suite];
 const needsWorker = options.workerRole || selectedSuites.includes('kimi') || firstRequestLive;
 const outputDir = options.outputDir
   ? resolve(options.outputDir)
@@ -124,6 +151,7 @@ async function sourceSnapshot() {
   // This is recorded as a bounded source scope, never as a frozen whole repo.
   const pending = [
     ...selectedSuites.map((suite) => resolve(root, suites[suite])),
+    ...selectedSuites.flatMap((suite) => postgresFixtureRoots(suites[suite]).map((path) => resolve(root, path))),
     resolve(root, 'src/cli/index.ts'),
     fileURLToPath(import.meta.url),
     resolve(root, 'deploy/managed-saas-postgres-roles.sql'),
@@ -179,6 +207,7 @@ const summary = {
   startedAt: new Date().toISOString(),
   finishedAt: null,
   commit: spawnSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8', env: nonSuiteChildEnv }).stdout.trim(),
+  candidateBefore: sourceIdentity(root),
   backend: docker ? 'disposable-docker-container' : 'disposable-initdb-cluster',
   dockerImage: options.dockerImage ?? null,
   dockerImageId: null,
@@ -191,16 +220,17 @@ const summary = {
   distBefore: firstRequestLive ? await distSnapshot() : null,
   distAfter: null,
   distChanged: false,
-  durability: firstRequestLive ? 'fsync=on;synchronous_commit=on' : 'existing deterministic disposable fixture settings',
+  durability: 'fsync=on;synchronous_commit=on',
   sourceChanges: [],
   port: await freePort(),
   roles: ['model_router_saas_migrator', 'model_router_saas_control_plane', 'model_router_saas_gateway'],
   stages: [],
   suites: [],
-  cleanup: { clusterStopped: false, clusterRemoved: false },
+  cleanup: { clusterStopped: false, clusterRemoved: false, redisStopped: true },
   ok: false,
 };
 let clusterStarted = false;
+let ownedRedis;
 let interrupted = false;
 let activeChild;
 let activeOwnedTestGroup = false;
@@ -339,7 +369,7 @@ try {
     const name = `model-router-commercial-pg-${randomUUID()}`;
     await requireStage('create-container', 'docker', ['create', '--pull=never', '--name', name,
       '--label', 'model-router.disposable-commercial-gate=true', '--publish', `127.0.0.1:${summary.port}:5432`,
-      '--env', 'POSTGRES_HOST_AUTH_METHOD=trust', options.dockerImage, '-c', firstRequestLive ? 'fsync=on' : 'fsync=off', '-c', firstRequestLive ? 'synchronous_commit=on' : 'synchronous_commit=off']);
+      '--env', 'POSTGRES_HOST_AUTH_METHOD=trust', options.dockerImage, '-c', 'timezone=UTC', '-c', 'fsync=on', '-c', 'synchronous_commit=on']);
     const id = (await readFile(join(outputDir, 'create-container.log'), 'utf8')).trim();
     if (!/^[a-f0-9]{64}$/.test(id)) throw new Error('Docker did not return an owned container ID');
     summary.containerId = id;
@@ -356,10 +386,14 @@ try {
     ]);
     await requireStage('start-cluster', join(pgBin, 'pg_ctl'), [
       '-D', dataDir, '-l', join(outputDir, 'postgres.log'), '-w', '-o',
-      `-h 127.0.0.1 -p ${summary.port} -c unix_socket_directories= -c fsync=${firstRequestLive ? 'on' : 'off'} -c synchronous_commit=${firstRequestLive ? 'on' : 'off'} -c log_error_verbosity=verbose`, 'start',
+      `-h 127.0.0.1 -p ${summary.port} -c unix_socket_directories= -c timezone=UTC -c fsync=on -c synchronous_commit=on -c log_error_verbosity=verbose`, 'start',
     ]);
   }
   clusterStarted = true;
+  if (selectedSuites.some((suite) => postgresRedisRequired(suites[suite]))) {
+    summary.cleanup.redisStopped = false;
+    ownedRedis = await startDisposableRedis({ binary: options.redisBin, directory: join(outputDir, 'redis'), port: await freePort() });
+  }
   for (const suite of selectedSuites) {
     const database = `model_router_test_${suite.replaceAll('-', '_')}_${randomUUID().replaceAll('-', '')}`;
     roleUrl('postgres', database); // Validate before embedding the identifier in CREATE DATABASE.
@@ -372,6 +406,17 @@ try {
       MODEL_ROUTER_SAAS_GATEWAY_E2E_MIGRATOR_URL: roleUrl('model_router_saas_migrator', database),
       MODEL_ROUTER_SAAS_GATEWAY_E2E_CONTROL_PLANE_URL: roleUrl('model_router_saas_control_plane', database),
       MODEL_ROUTER_SAAS_GATEWAY_E2E_GATEWAY_URL: roleUrl('model_router_saas_gateway', database),
+      ...(postgresRedisRequired(suites[suite]) ? { ROUTER_TEST_REDIS_URL: ownedRedis.url } : {}),
+      ...(suites[suite] === 'tests/saas/gateway/fast/native-http.postgres.integration.test.ts'
+        ? { MODEL_ROUTER_NATIVE_FAST_HTTP_REDIS_URL: ownedRedis.url } : {}),
+      ...(suites[suite] === 'tests/saas/gateway/fast/populated-upgrade.postgres.integration.test.ts'
+        ? { SAAS_TEST_DATABASE_ADMIN_URL: roleUrl('postgres', database) } : {}),
+      // Fresh random fixture-only envelope key. Never discover or reuse a
+      // deployment master key for these deterministic software-KMS drills.
+      ...(postgresSoftwareKmsRequired(suites[suite]) ? {
+        MODEL_ROUTER_SAAS_SOFTWARE_KMS_MASTER_KEY: randomBytes(32).toString('hex'),
+        MODEL_ROUTER_SAAS_SOFTWARE_KMS_KEY_ID: 'software-local',
+      } : {}),
       ...(needsWorker ? {
         MODEL_ROUTER_SAAS_GATEWAY_E2E_VALIDATION_WORKER_URL: roleUrl('model_router_saas_validation_worker', database),
         MODEL_ROUTER_SAAS_VALIDATION_E2E_MIGRATOR_URL: roleUrl('model_router_saas_migrator', database),
@@ -405,20 +450,31 @@ try {
     if (needsWorker) await requireStage(`${suite}-worker-roles`, ...psqlCommand(database, ['-f',
       docker ? '/tmp/commercial-worker-roles.sql' : resolve(root, 'deploy/managed-saas-validation-worker-role-grants.sql')]));
     const clockSamples = await databaseClockSamples(database);
+    const fixtures = [];
+    for (const [index, fixture] of postgresFixtureRoots(suites[suite]).entries()) {
+      const stage = `${suite}-fixture-${index + 1}`;
+      const result = await run(stage, process.execPath, ['--import', 'tsx', '--test', '--test-reporter=tap', fixture], env, 300_000);
+      const counts = tapCounts(await readFile(join(outputDir, `${stage}.log`), 'utf8'));
+      const ok = result.code === 0 && counts.tests > 0 && counts.pass === counts.tests &&
+        counts.fail === 0 && counts.cancelled === 0 && counts.skipped === 0 && counts.todo === 0;
+      fixtures.push({ test: fixture, ...result, counts, ok });
+      if (!ok) throw new Error(`${suite} required HTTP fixture failed`);
+    }
     const result = await run(`${suite}-test`, process.execPath, [
       '--import', 'tsx', '--test', '--test-reporter=tap', suites[suite],
     ], env, 300_000);
     const counts = tapCounts(await readFile(join(outputDir, `${suite}-test.log`), 'utf8'));
     const ok = result.code === 0 && counts.tests > 0 && counts.pass === counts.tests &&
       counts.fail === 0 && counts.cancelled === 0 && counts.skipped === 0 && counts.todo === 0;
-    summary.suites.push({ suite, test: suites[suite], database, clockSamples, ...result, counts, ok });
+    summary.suites.push({ suite, test: suites[suite], database, fixtures, clockSamples, ...result, counts, ok });
     console.log(`${suite}: ${JSON.stringify({ ...result, counts, ok })}`);
-    if (!ok) break;
+    if (!ok && !options.keepGoing) break;
   }
 } catch (error) {
   summary.error = error instanceof Error ? error.message : 'unrecognized runner error';
   console.error(summary.error);
 } finally {
+  if (ownedRedis) summary.cleanup.redisStopped = await ownedRedis.stop();
   if (docker && summary.containerId) {
     await run('cleanup-postgres-log', 'docker', ['logs', summary.containerId]);
     const stop = await run('stop-cluster', 'docker', ['stop', '--time', '10', summary.containerId]);
@@ -448,9 +504,13 @@ try {
     ...Object.keys(summary.sourceBefore), ...Object.keys(summary.sourceAfter),
   ])].filter((path) => summary.sourceBefore[path] !== summary.sourceAfter[path]);
   summary.finishedAt = new Date().toISOString();
+  summary.candidateAfter = sourceIdentity(root);
   summary.ok = !summary.error && !interrupted && summary.suites.length === selectedSuites.length &&
     summary.suites.every((suite) => suite.ok) && summary.sourceChanges.length === 0 && !summary.distChanged &&
-    summary.cleanup.clusterStopped && summary.cleanup.clusterRemoved;
+    summary.cleanup.clusterStopped && summary.cleanup.clusterRemoved && summary.cleanup.redisStopped;
+  summary.promotable = summary.ok && summary.candidateBefore.clean && summary.candidateAfter.clean &&
+    summary.candidateBefore.sha === summary.candidateAfter.sha &&
+    summary.candidateBefore.fingerprint === summary.candidateAfter.fingerprint;
   await writeFile(join(outputDir, 'summary.json'), `${JSON.stringify(summary, null, 2)}\n`, { mode: 0o600 });
   console.log(`Summary: ${join(outputDir, 'summary.json')} (ok=${summary.ok}, source changes=${summary.sourceChanges.length})`);
   process.exitCode = summary.ok ? 0 : 1;
