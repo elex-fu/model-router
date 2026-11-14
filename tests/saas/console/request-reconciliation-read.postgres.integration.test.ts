@@ -27,6 +27,7 @@ type Phase = 'target' | 'principal' | 'schema-acl' | 'fixture' | 'scoped-query' 
 interface Diagnostic {
   phase: Phase;
   sqlState?: string;
+  assertionLine?: number;
 }
 
 function firstSqlState(cause: unknown): string | undefined {
@@ -41,7 +42,7 @@ function firstSqlState(cause: unknown): string | undefined {
 
 function redacted(cause: unknown, diagnostic: Diagnostic): Error {
   const failure = new Error(
-    `Customer request role proof failed (phase=${diagnostic.phase}; SQLSTATE=${diagnostic.sqlState ?? firstSqlState(cause) ?? 'not-captured'}); details redacted.`,
+    `Customer request role proof failed (phase=${diagnostic.phase}; SQLSTATE=${diagnostic.sqlState ?? firstSqlState(cause) ?? 'not-captured'}; assertionLine=${diagnostic.assertionLine ?? 'not-captured'}); details redacted.`,
   );
   failure.stack = failure.message;
   return failure;
@@ -57,11 +58,18 @@ async function proof(
   let failed = false;
   diagnostic.phase = phase;
   diagnostic.sqlState = undefined;
+  diagnostic.assertionLine = undefined;
   await t.test(name, async () => {
     try {
       await work();
     } catch (cause) {
       failed = true;
+      if (cause instanceof assert.AssertionError) {
+        const line = /request-reconciliation-read\.postgres\.integration\.test\.ts:(\d+):\d+/.exec(
+          cause.stack ?? '',
+        )?.[1];
+        if (line) diagnostic.assertionLine = Number(line);
+      }
       throw redacted(cause, diagnostic);
     }
   });
@@ -149,10 +157,10 @@ interface Fixture {
   tenantId: string;
   projectId: string;
   userId: string;
-  requests: ConsoleRequest[];
+  requests: Pick<ConsoleRequest, (typeof requestAxisKeys)[number]>[];
 }
 
-const requestMetadataKeys = [
+const requestAxisKeys = [
   'id',
   'projectId',
   'model',
@@ -164,6 +172,15 @@ const requestMetadataKeys = [
   'createdAt',
   'updatedAt',
 ] as const satisfies readonly (keyof ConsoleRequest)[];
+const requestMetadataKeys = [
+  ...requestAxisKeys,
+  'inputTotal',
+  'outputTotal',
+  'settlementAmountMinorUnits',
+  'durationMs',
+] as const satisfies readonly (keyof ConsoleRequest)[];
+const storedRequestAxes = (request: ConsoleRequest) =>
+  Object.fromEntries(requestAxisKeys.map((key) => [key, request[key]]));
 const attemptMetadataKeys = [
   'id',
   'sequence',
@@ -515,11 +532,12 @@ test('G5 restricted CP request axes and privacy contract on real PostgreSQL', {
               status: 'succeeded',
               limit: 1,
             });
-            assert.deepEqual(page.items[0], expected);
+            assert.ok(page.items[0]);
+            assert.deepEqual(storedRequestAxes(page.items[0]), expected);
             const detail = await queries.getRequestDetail({ ...scope, requestId: expected.id });
             assert.ok(detail);
             const { attempts, usageEvents, ...metadata } = detail;
-            assert.deepEqual(metadata, expected);
+            assert.deepEqual(storedRequestAxes(metadata), expected);
             assert.ok(attempts.length > 0);
             assert.ok(usageEvents.length > 0);
             assert.equal(expected.supplyMode === 'byok', expected.financialStatus === 'not_applicable');

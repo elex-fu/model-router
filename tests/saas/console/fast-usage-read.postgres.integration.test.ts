@@ -393,7 +393,7 @@ test('fast and strict customer usage coexist under the restricted control-plane 
       await gateway.query(
         `INSERT INTO saas_fast_gateway_receipts
       (intent_id,tenant_id,request_id,outcome,usage,usage_digest,receipt_digest,created_at)
-      VALUES($1,$2,$3,'unknown',$4::jsonb,$5,$5,date_trunc('day',now())-interval '12 hours')`,
+      VALUES($1,$2,$3,'unknown',$4::jsonb,$5,$5,(date_trunc('day',now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')-interval '12 hours')`,
         [intent.id, intent.tenantId, intent.requestId, JSON.stringify(raw.usage), raw.usageDigest],
       );
       await gateway.query("INSERT INTO saas_fast_billing_jobs(intent_id,state) VALUES($1,'blocked')", [intent.id]);

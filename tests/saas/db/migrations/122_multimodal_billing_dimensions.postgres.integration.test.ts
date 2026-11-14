@@ -544,6 +544,7 @@ test('122 multimodal billing dimensions hold on live PostgreSQL (columns, CHECKs
       `SELECT conname, pg_get_constraintdef(oid) AS pg_get_constraintdef
          FROM pg_constraint
         WHERE conrelid = 'model_router_saas.saas_usage_events'::regclass
+          AND contype = 'c'
           AND conname LIKE 'saas_usage_events%'
           AND pg_get_constraintdef(oid) LIKE '%billing_mode%'`,
     );
