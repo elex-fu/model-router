@@ -8,7 +8,10 @@
  * narrow, and re-audit it when adding trigger side effects to these tables.
  * Bound values are never stored here. This is not an execution API.
  */
+import { CATALOG_ELIGIBILITY_SNAPSHOT_SQL } from '../catalog/eligibility-snapshot.js';
+
 const PREPARATION_FACT_PRESERVING_STATEMENTS: ReadonlySet<string> = new Set([
+  CATALOG_ELIGIBILITY_SNAPSHOT_SQL,
   '/* prepared-evidence:clock */ SELECT clock_timestamp() AS locked_at',
   '/* prepared-evidence:request */ SELECT * FROM saas_requests WHERE tenant_id = $1 AND id = $2 LIMIT 2 FOR UPDATE',
   '/* prepared-evidence:attempt */ SELECT * FROM saas_attempts WHERE tenant_id = $1 AND id = $2 LIMIT 2 FOR UPDATE',

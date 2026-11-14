@@ -4,6 +4,7 @@ import {
   SAAS_PLATFORM_AUTHORIZATION_WRITER_TIMEOUTS_SQL,
 } from '../db/advisory-lock-keys.js';
 import type { SaasDatabase, SqlExecutor } from '../db/index.js';
+import { CATALOG_ELIGIBILITY_SNAPSHOT_SQL } from './eligibility-snapshot.js';
 import { SaasCatalogError, type SaasCatalogErrorCode } from './errors.js';
 import type {
   CatalogTimestamp,
@@ -558,32 +559,23 @@ export async function evaluateProviderEligibilityInTransaction(
   };
   const now = normalizeTimestamp(at);
   const nowMs = new Date(now).getTime();
-  const query = async <Row>(sql: string, values: readonly unknown[] = []): Promise<Row[]> =>
-    (await executor.query<Row>(sql, values)).rows;
 
   // Readers and writers fence the product's append-only capability and rights history. Migration 048
   // gives database-side version inserts the matching exclusive advisory lock.
   await lockCatalogProduct(executor, request.providerId, request.productId, true);
 
-  const productRows = await query<ProviderProductRow>(
-    `SELECT provider_id, product_id, display_name, status, created_at
-     FROM saas_provider_products
-     WHERE provider_id = $1 AND product_id = $2
-     LIMIT 1`,
-    [request.providerId, request.productId],
-  );
-  const product = productRows[0];
+  const snapshot = await executor.query<{
+    product: ProviderProductRow | null;
+    capability: CapabilityEligibilityRow | null;
+    rights: RightsRow[];
+  }>(CATALOG_ELIGIBILITY_SNAPSHOT_SQL, [request.providerId, request.productId, request.model, request.endpoint]);
+  const facts = snapshot.rows[0];
+  if (snapshot.rows.length !== 1 || !facts || !Array.isArray(facts.rights)) fail('CATALOG_STORAGE_ERROR');
+  const product = facts.product;
   if (!product) return deny(request, 'provider_product_missing');
   if (product.status !== 'active') return deny(request, 'provider_product_disabled');
 
-  const capabilityRows = await query<CapabilityEligibilityRow>(
-    `SELECT protocol, version, support_level, validation_state
-     FROM saas_provider_capabilities
-     WHERE provider_id = $1 AND product_id = $2 AND model = $3 AND endpoint = $4
-     ORDER BY version DESC`,
-    [request.providerId, request.productId, request.model, request.endpoint],
-  );
-  const capability = capabilityRows[0];
+  const capability = facts.capability;
   if (!capability) return deny(request, 'capability_missing');
   if (capability.support_level === 'unsupported') return deny(request, 'capability_unsupported', capability);
   if (capability.validation_state === 'unverified') return deny(request, 'capability_unverified', capability);
@@ -592,15 +584,7 @@ export async function evaluateProviderEligibilityInTransaction(
     return deny(request, 'capability_unsupported', capability);
   }
 
-  const rightsRows = await query<RightsRow>(
-    `SELECT rights_id, version, provider_id, product_id, credential_type, supply_mode, region, purpose,
-            model_scope, endpoint_scope, effective_at, expires_at, approval_ref, status,
-            evidence_ref, evidence_sha256, created_at
-     FROM saas_provider_rights
-     WHERE provider_id = $1 AND product_id = $2
-     ORDER BY rights_id, version DESC`,
-    [request.providerId, request.productId],
-  );
+  const rightsRows = facts.rights;
   if (rightsRows.length === 0) return deny(request, 'rights_missing', capability);
 
   const currentRights = latestEffectiveRights(rightsRows, nowMs);

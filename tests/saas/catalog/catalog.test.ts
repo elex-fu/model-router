@@ -160,11 +160,12 @@ test('reuses a caller-owned executor and preserves standalone eligibility result
   assert.deepEqual(directAllowed, standaloneAllowed);
   assert.deepEqual(directDenied, standaloneDenied);
   assert.deepEqual(aliasAllowed, standaloneAllowed);
-  assert.equal(observedSql.length, 12);
+  assert.equal(observedSql.length, 6);
   assert.equal(observedSql.filter((sql) => /pg_advisory_xact_lock_shared/.test(sql)).length, 3);
-  for (let index = 0; index < observedSql.length; index += 4) {
+  for (let index = 0; index < observedSql.length; index += 2) {
     assert.match(observedSql[index] ?? '', /pg_advisory_xact_lock_shared/);
-    assert.doesNotMatch(observedSql.slice(index, index + 4).join('\n'), /\bFOR (?:UPDATE|SHARE)\b/i);
+    assert.match(observedSql[index + 1] ?? '', /catalog-eligibility-snapshot/);
+    assert.doesNotMatch(observedSql.slice(index, index + 2).join('\n'), /\bFOR (?:UPDATE|SHARE)\b/i);
   }
 });
 

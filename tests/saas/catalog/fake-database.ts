@@ -108,6 +108,19 @@ export class FakeCatalogDatabase implements SaasDatabase {
     if (statement.startsWith('select set_config(')) return result<Row>();
     if (statement.startsWith('select pg_advisory_xact_lock')) return result<Row>();
 
+    if (statement.startsWith('/* catalog-eligibility-snapshot */')) {
+      return result<Row>([
+        {
+          product: this.state.products.find((row) => row.provider_id === a && row.product_id === b) ?? null,
+          capability:
+            this.state.capabilities
+              .filter((row) => row.provider_id === a && row.product_id === b && row.model === c && row.endpoint === d)
+              .sort((left, right) => Number(right.version) - Number(left.version))[0] ?? null,
+          rights: this.state.rights.filter((row) => row.provider_id === a && row.product_id === b),
+        } as Row,
+      ]);
+    }
+
     if (
       statement.startsWith(
         'select product.provider_id, product.product_id, product.display_name, product.status, product.created_at from saas_provider_products as product join saas_provider_rights as rights_identity',

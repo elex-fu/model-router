@@ -705,6 +705,18 @@ class FakeExecutor implements SqlExecutor {
       if (Array.isArray(row)) return { rows: row.map(clone) as RowType[], rowCount: row.length };
       return row ? { rows: [clone(row) as RowType], rowCount: 1 } : { rows: [], rowCount: 0 };
     }
+    if (lower.includes('/* catalog-eligibility-snapshot */')) {
+      return {
+        rows: [
+          {
+            product: clone(this.fixture.rows.product),
+            capability: clone(this.fixture.rows.capability),
+            rights: [clone(this.fixture.rows['account-rights'])],
+          } as RowType,
+        ],
+        rowCount: 1,
+      };
+    }
     if (lower.includes('from saas_provider_products'))
       return { rows: [clone(this.fixture.rows.product as Row) as RowType], rowCount: 1 };
     if (lower.includes('from saas_provider_capabilities'))
