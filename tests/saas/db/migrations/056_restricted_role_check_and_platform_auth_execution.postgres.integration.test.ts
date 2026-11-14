@@ -492,7 +492,7 @@ test('056 real restricted-role CHECK equivalence, MFA fencing and zero callable 
           await assert.rejects(database.query(statement), sqlState('42501'));
       }
       const key = await gateway.query<{ allowed: boolean }>(
-        "SELECT has_any_column_privilege(current_user, 'saas_api_keys', 'UPDATE') AS allowed",
+        "SELECT has_column_privilege(current_user, 'saas_api_keys', 'key_hash', 'UPDATE') AS allowed",
       );
       assert.equal(key.rows[0]?.allowed, false);
     });

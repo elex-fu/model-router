@@ -646,7 +646,7 @@ test('055: real restricted-role prepared INSERT optional dates, matching writers
                AND validator.prorettype = 'boolean'::regtype
                AND validator.proowner = 'model_router_saas_migrator'::regrole
                AND has_function_privilege(current_user, validator.oid, 'EXECUTE')) AS validator,
-            has_any_column_privilege(current_user, 'saas_api_keys', 'UPDATE') AS key_update`,
+            has_column_privilege(current_user, 'saas_api_keys', 'key_hash', 'UPDATE') AS key_update`,
           );
           assert.equal(acl.rows[0]?.executable, db === control ? '1' : '0');
           assert.equal(acl.rows[0]?.validator, db === control ? 1 : 0);

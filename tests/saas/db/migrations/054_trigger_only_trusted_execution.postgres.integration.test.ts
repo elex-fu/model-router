@@ -285,7 +285,7 @@ test('054: restricted-role trigger-only execution, real fences, deferred balance
                AND validator.prorettype = 'boolean'::regtype
                AND validator.proowner = 'model_router_saas_migrator'::regrole
                AND has_function_privilege(current_user, validator.oid, 'EXECUTE')) AS validator,
-                  has_any_column_privilege(current_user, 'saas_api_keys', 'UPDATE') AS api_key_update,
+                  has_column_privilege(current_user, 'saas_api_keys', 'key_hash', 'UPDATE') AS api_key_update,
                   has_schema_privilege(current_user, 'model_router_saas', 'CREATE') AS schema_create,
                   has_table_privilege(current_user, 'saas_api_keys', 'TRIGGER') AS trigger_create`,
           );

@@ -52,12 +52,12 @@ test('059 actual restricted PostgreSQL terminal cancellation and redispatch guar
       assert.equal(actual.validated, true);
       assert.match(actual.check_def, /result_state = 'failed'::text/);
       const privileges = (
-        await gateway.query<{ key_update: boolean; direct_guard: boolean }>(
-          `SELECT has_any_column_privilege(current_user, 'saas_api_keys', 'UPDATE') AS key_update,
+        await gateway.query<{ key_secret_update: boolean; direct_guard: boolean }>(
+          `SELECT has_column_privilege(current_user, 'saas_api_keys', 'key_hash', 'UPDATE') AS key_secret_update,
           has_function_privilege(current_user, 'saas_metering_guard_attempt_update()', 'EXECUTE') AS direct_guard`,
         )
       ).rows[0];
-      assert.deepEqual(privileges, { key_update: false, direct_guard: false });
+      assert.deepEqual(privileges, { key_secret_update: false, direct_guard: false });
       const before = await catalog();
       await assert.rejects(
         cancellationTransaction(migrator, (tx) => tx.query(PRE_DISPATCH_TERMINAL_CANCELLATION_SAAS_MIGRATION.sql)),

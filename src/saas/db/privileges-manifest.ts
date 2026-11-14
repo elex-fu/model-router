@@ -12739,6 +12739,18 @@ export const MANIFEST_GATEWAY_COLUMN_GROUPS: readonly SaasGatewayColumnTsGroup[]
   },
   {
     tsComment: [
+      "125 (batch-5 §5.4) risk control: auto-ban revokes the banned user's",
+      'active API keys in the same transaction — the status/revocation triple',
+      'plus the authz-version fence, and nothing else. Key material, scopes and',
+      'quota columns stay control-plane only.',
+    ],
+    table: 'saas_api_keys',
+    privilege: 'UPDATE',
+    columns: ['status', 'revoked_at', 'revoked_by_user_id', 'authz_version'],
+    tsStyle: 'inline',
+  },
+  {
+    tsComment: [
       '125 auto-ban guard: the platform-role existence probe (SELECT-only,',
       'user_id alone) so risk control never disables a governance-owned account.',
     ],
@@ -16980,6 +16992,32 @@ export const MANIFEST_GATEWAY_COLUMN_SQL_ENTRIES: readonly SaasGatewayColumnSqlE
   {
     table: 'saas_users',
     column: 'updated_at',
+    privilege: 'UPDATE',
+  },
+  {
+    sqlComment: [
+      "125 (batch-5 §5.4) risk control: auto-ban revokes the banned user's",
+      'active API keys in the same transaction — the status/revocation triple',
+      'plus the authz-version fence, and nothing else. Key material, scopes and',
+      'quota columns stay control-plane only.',
+    ],
+    table: 'saas_api_keys',
+    column: 'status',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_api_keys',
+    column: 'revoked_at',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_api_keys',
+    column: 'revoked_by_user_id',
+    privilege: 'UPDATE',
+  },
+  {
+    table: 'saas_api_keys',
+    column: 'authz_version',
     privilege: 'UPDATE',
   },
   {

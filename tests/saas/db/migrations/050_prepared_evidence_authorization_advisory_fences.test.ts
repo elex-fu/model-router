@@ -569,15 +569,29 @@ test('migration 050 stays within the existing gateway privilege contract', () =>
   ]) {
     // Sanctioned exceptions: 115 (R-dormant batch 2.2) adds the scheduler's
     // lazy scheduling-threshold pause columns, and 125 (batch-5 §5.4) risk
-    // control's auto-ban seam flips the user's disabled_at/updated_at. Every
+    // control's auto-ban seam flips disabled_at/updated_at and revokes keys. Every
     // other table column stays gateway-read-only (the 058 precedent).
-    const sanctioned = new Set(['saas_tenant_provider_accounts', 'saas_platform_provider_accounts', 'saas_users']);
+    const sanctioned = new Set([
+      'saas_tenant_provider_accounts',
+      'saas_platform_provider_accounts',
+      'saas_users',
+      'saas_api_keys',
+    ]);
     assert.equal(
       sanctioned.has(table) || gatewayUpdateTables.has(table) === false,
       true,
       `${table} must not receive UPDATE merely to support FOR SHARE`,
     );
   }
+  assert.deepEqual(
+    SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS.filter(
+      ([table, , privilege]) => table === 'saas_api_keys' && privilege === 'UPDATE',
+    )
+      .map(([, column]) => column)
+      .sort(),
+    ['authz_version', 'revoked_at', 'revoked_by_user_id', 'status'],
+    'moderation may revoke keys, never write key material, scopes or quota policy',
+  );
   // The 125 saas_users exception stays column-exact: only the auto-ban pair.
   assert.deepEqual(
     SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS.filter(

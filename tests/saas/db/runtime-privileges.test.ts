@@ -774,12 +774,29 @@ test('gateway manifest contains no capacity-policy writes', () => {
     'saas_api_keys',
     'saas_capacity_policy_audit_details',
   ]);
+  // 125 (batch-5 §5.4) is the sole non-capacity write on this table set: the
+  // auto-ban key-revocation fence. Quota fields stay control-plane only.
+  const sanctionedKeyRevocationColumns = new Set(['status', 'revoked_at', 'revoked_by_user_id', 'authz_version']);
+  const isSanctionedKeyRevocation = (table: string, column: string, privilege: string) =>
+    table === 'saas_api_keys' && privilege !== 'SELECT' && sanctionedKeyRevocationColumns.has(column);
   assert.equal(
     SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS.some(
-      ([table, , privilege]) => capacityPolicyTables.has(table) && (privilege === 'INSERT' || privilege === 'UPDATE'),
+      ([table, column, privilege]) =>
+        capacityPolicyTables.has(table) &&
+        (privilege === 'INSERT' || privilege === 'UPDATE') &&
+        !isSanctionedKeyRevocation(table, column, privilege),
     ),
     false,
   );
+  for (const column of ['requests_per_minute', 'tokens_per_minute', 'max_concurrent_requests']) {
+    assert.equal(
+      SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS.some(
+        ([table, field, privilege]) => table === 'saas_api_keys' && field === column && privilege !== 'SELECT',
+      ),
+      false,
+      `gateway must never write saas_api_keys.${column}`,
+    );
+  }
   assert.equal(
     (SAAS_GATEWAY_RUNTIME_READ_TABLES as readonly string[]).includes('saas_capacity_policy_audit_details'),
     false,
@@ -787,9 +804,17 @@ test('gateway manifest contains no capacity-policy writes', () => {
   const sql = readFileSync(resolve(process.cwd(), 'deploy/managed-saas-postgres-roles.sql'), 'utf8');
   const gatewayBlock = sql.match(/DO \$gateway_runtime_grants\$([\s\S]*?)\$gateway_runtime_grants\$/)?.[1];
   assert.ok(gatewayBlock);
-  assert.doesNotMatch(
-    gatewayBlock,
-    /\('(saas_tenants|saas_projects|saas_project_inference_policy_versions|saas_api_keys|saas_capacity_policy_audit_details)', '[^']+', '(?:INSERT|UPDATE)'\)/,
+  const gatewayColumnGrants = [...gatewayBlock.matchAll(/\('([^']+)', '([^']+)', '(INSERT|UPDATE|SELECT)'\)/g)].map(
+    (match) => [match[1], match[2], match[3]] as const,
+  );
+  assert.equal(
+    gatewayColumnGrants.some(
+      ([table, column, privilege]) =>
+        capacityPolicyTables.has(table) &&
+        privilege !== 'SELECT' &&
+        !isSanctionedKeyRevocation(table, column, privilege),
+    ),
+    false,
   );
 });
 
@@ -842,7 +867,7 @@ test('057 requires only gateway evidence-reference INSERT/SELECT; no CP or immut
     );
 });
 
-test('058 changes no CP rotation columns and grants neither CP job UPDATE nor gateway key/account UPDATE', () => {
+test('058 changes no CP rotation columns and limits gateway account/key UPDATE to sanctioned fences', () => {
   for (const table of ['saas_tenant_provider_credentials', 'saas_platform_provider_credentials']) {
     for (const column of ['current_version', 'expires_at'])
       assert.ok(
@@ -879,14 +904,18 @@ test('058 changes no CP rotation columns and grants neither CP job UPDATE nor ga
       ['saas_tenant_provider_accounts', 'scheduling_threshold_pause_until'],
     ],
   );
-  for (const table of ['saas_api_keys']) {
-    assert.equal(
-      SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS.some(
-        ([relation, , privilege]) => relation === table && privilege === 'UPDATE',
-      ),
-      false,
-    );
-  }
+  // 125 (batch-5 §5.4) is the only sanctioned gateway key-column exception:
+  // the moderation auto-ban's revocation triple plus the authz-version fence.
+  // Key material, scopes, quotas and the remaining lifecycle columns stay
+  // control-plane only.
+  assert.deepEqual(
+    SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS.filter(
+      ([relation, , privilege]) => relation === 'saas_api_keys' && privilege === 'UPDATE',
+    )
+      .map(([, field]) => field)
+      .sort(),
+    ['authz_version', 'revoked_at', 'revoked_by_user_id', 'status'],
+  );
 });
 
 test('control-plane unknown-outcome grants match the scanner and append-only observation contract', () => {
@@ -1524,7 +1553,17 @@ test('gateway manifest permits encrypted-envelope reads but never grants control
         // flips the user's disabled_at through the same columns the
         // control-plane governance service uses — the single sanctioned
         // non-SELECT exception on saas_users.
-        !(table === 'saas_users' && (column === 'disabled_at' || column === 'updated_at')),
+        !(table === 'saas_users' && (column === 'disabled_at' || column === 'updated_at')) &&
+        // 125 auto-ban also revokes the user's active keys through the
+        // revocation triple + authz-version fence — the single sanctioned
+        // non-SELECT exception on saas_api_keys.
+        !(
+          table === 'saas_api_keys' &&
+          (column === 'status' ||
+            column === 'revoked_at' ||
+            column === 'revoked_by_user_id' ||
+            column === 'authz_version')
+        ),
     ),
     false,
   );

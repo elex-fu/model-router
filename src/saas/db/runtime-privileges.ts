@@ -5775,6 +5775,14 @@ export const SAAS_GATEWAY_RUNTIME_COLUMN_GRANTS: readonly SaasGatewayColumnGrant
   ),
   ['saas_users', 'disabled_at', 'UPDATE'],
   ['saas_users', 'updated_at', 'UPDATE'],
+  // 125 (batch-5 §5.4) risk control: auto-ban revokes the banned user's
+  // active API keys in the same transaction — the status/revocation triple
+  // plus the authz-version fence, and nothing else. Key material, scopes and
+  // quota columns stay control-plane only.
+  ['saas_api_keys', 'status', 'UPDATE'],
+  ['saas_api_keys', 'revoked_at', 'UPDATE'],
+  ['saas_api_keys', 'revoked_by_user_id', 'UPDATE'],
+  ['saas_api_keys', 'authz_version', 'UPDATE'],
   // 125 auto-ban guard: the platform-role existence probe (SELECT-only,
   // user_id alone) so risk control never disables a governance-owned account.
   ['saas_platform_role_assignments', 'user_id', 'SELECT'],

@@ -340,7 +340,7 @@ test('restricted PostgreSQL prelock fences concurrent authorization changes on t
     await verifySaasRuntimeDatabasePrivileges(control, 'control_plane');
     await verifySaasRuntimeDatabasePrivileges(gateway, 'gateway');
 
-    await t.test('gateway has column SELECT, no API-key UPDATE, and executes the new prelock', async () => {
+    await t.test('gateway has column SELECT and revocation-only UPDATE, and executes the new prelock', async () => {
       const acl = await gateway.query<{
         column_select: boolean;
         table_select: boolean;
@@ -349,12 +349,15 @@ test('restricted PostgreSQL prelock fences concurrent authorization changes on t
       }>(
         `SELECT has_column_privilege(current_user, 'saas_api_keys', 'id', 'SELECT') AS column_select,
                 has_table_privilege(current_user, 'saas_api_keys', 'SELECT') AS table_select,
-                has_any_column_privilege(current_user, 'saas_api_keys', 'UPDATE') AS any_update,
+                has_column_privilege(current_user, 'saas_api_keys', 'key_hash', 'UPDATE') AS any_update,
                 (SELECT rolsuper FROM pg_roles WHERE rolname = current_user) AS superuser`,
       );
       assert.deepEqual(acl.rows[0], { column_select: true, table_select: false, any_update: false, superuser: false });
+      // The sanctioned moderation UPDATE columns also permit row locks.
+      // They must never grant writes to key material.
+      await gateway.query('SELECT id FROM saas_api_keys LIMIT 1 FOR SHARE');
       await assert.rejects(
-        gateway.query('SELECT id FROM saas_api_keys LIMIT 1 FOR SHARE'),
+        gateway.query('UPDATE saas_api_keys SET key_hash = key_hash WHERE false'),
         (error: unknown) => typeof error === 'object' && error !== null && 'code' in error && error.code === '42501',
       );
       for (const mode of ['byok', 'platform'] as const) {

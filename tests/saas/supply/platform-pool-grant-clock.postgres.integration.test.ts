@@ -40,15 +40,16 @@ test('control-plane pool relationships preserve read-only authority and use Post
   const original = await migrator.database.query(originalSql, originalIdentity);
   assert.equal(original.rows.length, 1);
 
-  await t.test('control-plane adds and rebinds members while pool and profile UPDATE remain denied', async () => {
+  await t.test('control-plane adds and rebinds members while pool and profile scope UPDATE remain denied', async () => {
     const privileges = await controlPlane.query(
       `SELECT has_any_column_privilege(current_user, 'saas_platform_provider_pools', 'UPDATE') AS pool_update,
-              has_any_column_privilege(current_user, 'saas_supply_profiles', 'UPDATE') AS profile_update`,
+              has_column_privilege(current_user, 'saas_supply_profiles', 'model_scopes', 'UPDATE') AS profile_update`,
     );
     assert.deepEqual(privileges.rows, [{ pool_update: false, profile_update: false }]);
     for (const table of ['saas_platform_provider_pools', 'saas_supply_profiles']) {
+      const column = table === 'saas_supply_profiles' ? 'model_scopes' : 'status';
       await assert.rejects(
-        controlPlane.query(`UPDATE ${table} SET status = status WHERE false`),
+        controlPlane.query(`UPDATE ${table} SET ${column} = ${column} WHERE false`),
         (error: unknown) => error instanceof Error && 'code' in error && error.code === '42501',
         'read-only authority must retain actual PostgreSQL permission denial',
       );

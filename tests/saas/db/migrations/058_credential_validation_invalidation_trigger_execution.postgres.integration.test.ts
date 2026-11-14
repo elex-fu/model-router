@@ -622,7 +622,7 @@ test('058 real restricted CP invalidation, immutable guards and unchanged ACL/ca
                AND validator.proowner = 'model_router_saas_migrator'::regrole
                AND has_function_privilege(current_user, validator.oid, 'EXECUTE')) AS validator,
           has_any_column_privilege(current_user,'model_router_saas.saas_tenant_provider_credential_validation_jobs','UPDATE') AS update,
-          has_any_column_privilege(current_user,'model_router_saas.saas_api_keys','UPDATE') AS key_update`)
+          has_column_privilege(current_user,'model_router_saas.saas_api_keys','key_hash','UPDATE') AS key_update`)
         ).rows[0];
         assert.ok(acl);
         assert.equal(acl.execute, db === control ? 1 : 0);
