@@ -57,6 +57,14 @@ const isolatedGates = [
   ['announcement-fanout-095', 'tests/saas/webhooks/announcement-fanout.postgres.integration.test.ts', false],
   ['account-quarantine-097', 'tests/saas/supply/account-quarantine.postgres.integration.test.ts', false],
   ['user-risk-drill-153', 'tests/saas/risk/user-risk.postgres.integration.test.ts', false],
+  ['content-moderation-auto-ban', 'tests/saas/risk/content-moderation.postgres.integration.test.ts', false],
+  [
+    'multimodal-billing-122',
+    'tests/saas/db/migrations/122_multimodal_billing_dimensions.postgres.integration.test.ts',
+    false,
+  ],
+  ['catalog-eligibility-snapshot', 'tests/saas/catalog/eligibility-snapshot.postgres.integration.test.ts', false],
+  ['customer-passkey', 'tests/saas/identity/customer-passkey.postgres.integration.test.ts', false],
   ['rate-limit-scheduling-098', 'tests/saas/gateway/rate-limit-scheduling.postgres.integration.test.ts', false],
   ['health-score-098', 'tests/saas/gateway/health-score.postgres.integration.test.ts', false],
   ['oauth-refresh-onboarding', 'tests/saas/supply/oauth-refresh-onboarding.postgres.integration.test.ts', false],
@@ -880,6 +888,14 @@ test('actual source prerequisites preserve successful-HTTP dependencies and each
       validateManagedSaasSigtermSource(source);
     } else if (selector === 'runtime-health-clock') {
       validateRuntimeHealthClockSource(source, read(runtimeHealthClockFixture));
+    } else if (selector === 'multimodal-billing-122') {
+      // This historical root seeds its own complete identity/price chain
+      // inline, rather than through a named seed helper.
+      for (const table of ['saas_users', 'saas_tenants', 'saas_projects', 'saas_requests']) {
+        assert.match(source, new RegExp(`INSERT INTO model_router_saas\\.${table}\\b`));
+      }
+      assert.match(source, /AND contype = 'c'/);
+      assert.doesNotMatch(source, /await cancellationFixture\(|\b(?:issueBootstrapToken|bootstrapPlatformAdmin)\s*\(/);
     } else if (selector === 'dispatch-proof-fence-batch') {
       assert.match(source, /from '\.\.\/gateway\/prepared-evidence-authority-postgres-fixture\.js'/);
       assert.match(source, /mode: 'byok' \| 'platform' = 'platform'/);

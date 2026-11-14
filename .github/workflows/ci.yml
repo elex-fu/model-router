@@ -296,7 +296,7 @@ jobs:
       fail-fast: false
       matrix:
         postgres-version: ["15", "18"]
-        gate: ["cancellation-059", "pre-dispatch-compensation", "concurrent-claim", "normal-success-terminal-replay", "usage-correction-063", "key-ip-policy-080", "key-budget-policy-081", "key-budget-batched-mutations", "settlement-sigkill-crash", "member-directory", "member-directory-http", "dual-instance-failover", "marketing-redeem-codes-089", "marketing-promo-codes-090", "marketing-affiliate-091", "marketing-announcements-092", "quota-sync-093", "oauth-token-refresh-094", "announcement-fanout-095", "account-quarantine-097", "user-risk-drill-153", "rate-limit-scheduling-098", "health-score-098", "oauth-refresh-onboarding", "kimi-commercial-preparation-diagnostic", "scheduler-native-protocol", "prepared-statements", "runtime-health-clock", "dispatch-capacity", "affinity-bind-race", "dispatch-proof-fence-batch", "payment-merchant-binding", "payment-worker-sigkill", "managed-saas-sigterm"]
+        gate: ["cancellation-059", "pre-dispatch-compensation", "concurrent-claim", "normal-success-terminal-replay", "usage-correction-063", "key-ip-policy-080", "key-budget-policy-081", "key-budget-batched-mutations", "settlement-sigkill-crash", "member-directory", "member-directory-http", "dual-instance-failover", "marketing-redeem-codes-089", "marketing-promo-codes-090", "marketing-affiliate-091", "marketing-announcements-092", "quota-sync-093", "oauth-token-refresh-094", "announcement-fanout-095", "account-quarantine-097", "user-risk-drill-153", "content-moderation-auto-ban", "multimodal-billing-122", "catalog-eligibility-snapshot", "customer-passkey", "rate-limit-scheduling-098", "health-score-098", "oauth-refresh-onboarding", "kimi-commercial-preparation-diagnostic", "scheduler-native-protocol", "prepared-statements", "runtime-health-clock", "dispatch-capacity", "affinity-bind-race", "dispatch-proof-fence-batch", "payment-merchant-binding", "payment-worker-sigkill", "managed-saas-sigterm"]
     services:
       postgres:
         image: postgres:${{ matrix.postgres-version }}
@@ -348,6 +348,10 @@ jobs:
           tests/saas/webhooks/announcement-fanout.postgres.integration.test.ts
           tests/saas/supply/account-quarantine.postgres.integration.test.ts
           tests/saas/risk/user-risk.postgres.integration.test.ts
+          tests/saas/risk/content-moderation.postgres.integration.test.ts
+          tests/saas/db/migrations/122_multimodal_billing_dimensions.postgres.integration.test.ts
+          tests/saas/catalog/eligibility-snapshot.postgres.integration.test.ts
+          tests/saas/identity/customer-passkey.postgres.integration.test.ts
           tests/saas/gateway/rate-limit-scheduling.postgres.integration.test.ts
           tests/saas/gateway/health-score.postgres.integration.test.ts
           tests/saas/supply/oauth-refresh-onboarding.postgres.integration.test.ts

@@ -85,6 +85,22 @@ const gates = {
     root: 'tests/saas/risk/user-risk.postgres.integration.test.ts',
     httpFixture: false,
   },
+  'content-moderation-auto-ban': {
+    root: 'tests/saas/risk/content-moderation.postgres.integration.test.ts',
+    httpFixture: false,
+  },
+  'multimodal-billing-122': {
+    root: 'tests/saas/db/migrations/122_multimodal_billing_dimensions.postgres.integration.test.ts',
+    httpFixture: false,
+  },
+  'catalog-eligibility-snapshot': {
+    root: 'tests/saas/catalog/eligibility-snapshot.postgres.integration.test.ts',
+    httpFixture: false,
+  },
+  'customer-passkey': {
+    root: 'tests/saas/identity/customer-passkey.postgres.integration.test.ts',
+    httpFixture: false,
+  },
   'rate-limit-scheduling-098': {
     root: 'tests/saas/gateway/rate-limit-scheduling.postgres.integration.test.ts',
     httpFixture: false,
