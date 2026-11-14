@@ -6,6 +6,7 @@
 import { spawnSync } from 'node:child_process';
 import { appendFileSync, existsSync } from 'node:fs';
 import { resolve, sep } from 'node:path';
+import { parseGateCounts, promotableGateRun, sourceIdentity } from './ci/gate-evidence.mjs';
 
 const args = process.argv.slice(2);
 function option(name) {
@@ -32,14 +33,10 @@ if (!absoluteTest.startsWith(`${root}${sep}tests${sep}`) || !existsSync(absolute
   process.exit(2);
 }
 
-const commit = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' });
-if (commit.error || commit.status !== 0) {
-  console.error('git rev-parse HEAD failed');
-  process.exit(1);
-}
+const before = sourceIdentity(root);
 
 const started = new Date();
-const run = spawnSync(process.execPath, ['--import', 'tsx', '--test', testRoot], {
+const run = spawnSync(process.execPath, ['--import', 'tsx', '--test', '--test-reporter=spec', testRoot], {
   cwd: root,
   encoding: 'utf8',
   maxBuffer: 64 * 1024 * 1024,
@@ -47,30 +44,19 @@ const run = spawnSync(process.execPath, ['--import', 'tsx', '--test', testRoot],
 const stdout = typeof run.stdout === 'string' ? run.stdout : '';
 const stderr = typeof run.stderr === 'string' ? run.stderr : '';
 
-function count(name) {
-  const matches = [...stdout.matchAll(new RegExp(`^ℹ ${name} (\\d+(?:\\.\\d+)?)$`, 'gm'))];
-  if (matches.length === 0) return null;
-  return matches.reduce((total, match) => total + Number(match[1]), 0);
-}
-const counts = {
-  tests: count('tests'),
-  pass: count('pass'),
-  fail: count('fail'),
-  cancelled: count('cancelled'),
-  skipped: count('skipped'),
-  duration_ms: count('duration_ms'),
-};
+const counts = parseGateCounts(stdout);
 if (counts.tests === null || counts.pass === null || counts.fail === null) {
   console.error('native reporter counts not found; refusing to fabricate evidence');
   process.exit(1);
 }
-const conclusion = run.status === 0 && counts.fail === 0 && counts.cancelled === 0 ? 'GO' : 'NO-GO';
+const after = sourceIdentity(root);
+const conclusion = promotableGateRun(run.status, counts, before, after) ? 'GO' : 'NO-GO';
 const row = [
   started.toISOString().slice(0, 10),
-  commit.stdout.trim().slice(0, 12),
+  before.sha,
   gate,
   pg ?? 'n/a',
-  `${counts.tests}/${counts.pass}/${counts.fail}/${counts.skipped}`,
+  `${counts.tests}/${counts.pass}/${counts.fail}/${counts.skipped}/${counts.todo}`,
   Math.round(counts.duration_ms ?? 0),
   conclusion,
   '',
@@ -80,7 +66,7 @@ if (out) appendFileSync(resolve(root, out), record);
 else process.stdout.write(record);
 if (conclusion !== 'GO') {
   // Failure signature only: never embed child output (may mention URLs/hosts).
-  console.error(`gate ${gate} NO-GO: exit=${run.status ?? 'signal'} fail=${counts.fail} cancelled=${counts.cancelled}`);
+  console.error(`gate ${gate} NO-GO: exit=${run.status ?? 'signal'} fail=${counts.fail} cancelled=${counts.cancelled} skipped=${counts.skipped} todo=${counts.todo} clean=${before.clean && after.clean} sourceStable=${before.sha === after.sha && before.fingerprint === after.fingerprint}`);
   if (stderr.trim() !== '') console.error('child stderr withheld from evidence; inspect the CI log directly');
   process.exit(1);
 }

@@ -11,6 +11,7 @@ import { createInterface } from 'node:readline';
 import { test } from 'node:test';
 import { createContext, runInContext } from 'node:vm';
 import ts from 'typescript';
+import { REQUEST_DIAGNOSTIC_PHASES, RequestDiagnosticTrace } from '../../src/saas/gateway/request-diagnostic-trace.js';
 
 const root = path.resolve(__dirname, '../..');
 const benchFile = path.join(root, 'scripts/ops/bench-gateway.mjs');
@@ -33,6 +34,29 @@ function loadHelpers<T>(file: string, names: string[], globals: Record<string, u
   const context = createContext({ assert, console: quietConsole, Date, Set, Map, path, ...globals });
   return runInContext(`${selected.map((node) => node.getText(ast)).join('\n')}\n({${names.join(',')}})`, context) as T;
 }
+
+test('R9 accepts the actual runtime diagnostic schema and rejects partial, duplicate or unknown phases', () => {
+  const api = loadHelpers<{ projectRequestDiagnostic(source: unknown): { phases: { phase: string }[] } }>(
+    supervisorFile,
+    ['REQUEST_SAMPLE_UUID', 'projectRequestDiagnostic'],
+  );
+  const current = {
+    kind: 'request-diagnostic-v1',
+    requestId: randomUUID(),
+    ...new RequestDiagnosticTrace().snapshot(),
+  };
+  assert.deepEqual(
+    Array.from(api.projectRequestDiagnostic(current).phases, (row) => row.phase),
+    [...REQUEST_DIAGNOSTIC_PHASES],
+  );
+  for (const phases of [
+    current.phases.slice(0, 7),
+    [...current.phases.slice(0, -1), current.phases[0]],
+    [...current.phases.slice(0, -1), { ...current.phases[0], phase: 'unknown-payload' }],
+  ]) {
+    assert.throws(() => api.projectRequestDiagnostic({ ...current, phases }));
+  }
+});
 
 interface Sample {
   scenario: string;

@@ -19,6 +19,7 @@
     "test": "npm run test:unit && npm run test:integration",
     "test:unit": "node scripts/run-tests.mjs unit",
     "test:integration": "node scripts/run-tests.mjs integration",
+    "release:check": "node scripts/check-release-readiness.mjs",
     "test:e2e": "npm run build && playwright test --config tests/e2e/playwright.config.ts",
     "test:live": "node scripts/run-tests.mjs live",
     "test:live:kimi": "node scripts/run-tests.mjs live kimi",

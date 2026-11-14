@@ -23,6 +23,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { runRedisSaasRecoveryProfile, validateRecoveryProfile } from './redis-saas-recovery-profile.mjs';
 import { runPostgresSaasRecoveryProfile, validatePostgresRecoveryProfile } from './postgres-saas-recovery-profile.mjs';
 import { runPostgresSaasStandbyRecoveryProfile, validateStandbyRecoveryProfile } from './postgres-saas-standby-recovery-profile.mjs';
+import { sourceIdentity } from '../ci/gate-evidence.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const args = process.argv.slice(2);
@@ -100,6 +101,7 @@ const manifest = { schema: 1, startedAt: new Date().toISOString(), assembly: 'cu
   requestDiagnostics: { ...requestDiagnostics, performanceAcceptance: false },
   mockProtocolPaths: 'native OpenAI and native Anthropic; cross-protocol acceptance is separate',
   buildRequested: !options.noBuild, nodeVersion: process.version, postgresDurability: { fsync: 'on', synchronousCommit: 'on' },
+  candidateBefore: sourceIdentity(root),
   stages: [], scenes: [], firstFault: null, cleanup: {}, sourceBefore: {}, sourceAfter: {}, distBefore: {}, distAfter: {}, ok: false };
 const baseEnvironment = { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR,
   LC_ALL: 'C', LANG: 'C', NODE_ENV: 'test' };
@@ -113,7 +115,13 @@ for (const cacheSwitch of ['MODEL_ROUTER_PREPARATION_AUTHORITY_CACHE',
 
 const REQUEST_SAMPLE_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 function projectRequestDiagnostic(source) {
-  const phases = ['pool-checkout', 'query', 'transaction', 'settle', 'upstream-send', 'upstream-body'];
+  const legacyPhases = ['pool-checkout', 'query', 'transaction', 'settle', 'upstream-send', 'upstream-body'];
+  const currentPhases = [...legacyPhases, 'fast-snapshot', 'fast-compile', 'fast-redis', 'fast-intent',
+    'fast-lease-check', 'fast-transport', 'fast-receipt'];
+  // Fast diagnostics extended the runtime's v1 record. Accept the complete
+  // current shape as well as archived six-phase records; partial extensions,
+  // duplicates and unknown labels still fail closed.
+  const phases = source?.phases?.length === legacyPhases.length ? legacyPhases : currentPhases;
   const number = (value) => Number.isFinite(value) && value >= 0 && value <= 1e12;
   assert.ok(source?.kind === 'request-diagnostic-v1' && typeof source.requestId === 'string' && REQUEST_SAMPLE_UUID.test(source.requestId));
   for (const key of ['elapsedMs', 'observedExclusiveMs', 'pendingSpans', 'droppedSpans']) assert.ok(number(source[key]));
@@ -1082,10 +1090,15 @@ try {
   manifest.distChanged = JSON.stringify(manifest.distBefore) !== JSON.stringify(manifest.distAfter);
   manifest.harnessChanged = JSON.stringify(manifest.harnessBefore) !== JSON.stringify(manifest.harnessAfter);
   manifest.finishedAt = new Date().toISOString();
+  manifest.candidateAfter = sourceIdentity(root);
   manifest.interrupted = interrupted;
   manifest.ok = !manifest.firstFault && !manifest.sourceChanged && !manifest.distChanged && !manifest.harnessChanged && !interrupted &&
+    (!requestDiagnostics.enabled || manifest.requestDiagnostics.export?.observationOk === true) &&
     manifest.cleanup.processesStopped && manifest.cleanup.postgresStopped && manifest.cleanup.runtimeRemoved &&
     pgStatementCensusSatisfied(process.env.R9_PG_STAT_STATEMENTS === '1', manifest.pgStatementCensus);
+  manifest.promotable = manifest.ok && manifest.candidateBefore.clean && manifest.candidateAfter.clean &&
+    manifest.candidateBefore.sha === manifest.candidateAfter.sha &&
+    manifest.candidateBefore.fingerprint === manifest.candidateAfter.fingerprint;
   await writeFile(join(outputDir, 'summary.json'), `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
   console.log(`R9 ${options.serialProfile ? 'serial profile' : options.diagnostic ? 'diagnostic' : 'full'} summary: ${join(outputDir, 'summary.json')} (ok=${manifest.ok})`);
   process.exitCode = manifest.ok ? 0 : 1;

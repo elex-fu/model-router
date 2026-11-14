@@ -190,11 +190,28 @@ test('actual final manifest gate rejects requested missing/failed census, even w
         createContext({
           manifest,
           interrupted: false,
+          requestDiagnostics: { enabled: false },
           process: { env: { R9_PG_STAT_STATEMENTS: required ? '1' : '0' } },
           pgStatementCensusSatisfied: helpers.pgStatementCensusSatisfied,
         }),
       );
       assert.equal(ok, !required || (observation?.observationOk === true && observation.requests === 90));
+      for (const traceOk of [false, true]) {
+        const traced = runInContext(
+          expression,
+          createContext({
+            manifest: { ...manifest, requestDiagnostics: { export: { observationOk: traceOk } } },
+            interrupted: false,
+            requestDiagnostics: { enabled: true },
+            process: { env: { R9_PG_STAT_STATEMENTS: required ? '1' : '0' } },
+            pgStatementCensusSatisfied: helpers.pgStatementCensusSatisfied,
+          }),
+        );
+        assert.equal(
+          traced,
+          traceOk && (!required || (observation?.observationOk === true && observation.requests === 90)),
+        );
+      }
     }
   }
 });
