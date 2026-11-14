@@ -831,14 +831,14 @@ test('fast money journal real PostgreSQL: atomic reserve, durable completion, ex
           diagnostics += bytes.toString();
         });
         const waitMessage = () =>
-          new Promise<{ kind: string }>((resolve, reject) => {
+          new Promise<{ kind: string; backendPid?: number }>((resolve, reject) => {
             const timeout = setTimeout(() => {
               child.kill('SIGKILL');
               reject(new Error(`child timeout: ${diagnostics}`));
             }, 10_000);
             child.once('message', (message) => {
               clearTimeout(timeout);
-              resolve(message as { kind: string });
+              resolve(message as { kind: string; backendPid?: number });
             });
             child.once('error', (error) => {
               clearTimeout(timeout);
@@ -852,7 +852,9 @@ test('fast money journal real PostgreSQL: atomic reserve, durable completion, ex
         assert.equal((await waitMessage()).kind, 'ready');
         const paused = waitMessage();
         child.send(JSON.parse(fastJournalCanonicalJson({ boundary, ...payload })));
-        assert.equal((await paused).kind, 'paused');
+        const boundaryReached = await paused;
+        assert.equal(boundaryReached.kind, 'paused');
+        assert.ok(Number.isSafeInteger(boundaryReached.backendPid));
         try {
           await inspectPaused?.();
         } finally {
@@ -860,6 +862,23 @@ test('fast money journal real PostgreSQL: atomic reserve, durable completion, ex
           child.kill('SIGKILL');
           const [, signal] = await exited;
           assert.equal(signal, 'SIGKILL');
+          // Child exit does not mean PostgreSQL has noticed the dead socket
+          // and rolled back its transaction. A recovery worker uses SKIP
+          // LOCKED and may correctly skip that job until the backend exits.
+          // Observe that physical boundary instead of racing two runOnce calls.
+          let backendGone = false;
+          for (let index = 0; index < 500; index++) {
+            const result = await migrator.query<{ gone: boolean }>(
+              'SELECT NOT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid = $1) AS gone',
+              [boundaryReached.backendPid],
+            );
+            if (result.rows[0].gone) {
+              backendGone = true;
+              break;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 20));
+          }
+          assert.equal(backendGone, true, 'the killed child backend must release its transaction before recovery');
         }
       }
       for (const compacted of [false, true])

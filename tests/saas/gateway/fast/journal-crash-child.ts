@@ -30,8 +30,9 @@ process.once(
   }) => {
     if (!permitted.has(raw.boundary)) throw new Error('test boundary not allowed');
     const database = createSaasDatabase({ connectionString: roleUrls()[2], max: 2 });
-    async function pause(): Promise<never> {
-      process.send?.({ kind: 'paused', boundary: raw.boundary });
+    async function pause(executor: Pick<SaasDatabase, 'query'>): Promise<never> {
+      const result = await executor.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
+      process.send?.({ kind: 'paused', boundary: raw.boundary, backendPid: result.rows[0].pid });
       return new Promise<never>(() => {});
     }
     const wrapped: SaasDatabase = {
@@ -40,12 +41,12 @@ process.once(
         if (raw.beforeReceiptCommit && sql.includes('fast-journal:append-receipt */')) {
           return database.transaction(async (tx) => {
             const result = await tx.query<Row>(sql, values);
-            await pause();
+            await pause(tx);
             return result;
           });
         }
         const result = await database.query<Row>(sql, values);
-        if (sql.includes(`${raw.boundary} */`)) await pause();
+        if (sql.includes(`${raw.boundary} */`)) await pause(database);
         return result;
       },
       transaction: (work) =>
@@ -53,7 +54,7 @@ process.once(
           work({
             query: async <Row>(sql: string, values?: readonly unknown[]): Promise<SqlResult<Row>> => {
               const result = await tx.query<Row>(sql, values);
-              if (sql.includes(`${raw.boundary} */`)) await pause();
+              if (sql.includes(`${raw.boundary} */`)) await pause(tx);
               return result;
             },
           }),
