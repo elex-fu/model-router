@@ -47,6 +47,9 @@ test('readiness catalog source contract matches exact 085 routine bytes and trig
   assert.match(source, /current_user='model_router_saas_control_plane'/);
   assert.match(source, /p\.proowner='model_router_saas_migrator'::regrole AND NOT p\.prosecdef/);
   assert.match(source, /has_function_privilege\(current_user,p\.oid,'EXECUTE'\)/);
+  assert.ok(source.includes("p.oid=to_regprocedure('model_router_saas.saas_metering_valid_dimensions(text[])')"));
+  assert.match(source, /p\.provolatile='i' AND NOT p\.prosecdef AND NOT p\.proretset/);
+  assert.ok(source.includes("p.proowner='model_router_saas_migrator'::regrole AND p.prokind='f'"));
   assert.match(source, /saas_customer_passkey_one_open_ceremony/);
   assert.match(source, /'saas_mfa_credentials','sign_count','bigint'/);
   assert.doesNotMatch(source, /saas_schema_migrations|SET ROLE|GRANT|verifySchema/);

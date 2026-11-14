@@ -59,7 +59,11 @@ export async function checkCustomerPasskeySchema(tx: SqlExecutor): Promise<void>
           WHERE c.conrelid IN (SELECT DISTINCT ('model_router_saas.'||relation_name)::regclass FROM wanted)
             AND NOT c.convalidated)
         AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace
-          WHERE n.nspname='model_router_saas' AND has_function_privilege(current_user,p.oid,'EXECUTE'))
+          WHERE n.nspname='model_router_saas' AND has_function_privilege(current_user,p.oid,'EXECUTE')
+            AND NOT (p.oid=to_regprocedure('model_router_saas.saas_metering_valid_dimensions(text[])')
+              AND p.proowner='model_router_saas_migrator'::regrole AND p.prokind='f'
+              AND p.provolatile='i' AND NOT p.prosecdef AND NOT p.proretset
+              AND p.prorettype='boolean'::regtype))
       ) AS ready`);
     if (shape.rows.length !== 1 || shape.rows[0]?.ready !== true) return customerPasskeyFail('UNAVAILABLE');
     const routines = await tx.query<{ name: string; body: string; safe: boolean }>(
