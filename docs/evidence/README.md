@@ -7,7 +7,7 @@
 1. **证据单元 = 门禁（gate）**。一个 gate 对应一个可执行测试根（test root）与其在 `.github/workflows/ci.yml` 中的 required 步骤。
 2. **每条证据记录必须包含**：
    - gate 标识与测试根路径；
-   - commit SHA（`git rev-parse HEAD`）；
+   - 完整 40 位 commit SHA（`git rev-parse HEAD`）及运行前后干净、稳定的源码身份；
    - 运行环境：PG 大版本（15/18 双跑）、Node 版本、CI job 名或本地命令；
    - native counts：`node --test` 原生输出的 `tests / pass / fail / cancelled / skipped / duration_ms`；
    - 结论（GO / NO-GO）与评审人。
@@ -26,6 +26,13 @@ node scripts/capture-gate-evidence.mjs \
 - 脚本以 `node --import tsx --test` 运行指定测试根，解析原生 reporter 计数；
 - 环境变量（如 `MODEL_ROUTER_SAAS_GATEWAY_E2E_*`）由调用方提供，脚本不读取、不打印其值；
 - 输出为一段可粘贴进证据模板的 markdown 记录（写入 stdout，`--out <file>` 可追加到文件）。
+- 必须正测试数、全部通过、零 skip/cancel/todo；脏工作区或执行中源码变化会记录 NO-GO。`--out` 使用仓库外 artifact 目录，防止写入证据本身污染后续采集。
+
+## 当前候选审核
+
+`rtk npm run release:check -- docs/evidence/release-candidate-2026-11-12.json` 检查候选完整 SHA、基础门的原生 runner 计数、artifact SHA-256、外部证据类别以及付费/可选能力门槛。当前 manifest 故意保留空证据，结果是 NO-GO。填入历史 SHA 的通过、跳过的 live suite 或本地软件 KMS 演练不能将其转绿。新候选先冻结源码，再用该候选重新采集，不能只改旧记录上的 SHA。
+
+字段和本轮结果见 [发布阻断修复账本](../release-remediation-2026-11-12.md)。本地 PG/R9 的 `ok` 仅指本轮测试是否通过；只有干净同 SHA、源码稳定的结果才可能具有 `promotable=true`，仍需对应真实验收和运营审核。
 
 ## 模板索引
 

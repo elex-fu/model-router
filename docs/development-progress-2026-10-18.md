@@ -1,6 +1,6 @@
 # 开发进度报告 — 2026-10-18（T05 + 真实模型验证）
 
-> **最新更新：2026-10-24，开发保持暂停，已按后续指令整合main。** 暂停交接、剩余任务与合并见 **§29.55–58**：主任务`6cc79da`和CLI `cf5008b`已整合至main代码合并点`9f43335`，合并后尚未验证。最近工程基线`ae91134`的C0门禁21/21、fresh build及CI #171全68/68通过，实际serial四腿各100却以722.38/481.10ms额外开销未达30/10ms门槛；CLI最终27组测试源码仅静态审阅，尚未执行检查/capture/live。各自有临时资源已有收尾记录，trace草稿未审未执行。此前9d真实Kimi A0、完整offline及PG600秒run06通过证据见 **§29.53**；Redis/自托管边界见 **§28**。生产PSP/KMS/独立金融灾备、Codex可信计量和完整R9仍开放，M1/M2/M3与运营GO未关闭，旧章节计数仅代表当时截点。
+> **最新更新：2026-11-12，发布阻断修复进行中。** 当前代码基点为 `92eebc4321520e9323395301931e4d199cda976c`，本轮未提交补丁的实现、复测与外部阻断见 **§29.73** 和 [发布修复账本](release-remediation-2026-11-12.md)。已修复 auto-ban gateway 吊销权限、PG18 的 122 测试、逐根 PG 夹具隔离与证据采集缺陷，并实施锁后 catalog 快照批读。历史 M1 结论不平移到当前候选；真实 PSP、生产 C2、当前干净 SHA 的 A0/A1 仍缺证据，C0 30/10ms 未通过，Codex 不可售卖，fast / Realtime 默认不开放。旧章节的暂停点、SHA、计数和通过结论只代表各自历史截点。
 
 > 基线：`93e7ffa`（core-capability-alignment-technical-plan 文档合并后）。本轮实施技术方案
 > `docs/core-capability-alignment-technical-plan-2026-10-18.md` 中 **T05（9.1 前半 + Grok 门禁接线）**，
@@ -1494,3 +1494,17 @@ M2 剩余：B0/B1（外部 Alipay）、C0（D2 分阶段执行）、C1 余项（
 **T1判定（§12.2）**：DB工作量维度缓存收益已量化成立（~7-8%），但**serial门槛（需数量级降低）不可由缓存单独达成**——A2b/A3（非关键工作后移）或口径决策为必经路径，维持原判定规则。census基础设施已升级：kill switch透传（off/on配对可控）+ pg_stat_statements（PG18实证log_statement不记录扩展协议参数化语句，必须用pg_stat_statements）+ **逐请求归一化落盘**（callsPerRequest写入manifest与json，分母=mockTotal−direct腿，修复warmup时间窗混淆）。
 
 修复建议已落地：census归一化（首选）；warmup固定次数与pg_stat_statements_reset测量窗留为可选项。诊断材料：/tmp/r9probe/、/tmp/r9-live-{on,off}/（agent工作目录，插桩已还原、src零改动、dist已重建）。
+
+### 29.73 发布阻断修复、独立 PG 验证与当前候选证据（2026-11-12）
+
+本轮基点为 `92eebc4321520e9323395301931e4d199cda976c`，修改仍在工作区；保留并补齐进入任务前已有的 auto-ban 权限补丁。本地验证不能归属于该基点的干净 HEAD，也不能将 §29.69 的历史 M1 平移到本候选。完整状态与最终计数见 [发布修复账本](release-remediation-2026-11-12.md)，开发验证摘录见 [原始计数与源码绑定](validation/release-remediation-2026-11-12/development-verification.json)。
+
+- auto-ban 仅授予 gateway 吊销 key 所需四列 UPDATE；真实 PG15/18 验证用户停用、key 吊销、authz fence、重复调用、旧数据收敛、治理管理员保护及事务回滚，并加入双版本 required gate。054–060 等旧断言相应区分合法吊销权限与仍禁止的 key material/账号身份写入。
+- 122 的 PG18 CHECK 计数显式排除 NOT NULL；059 等依赖在每个新数据库内自动建 HTTP fixture。集成 runner 逐根新库，按固定根提供自有 Redis、升级测试管理员及随机测试软件 KMS；保持 UTC、`fsync=on`、`synchronous_commit=on`，跳过不能被算作必需门通过。
+- catalog eligibility 改为独立产品锁后的一次新鲜快照，四条语句减至两条；实际并发撤权等待、版本 10/2 数值排序有真实 PG 证明。guard、pre-hold 和金融持久写入保留。修复 R9 13 阶段 trace 兼容及请求诊断导出失败门禁。
+- 集成检验额外发现 Passkey readiness 错把合法计量 validator 的 EXECUTE 也视作越权；例外只允许精确签名、migrator owner、immutable/invoker/boolean 的函数，其他函数仍拒绝；新增真实双 PG required gate。
+- 证据采集要求完整 SHA、源码前后干净稳定、正原生测试数及零 skip/cancel/todo；新增 `release:check`，真实 A0/A1、支付 B0/B1、C0/C1、生产 C2 和可选能力分别有门槛。当前 manifest 保持 NO-GO。
+
+真实 PSP、生产 KMS/IAM/异地 PITR/HA/告警/值班签收、当前干净候选的真实 A0/A1、Codex A2 仍缺证据；Codex 不可售卖，fast 默认关闭，G-B5 Realtime WS/音频计量未交付。C0 保留 30/10ms，不因局部 SQL 优化或历史基准改为通过。lint/knip 大批遗留与两个巨型 composition 文件仍须后续处理。
+
+最终本地结果：单元 8,209 pass/0 fail/25 skip；普通集成 335 pass/0 fail/50 skip；完整管理 PG18 **87 根、586/586、零 skip、源码变化 0**，另有 210 项 HTTP 前置检查；PG15 关键回归分批通过（060 修后 7/7）。本轮 server build/严格编译/required wiring/权限镜像通过，lint 无错误但 1,635 warnings 与 knip 7/167/117 保留。改造后 C0 四腿各 100 的额外开销仍为 **94.47/281.71ms**，未达 30/10；本机高负载不作 A/B 收益结论。没有新的真实 PSP/上游/生产 C2 通过记录。

@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "candidateSha": "92eebc4321520e9323395301931e4d199cda976c",
+  "milestone": "M2",
+  "features": { "fast": false, "codex": false, "realtime": false },
+  "evidence": [],
+  "notes": [
+    "NO-GO. This SHA is the base of the uncommitted remediation, not a newly frozen release candidate.",
+    "Development verification of a dirty working tree must not be promoted to clean-SHA release evidence.",
+    "A0/A1 historical evidence must be rerun against the final clean candidate.",
+    "Real Alipay B0/B1, strict C0, production C2 and release signoff remain open."
+  ]
+}

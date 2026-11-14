@@ -1,0 +1,1917 @@
+{
+  "schema": 1,
+  "baselineSha": "92eebc4321520e9323395301931e4d199cda976c",
+  "developmentOnly": true,
+  "releaseGo": false,
+  "runs": [
+    {
+      "name": "pg15-critical-batch-before-060-fixture-repair",
+      "rawArtifact": "/tmp/model-router-final-durable-pg15-20261112/summary.json",
+      "rawSha256": "d6285d3e5510b5d2d3823acb3d582742c28181a229b950812cfea98b4516877e",
+      "ok": false,
+      "promotable": false,
+      "candidateBefore": {
+        "sha": "92eebc4321520e9323395301931e4d199cda976c",
+        "clean": false,
+        "fingerprint": "c69a0b97be420af3b3c7ce5fc60fbd8c1d03a3f81835488f30fce3517e7aa87b"
+      },
+      "candidateAfter": {
+        "sha": "92eebc4321520e9323395301931e4d199cda976c",
+        "clean": false,
+        "fingerprint": "d8ada8336fb9229a463a020c08c62806d2b22fe5d1602c17026e1cf3c214106e"
+      },
+      "sourceScope": "literal relative import closure, runner, role manifest, package-lock.json",
+      "sourceBeforeDigest": "247ca94be32fd1481d40b4162dafa82dc6c913c173d08d7f804d890a0593c39b",
+      "sourceAfterDigest": "247ca94be32fd1481d40b4162dafa82dc6c913c173d08d7f804d890a0593c39b",
+      "durability": "fsync=on;synchronous_commit=on",
+      "cleanup": {
+        "clusterStopped": true,
+        "clusterRemoved": true,
+        "redisStopped": true
+      },
+      "suites": [
+        {
+          "test": "tests/saas/identity/customer-passkey.postgres.integration.test.ts",
+          "counts": {
+            "tests": 4,
+            "suites": 0,
+            "pass": 4,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/risk/content-moderation.postgres.integration.test.ts",
+          "counts": {
+            "tests": 6,
+            "suites": 0,
+            "pass": 6,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/catalog/eligibility-snapshot.postgres.integration.test.ts",
+          "counts": {
+            "tests": 1,
+            "suites": 0,
+            "pass": 1,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/db/migrations/122_multimodal_billing_dimensions.postgres.integration.test.ts",
+          "counts": {
+            "tests": 1,
+            "suites": 0,
+            "pass": 1,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/db/migrations/054_trigger_only_trusted_execution.postgres.integration.test.ts",
+          "counts": {
+            "tests": 5,
+            "suites": 0,
+            "pass": 5,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/db/migrations/055_prepared_evidence_optional_validity_scalars.postgres.integration.test.ts",
+          "counts": {
+            "tests": 12,
+            "suites": 0,
+            "pass": 12,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": [
+            {
+              "test": "tests/saas/gateway/managed-postgres-commercial-gateway.integration.test.ts",
+              "code": 0,
+              "signal": null,
+              "counts": {
+                "tests": 30,
+                "suites": 0,
+                "pass": 30,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0,
+                "todo": 0
+              },
+              "ok": true
+            }
+          ]
+        },
+        {
+          "test": "tests/saas/db/migrations/060_prepared_evidence_claim_generated_account.postgres.integration.test.ts",
+          "counts": {
+            "tests": 1,
+            "suites": 0,
+            "pass": 0,
+            "fail": 1,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": false,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/gateway/authorization-prelock-postgres.integration.test.ts",
+          "counts": {
+            "tests": 13,
+            "suites": 0,
+            "pass": 13,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/db/migrations/059_pre_dispatch_terminal_cancellation.postgres.integration.test.ts",
+          "counts": {
+            "tests": 6,
+            "suites": 0,
+            "pass": 6,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": [
+            {
+              "test": "tests/saas/gateway/managed-postgres-commercial-gateway.integration.test.ts",
+              "code": 0,
+              "signal": null,
+              "counts": {
+                "tests": 30,
+                "suites": 0,
+                "pass": 30,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0,
+                "todo": 0
+              },
+              "ok": true
+            }
+          ]
+        }
+      ],
+      "nativeCounts": {
+        "tests": 49,
+        "pass": 48,
+        "fail": 1,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "fixtureNativeTests": 60
+    },
+    {
+      "name": "pg15-060-repaired",
+      "rawArtifact": "/tmp/model-router-060-fixed-pg15-20261112/summary.json",
+      "rawSha256": "9a12299a303bc30bcbff5bb50298e06ce14d8da61cec73cd172602415b1274d4",
+      "ok": true,
+      "promotable": false,
+      "candidateBefore": {
+        "sha": "92eebc4321520e9323395301931e4d199cda976c",
+        "clean": false,
+        "fingerprint": "3b3d2388d8219817230d2f84943856138b752583d9d43de5da2005db83c4671d"
+      },
+      "candidateAfter": {
+        "sha": "92eebc4321520e9323395301931e4d199cda976c",
+        "clean": false,
+        "fingerprint": "3b3d2388d8219817230d2f84943856138b752583d9d43de5da2005db83c4671d"
+      },
+      "sourceScope": "literal relative import closure, runner, role manifest, package-lock.json",
+      "sourceBeforeDigest": "a1e00b68a7c06a5263186ec2384581de00279ed1c29053bda6886201766b6f50",
+      "sourceAfterDigest": "a1e00b68a7c06a5263186ec2384581de00279ed1c29053bda6886201766b6f50",
+      "durability": "fsync=on;synchronous_commit=on",
+      "cleanup": {
+        "clusterStopped": true,
+        "clusterRemoved": true,
+        "redisStopped": true
+      },
+      "suites": [
+        {
+          "test": "tests/saas/db/migrations/060_prepared_evidence_claim_generated_account.postgres.integration.test.ts",
+          "counts": {
+            "tests": 7,
+            "suites": 0,
+            "pass": 7,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        }
+      ],
+      "nativeCounts": {
+        "tests": 7,
+        "pass": 7,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "fixtureNativeTests": 0
+    },
+    {
+      "name": "pg18-complete-isolated",
+      "rawArtifact": "/var/folders/w0/qd85jr9j09130_t65s7q48700000gn/T/model-router-commercial-postgres-8atVPO/summary.json",
+      "rawSha256": "f689930c0bc4a220b84a3532501ce95aca0cbd2b212d3607ee837ef6c3a10d44",
+      "ok": true,
+      "promotable": false,
+      "candidateBefore": {
+        "sha": "92eebc4321520e9323395301931e4d199cda976c",
+        "clean": false,
+        "fingerprint": "ae76c126551284176c97c37be4df02822abcaae62737393821009b6a452884be"
+      },
+      "candidateAfter": {
+        "sha": "92eebc4321520e9323395301931e4d199cda976c",
+        "clean": false,
+        "fingerprint": "ae76c126551284176c97c37be4df02822abcaae62737393821009b6a452884be"
+      },
+      "sourceScope": "literal relative import closure, runner, role manifest, package-lock.json",
+      "sourceBeforeDigest": "7bcd415bb2860451b4b5dc134b737cca48146734a53618e6f081f0cd9c56b902",
+      "sourceAfterDigest": "7bcd415bb2860451b4b5dc134b737cca48146734a53618e6f081f0cd9c56b902",
+      "durability": "fsync=on;synchronous_commit=on",
+      "cleanup": {
+        "clusterStopped": true,
+        "clusterRemoved": true,
+        "redisStopped": true
+      },
+      "suites": [
+        {
+          "test": "tests/drills/dual-instance-failover.postgres.integration.test.ts",
+          "counts": {
+            "tests": 1,
+            "suites": 0,
+            "pass": 1,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/drills/payment-worker-sigkill.postgres.integration.test.ts",
+          "counts": {
+            "tests": 1,
+            "suites": 0,
+            "pass": 1,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/drills/settlement-sigkill-crash.postgres.integration.test.ts",
+          "counts": {
+            "tests": 2,
+            "suites": 0,
+            "pass": 2,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/billing/managed-postgres-financial-invariants.integration.test.ts",
+          "counts": {
+            "tests": 18,
+            "suites": 0,
+            "pass": 18,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/billing/wallet-fence.postgres.integration.test.ts",
+          "counts": {
+            "tests": 4,
+            "suites": 0,
+            "pass": 4,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/catalog/eligibility-snapshot.postgres.integration.test.ts",
+          "counts": {
+            "tests": 1,
+            "suites": 0,
+            "pass": 1,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/console/fast-usage-read.postgres.integration.test.ts",
+          "counts": {
+            "tests": 12,
+            "suites": 0,
+            "pass": 12,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/console/request-reconciliation-read.postgres.integration.test.ts",
+          "counts": {
+            "tests": 6,
+            "suites": 0,
+            "pass": 6,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": [
+            {
+              "test": "tests/saas/gateway/managed-postgres-commercial-gateway.integration.test.ts",
+              "code": 0,
+              "signal": null,
+              "counts": {
+                "tests": 30,
+                "suites": 0,
+                "pass": 30,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0,
+                "todo": 0
+              },
+              "ok": true
+            }
+          ]
+        },
+        {
+          "test": "tests/saas/db/migrations/054_trigger_only_trusted_execution.postgres.integration.test.ts",
+          "counts": {
+            "tests": 5,
+            "suites": 0,
+            "pass": 5,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/db/migrations/055_prepared_evidence_optional_validity_scalars.postgres.integration.test.ts",
+          "counts": {
+            "tests": 12,
+            "suites": 0,
+            "pass": 12,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": [
+            {
+              "test": "tests/saas/gateway/managed-postgres-commercial-gateway.integration.test.ts",
+              "code": 0,
+              "signal": null,
+              "counts": {
+                "tests": 30,
+                "suites": 0,
+                "pass": 30,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0,
+                "todo": 0
+              },
+              "ok": true
+            }
+          ]
+        },
+        {
+          "test": "tests/saas/db/migrations/056_restricted_role_check_and_platform_auth_execution.postgres.integration.test.ts",
+          "counts": {
+            "tests": 8,
+            "suites": 0,
+            "pass": 8,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": [
+            {
+              "test": "tests/saas/gateway/managed-postgres-commercial-gateway.integration.test.ts",
+              "code": 0,
+              "signal": null,
+              "counts": {
+                "tests": 30,
+                "suites": 0,
+                "pass": 30,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0,
+                "todo": 0
+              },
+              "ok": true
+            }
+          ]
+        },
+        {
+          "test": "tests/saas/db/migrations/058_credential_validation_invalidation_trigger_execution.postgres.integration.test.ts",
+          "counts": {
+            "tests": 11,
+            "suites": 0,
+            "pass": 11,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/db/migrations/059_pre_dispatch_terminal_cancellation.postgres.integration.test.ts",
+          "counts": {
+            "tests": 6,
+            "suites": 0,
+            "pass": 6,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": [
+            {
+              "test": "tests/saas/gateway/managed-postgres-commercial-gateway.integration.test.ts",
+              "code": 0,
+              "signal": null,
+              "counts": {
+                "tests": 30,
+                "suites": 0,
+                "pass": 30,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0,
+                "todo": 0
+              },
+              "ok": true
+            }
+          ]
+        },
+        {
+          "test": "tests/saas/db/migrations/060_prepared_evidence_claim_generated_account.postgres.integration.test.ts",
+          "counts": {
+            "tests": 7,
+            "suites": 0,
+            "pass": 7,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/db/migrations/112_billing_group_snapshot_limits.postgres.integration.test.ts",
+          "counts": {
+            "tests": 1,
+            "suites": 0,
+            "pass": 1,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/db/migrations/121_composite_model_routes.postgres.integration.test.ts",
+          "counts": {
+            "tests": 1,
+            "suites": 0,
+            "pass": 1,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/db/migrations/122_multimodal_billing_dimensions.postgres.integration.test.ts",
+          "counts": {
+            "tests": 1,
+            "suites": 0,
+            "pass": 1,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/db/migrations/123_image_tasks.postgres.integration.test.ts",
+          "counts": {
+            "tests": 3,
+            "suites": 0,
+            "pass": 3,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/db/migrations/125_risk_control_content_moderation.postgres.integration.test.ts",
+          "counts": {
+            "tests": 1,
+            "suites": 0,
+            "pass": 1,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/db/migrations/126_public_brand_settings.postgres.integration.test.ts",
+          "counts": {
+            "tests": 1,
+            "suites": 0,
+            "pass": 1,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/db/migrations/127_obs_alert_silences_reports.postgres.integration.test.ts",
+          "counts": {
+            "tests": 1,
+            "suites": 0,
+            "pass": 1,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/db/migrations/134_responses_compact_operation.postgres.integration.test.ts",
+          "counts": {
+            "tests": 1,
+            "suites": 0,
+            "pass": 1,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/gateway/admission-statement-budget.postgres.integration.test.ts",
+          "counts": {
+            "tests": 2,
+            "suites": 0,
+            "pass": 2,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/gateway/affinity-bind-race.postgres.integration.test.ts",
+          "counts": {
+            "tests": 5,
+            "suites": 0,
+            "pass": 5,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/gateway/authority-batch-prepared.postgres.integration.test.ts",
+          "counts": {
+            "tests": 1,
+            "suites": 0,
+            "pass": 1,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/gateway/authorization-prelock-postgres.integration.test.ts",
+          "counts": {
+            "tests": 13,
+            "suites": 0,
+            "pass": 13,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/gateway/cached-scheduler-hints.postgres.integration.test.ts",
+          "counts": {
+            "tests": 1,
+            "suites": 0,
+            "pass": 1,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/gateway/candidate-live-reads.postgres.integration.test.ts",
+          "counts": {
+            "tests": 3,
+            "suites": 0,
+            "pass": 3,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/gateway/commercial-dispatch-hint.postgres.integration.test.ts",
+          "counts": {
+            "tests": 13,
+            "suites": 0,
+            "pass": 13,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/gateway/composite-resolved-supply-billing.postgres.integration.test.ts",
+          "counts": {
+            "tests": 1,
+            "suites": 0,
+            "pass": 1,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/gateway/dispatch-capacity.postgres.integration.test.ts",
+          "counts": {
+            "tests": 3,
+            "suites": 0,
+            "pass": 3,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": [
+            {
+              "test": "tests/saas/gateway/managed-postgres-commercial-gateway.integration.test.ts",
+              "code": 0,
+              "signal": null,
+              "counts": {
+                "tests": 30,
+                "suites": 0,
+                "pass": 30,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0,
+                "todo": 0
+              },
+              "ok": true
+            }
+          ]
+        },
+        {
+          "test": "tests/saas/gateway/fast/bounded-deployment-budget.postgres.integration.test.ts",
+          "counts": {
+            "tests": 7,
+            "suites": 0,
+            "pass": 7,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/gateway/fast/journal.postgres.integration.test.ts",
+          "counts": {
+            "tests": 71,
+            "suites": 0,
+            "pass": 71,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/gateway/fast/native-http.postgres.integration.test.ts",
+          "counts": {
+            "tests": 1,
+            "suites": 0,
+            "pass": 1,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/gateway/fast/populated-upgrade.postgres.integration.test.ts",
+          "counts": {
+            "tests": 1,
+            "suites": 0,
+            "pass": 1,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/gateway/fast/resolution.postgres.integration.test.ts",
+          "counts": {
+            "tests": 6,
+            "suites": 0,
+            "pass": 6,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/gateway/health-score.postgres.integration.test.ts",
+          "counts": {
+            "tests": 2,
+            "suites": 0,
+            "pass": 2,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/gateway/managed-postgres-commercial-gateway.integration.test.ts",
+          "counts": {
+            "tests": 30,
+            "suites": 0,
+            "pass": 30,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/gateway/managed-saas-sigterm.postgres.integration.test.ts",
+          "counts": {
+            "tests": 1,
+            "suites": 0,
+            "pass": 1,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/gateway/model-plaza.postgres.integration.test.ts",
+          "counts": {
+            "tests": 1,
+            "suites": 0,
+            "pass": 1,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/gateway/pre-dispatch-compensation-postgres.integration.test.ts",
+          "counts": {
+            "tests": 14,
+            "suites": 0,
+            "pass": 14,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": [
+            {
+              "test": "tests/saas/gateway/managed-postgres-commercial-gateway.integration.test.ts",
+              "code": 0,
+              "signal": null,
+              "counts": {
+                "tests": 30,
+                "suites": 0,
+                "pass": 30,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0,
+                "todo": 0
+              },
+              "ok": true
+            }
+          ]
+        },
+        {
+          "test": "tests/saas/gateway/preparation-transaction-facts.postgres.integration.test.ts",
+          "counts": {
+            "tests": 9,
+            "suites": 0,
+            "pass": 9,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/gateway/prepared-evidence-atomic-dispatch.postgres.integration.test.ts",
+          "counts": {
+            "tests": 35,
+            "suites": 0,
+            "pass": 35,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/gateway/prepared-evidence-authority-batch.postgres.integration.test.ts",
+          "counts": {
+            "tests": 14,
+            "suites": 0,
+            "pass": 14,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/gateway/prepared-evidence-concurrent-claim.postgres.integration.test.ts",
+          "counts": {
+            "tests": 6,
+            "suites": 0,
+            "pass": 6,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": [
+            {
+              "test": "tests/saas/gateway/managed-postgres-commercial-gateway.integration.test.ts",
+              "code": 0,
+              "signal": null,
+              "counts": {
+                "tests": 30,
+                "suites": 0,
+                "pass": 30,
+                "fail": 0,
+                "cancelled": 0,
+                "skipped": 0,
+                "todo": 0
+              },
+              "ok": true
+            }
+          ]
+        },
+        {
+          "test": "tests/saas/gateway/prepared-statements.postgres.integration.test.ts",
+          "counts": {
+            "tests": 10,
+            "suites": 0,
+            "pass": 10,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/gateway/provider-account-lease-postgres.integration.test.ts",
+          "counts": {
+            "tests": 14,
+            "suites": 0,
+            "pass": 14,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/gateway/provider-account-model-cooldowns.postgres.integration.test.ts",
+          "counts": {
+            "tests": 1,
+            "suites": 0,
+            "pass": 1,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/gateway/quota-persistence-lane.postgres.integration.test.ts",
+          "counts": {
+            "tests": 1,
+            "suites": 0,
+            "pass": 1,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/gateway/rate-limit-scheduling.postgres.integration.test.ts",
+          "counts": {
+            "tests": 4,
+            "suites": 0,
+            "pass": 4,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/gateway/reservation-planning.postgres.integration.test.ts",
+          "counts": {
+            "tests": 11,
+            "suites": 0,
+            "pass": 11,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/gateway/responses-continuation.postgres.integration.test.ts",
+          "counts": {
+            "tests": 1,
+            "suites": 0,
+            "pass": 1,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/gateway/scheduler-native-protocol.postgres.integration.test.ts",
+          "counts": {
+            "tests": 6,
+            "suites": 0,
+            "pass": 6,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/gateway/scheduling-threshold-pause.postgres.integration.test.ts",
+          "counts": {
+            "tests": 4,
+            "suites": 0,
+            "pass": 4,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/identity/customer-passkey.postgres.integration.test.ts",
+          "counts": {
+            "tests": 4,
+            "suites": 0,
+            "pass": 4,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/identity/tenant-member-directory-http.postgres.integration.test.ts",
+          "counts": {
+            "tests": 8,
+            "suites": 0,
+            "pass": 8,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/identity/tenant-member-directory.postgres.integration.test.ts",
+          "counts": {
+            "tests": 7,
+            "suites": 0,
+            "pass": 7,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/identity/tenant-member-management.postgres.integration.test.ts",
+          "counts": {
+            "tests": 4,
+            "suites": 0,
+            "pass": 4,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/keys/budget-batched-mutations.postgres.integration.test.ts",
+          "counts": {
+            "tests": 7,
+            "suites": 0,
+            "pass": 7,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/keys/budget-policy.postgres.integration.test.ts",
+          "counts": {
+            "tests": 3,
+            "suites": 0,
+            "pass": 3,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/keys/ip-policy.postgres.integration.test.ts",
+          "counts": {
+            "tests": 3,
+            "suites": 0,
+            "pass": 3,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/marketing/affiliate.postgres.integration.test.ts",
+          "counts": {
+            "tests": 4,
+            "suites": 0,
+            "pass": 4,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/marketing/announcements.postgres.integration.test.ts",
+          "counts": {
+            "tests": 3,
+            "suites": 0,
+            "pass": 3,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/marketing/promo-codes.postgres.integration.test.ts",
+          "counts": {
+            "tests": 6,
+            "suites": 0,
+            "pass": 6,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/marketing/redeem-codes.postgres.integration.test.ts",
+          "counts": {
+            "tests": 4,
+            "suites": 0,
+            "pass": 4,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/metering/attempt-transition-clock.postgres.integration.test.ts",
+          "counts": {
+            "tests": 5,
+            "suites": 0,
+            "pass": 5,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/metering/normal-success-terminal-replay.postgres.integration.test.ts",
+          "counts": {
+            "tests": 6,
+            "suites": 0,
+            "pass": 6,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/metering/settlement-projection-locks.postgres.integration.test.ts",
+          "counts": {
+            "tests": 8,
+            "suites": 0,
+            "pass": 8,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/metering/usage-correction.postgres.integration.test.ts",
+          "counts": {
+            "tests": 5,
+            "suites": 0,
+            "pass": 5,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/observability/operations-closure.postgres.integration.test.ts",
+          "counts": {
+            "tests": 10,
+            "suites": 0,
+            "pass": 10,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/payments/payment-merchant-binding.postgres.integration.test.ts",
+          "counts": {
+            "tests": 5,
+            "suites": 0,
+            "pass": 5,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/platform/auth/managed-postgres-mfa-enrollment.integration.test.ts",
+          "counts": {
+            "tests": 7,
+            "suites": 0,
+            "pass": 7,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/platform/codex-bound-admission.postgres.integration.test.ts",
+          "counts": {
+            "tests": 1,
+            "suites": 0,
+            "pass": 1,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/platform/credential-validation-requeue.postgres.integration.test.ts",
+          "counts": {
+            "tests": 7,
+            "suites": 0,
+            "pass": 7,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/pricing/lineage-fences.postgres.integration.test.ts",
+          "counts": {
+            "tests": 5,
+            "suites": 0,
+            "pass": 5,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/risk/content-moderation.postgres.integration.test.ts",
+          "counts": {
+            "tests": 6,
+            "suites": 0,
+            "pass": 6,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/risk/user-risk.postgres.integration.test.ts",
+          "counts": {
+            "tests": 8,
+            "suites": 0,
+            "pass": 8,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/supply/account-quarantine.postgres.integration.test.ts",
+          "counts": {
+            "tests": 11,
+            "suites": 0,
+            "pass": 11,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/supply/cn-providers-quota.postgres.integration.test.ts",
+          "counts": {
+            "tests": 1,
+            "suites": 0,
+            "pass": 1,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/supply/credential-validation-protocol-alias.postgres.integration.test.ts",
+          "counts": {
+            "tests": 8,
+            "suites": 0,
+            "pass": 8,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/supply/dispatch-proof-fence-batch.postgres.integration.test.ts",
+          "counts": {
+            "tests": 10,
+            "suites": 0,
+            "pass": 10,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/supply/oauth-refresh-onboarding.postgres.integration.test.ts",
+          "counts": {
+            "tests": 10,
+            "suites": 0,
+            "pass": 10,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/supply/oauth-token-refresh.postgres.integration.test.ts",
+          "counts": {
+            "tests": 8,
+            "suites": 0,
+            "pass": 8,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/supply/platform-inference-access.postgres.integration.test.ts",
+          "counts": {
+            "tests": 1,
+            "suites": 0,
+            "pass": 1,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/supply/platform-pool-grant-clock.postgres.integration.test.ts",
+          "counts": {
+            "tests": 4,
+            "suites": 0,
+            "pass": 4,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/supply/quota-sync-worker.postgres.integration.test.ts",
+          "counts": {
+            "tests": 6,
+            "suites": 0,
+            "pass": 6,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        },
+        {
+          "test": "tests/saas/webhooks/announcement-fanout.postgres.integration.test.ts",
+          "counts": {
+            "tests": 5,
+            "suites": 0,
+            "pass": 5,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        }
+      ],
+      "nativeCounts": {
+        "tests": 586,
+        "pass": 586,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "fixtureNativeTests": 210
+    },
+    {
+      "name": "pg18-crash-recovery-repaired",
+      "rawArtifact": "/tmp/model-router-journal-sigkill-fixed-20261112/summary.json",
+      "rawSha256": "6f594ffd346b4ebd2c7c559b13de29680b738c2787936b9cd4af1776edf57c6e",
+      "ok": true,
+      "promotable": false,
+      "candidateBefore": {
+        "sha": "92eebc4321520e9323395301931e4d199cda976c",
+        "clean": false,
+        "fingerprint": "ae76c126551284176c97c37be4df02822abcaae62737393821009b6a452884be"
+      },
+      "candidateAfter": {
+        "sha": "92eebc4321520e9323395301931e4d199cda976c",
+        "clean": false,
+        "fingerprint": "ae76c126551284176c97c37be4df02822abcaae62737393821009b6a452884be"
+      },
+      "sourceScope": "literal relative import closure, runner, role manifest, package-lock.json",
+      "sourceBeforeDigest": "b1377a6d2232206fcb1ef37ed03e5037e36c74c911544be9e3caceb77dc245fd",
+      "sourceAfterDigest": "b1377a6d2232206fcb1ef37ed03e5037e36c74c911544be9e3caceb77dc245fd",
+      "durability": "fsync=on;synchronous_commit=on",
+      "cleanup": {
+        "clusterStopped": true,
+        "clusterRemoved": true,
+        "redisStopped": true
+      },
+      "suites": [
+        {
+          "test": "tests/saas/gateway/fast/journal.postgres.integration.test.ts",
+          "counts": {
+            "tests": 71,
+            "suites": 0,
+            "pass": 71,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0
+          },
+          "ok": true,
+          "fixtures": []
+        }
+      ],
+      "nativeCounts": {
+        "tests": 71,
+        "pass": 71,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      "fixtureNativeTests": 0
+    },
+    {
+      "name": "c0-before-catalog-batch",
+      "rawArtifact": "/tmp/model-router-c0-current-20261112/summary.json",
+      "rawSha256": "19e0c0984dd0e85c09edfc34586a61c31ad26da28364803289be03d20c07975e",
+      "ok": false,
+      "promotable": false,
+      "candidateBefore": {
+        "sha": "92eebc4321520e9323395301931e4d199cda976c",
+        "clean": false,
+        "fingerprint": "4c92aff53bc86fa0fdc138bbdeb0e25cf8b8ec2cbda84fddf454e16f6f957ec8"
+      },
+      "candidateAfter": {
+        "sha": "92eebc4321520e9323395301931e4d199cda976c",
+        "clean": false,
+        "fingerprint": "4c92aff53bc86fa0fdc138bbdeb0e25cf8b8ec2cbda84fddf454e16f6f957ec8"
+      },
+      "sourceScope": "complete src tree",
+      "sourceBeforeDigest": "150bd8ae2fa15553f271b647061bbb47b5593e1361e7f9b529e68783e7351c46",
+      "sourceAfterDigest": "150bd8ae2fa15553f271b647061bbb47b5593e1361e7f9b529e68783e7351c46",
+      "durability": {
+        "fsync": "on",
+        "synchronousCommit": "on"
+      },
+      "cleanup": {
+        "processesStopped": true,
+        "postgresStopped": true,
+        "runtimeRemoved": true
+      },
+      "performance": {
+        "scenarios": {
+          "latency": {
+            "direct": {
+              "n": 100,
+              "p50": 1.94,
+              "p90": 2.93,
+              "p99": 6.52,
+              "max": 6.52
+            },
+            "gateway": {
+              "n": 100,
+              "p50": 49.57,
+              "p90": 121.95,
+              "p99": 654.25,
+              "max": 654.25
+            },
+            "p99OverheadMs": 647.73
+          },
+          "ttfb": {
+            "direct": {
+              "n": 100,
+              "p50": 3.14,
+              "p90": 3.7,
+              "p99": 5.96,
+              "max": 5.96
+            },
+            "gateway": {
+              "n": 100,
+              "p50": 43.43,
+              "p90": 47.87,
+              "p99": 115.75,
+              "max": 115.75
+            },
+            "gatewayErrors": 0,
+            "ttfbOverheadMs": 109.79
+          }
+        },
+        "violations": [
+          {
+            "scenario": "latency",
+            "metric": "p99 overhead",
+            "value": 647.73,
+            "threshold": 30,
+            "unit": "ms"
+          },
+          {
+            "scenario": "ttfb",
+            "metric": "ttfb overhead",
+            "value": 109.79,
+            "threshold": 10,
+            "unit": "ms"
+          }
+        ],
+        "settings": {
+          "requests": 100,
+          "streamSamples": 100,
+          "warmupInflight": 1,
+          "instanceCount": 3,
+          "p99OverheadMs": 30,
+          "ttfbOverheadMs": 10,
+          "noFail": false
+        }
+      },
+      "sourceChanged": false,
+      "distChanged": false,
+      "harnessChanged": false
+    },
+    {
+      "name": "c0-after-catalog-batch",
+      "rawArtifact": "/tmp/model-router-c0-after-batch-20261112/summary.json",
+      "rawSha256": "b978e4a028ebfdc034bf82ad016e7877b0066e2dbe26bc9c455abcd76e1e2d11",
+      "ok": false,
+      "promotable": false,
+      "candidateBefore": {
+        "sha": "92eebc4321520e9323395301931e4d199cda976c",
+        "clean": false,
+        "fingerprint": "ae76c126551284176c97c37be4df02822abcaae62737393821009b6a452884be"
+      },
+      "candidateAfter": {
+        "sha": "92eebc4321520e9323395301931e4d199cda976c",
+        "clean": false,
+        "fingerprint": "ae76c126551284176c97c37be4df02822abcaae62737393821009b6a452884be"
+      },
+      "sourceScope": "complete src tree",
+      "sourceBeforeDigest": "30621e21482e0b3373fdb4e81fdac266d51a14e1bf21a0e01986d3a9e77b7ce9",
+      "sourceAfterDigest": "30621e21482e0b3373fdb4e81fdac266d51a14e1bf21a0e01986d3a9e77b7ce9",
+      "durability": {
+        "fsync": "on",
+        "synchronousCommit": "on"
+      },
+      "cleanup": {
+        "processesStopped": true,
+        "postgresStopped": true,
+        "runtimeRemoved": true
+      },
+      "performance": {
+        "scenarios": {
+          "latency": {
+            "direct": {
+              "n": 100,
+              "p50": 1.78,
+              "p90": 1.95,
+              "p99": 6.13,
+              "max": 6.13
+            },
+            "gateway": {
+              "n": 100,
+              "p50": 40.78,
+              "p90": 48.84,
+              "p99": 100.6,
+              "max": 100.6
+            },
+            "p99OverheadMs": 94.47
+          },
+          "ttfb": {
+            "direct": {
+              "n": 100,
+              "p50": 2.44,
+              "p90": 2.74,
+              "p99": 4.44,
+              "max": 4.44
+            },
+            "gateway": {
+              "n": 100,
+              "p50": 41.68,
+              "p90": 51.5,
+              "p99": 286.15,
+              "max": 286.15
+            },
+            "gatewayErrors": 0,
+            "ttfbOverheadMs": 281.71
+          }
+        },
+        "violations": [
+          {
+            "scenario": "latency",
+            "metric": "p99 overhead",
+            "value": 94.47,
+            "threshold": 30,
+            "unit": "ms"
+          },
+          {
+            "scenario": "ttfb",
+            "metric": "ttfb overhead",
+            "value": 281.71,
+            "threshold": 10,
+            "unit": "ms"
+          }
+        ],
+        "settings": {
+          "requests": 100,
+          "streamSamples": 100,
+          "warmupInflight": 1,
+          "instanceCount": 3,
+          "p99OverheadMs": 30,
+          "ttfbOverheadMs": 10,
+          "noFail": false
+        }
+      },
+      "sourceChanged": false,
+      "distChanged": false,
+      "harnessChanged": false
+    }
+  ],
+  "unit": {
+    "rawArtifact": "/tmp/model-router-frozen-unit.log",
+    "rawSha256": "87af6daa661202fbbba98730183c8ff5d1a86def88d8e150b286982007180619",
+    "counts": {
+      "tests": 8234,
+      "pass": 8209,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 25,
+      "todo": 0
+    }
+  },
+  "ordinaryIntegration": {
+    "rawArtifact": "/tmp/model-router-final-repeatable-integration.log",
+    "rawSha256": "fc42be80c77524844b8608e570eb85f12469c3622213df3d41d757afd17c98d7",
+    "counts": {
+      "tests": 385,
+      "pass": 335,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 50,
+      "todo": 0
+    }
+  },
+  "performanceHost": {
+    "before": {
+      "cpus": 10,
+      "loadAverage": [
+        28.572265625,
+        12.10986328125,
+        11.04296875
+      ]
+    },
+    "after": {
+      "cpus": 10,
+      "loadAverage": [
+        23.08447265625,
+        15.41455078125,
+        12.48486328125
+      ]
+    }
+  },
+  "remainingDebt": {
+    "knipFiles": 7,
+    "knipExports": 167,
+    "knipTypes": 117,
+    "compositionFilesNotSplit": true
+  },
+  "notes": [
+    "The PG15 critical batch preserves its original 060 failure; the next entry records the repaired 7/7 result.",
+    "The complete PG18 run is 87 independent databases, 586 native tests and 210 required HTTP fixture tests, zero failures/skips.",
+    "No dirty-tree result is release evidence. C0 is still a failure; host load prevents an A/B speedup claim."
+  ]
+}
